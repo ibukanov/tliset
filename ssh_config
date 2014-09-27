@@ -1,0 +1,15 @@
+Host rkino
+  HostKeyAlias rkino
+  HostName files.mir2.org
+  AddressFamily inet
+  CheckHostIP no
+  Port 9092
+  User user
+
+Host www.hippyru.net
+  AddressFamily inet
+  CheckHostIP no
+
+Host *
+  GSSAPIAuthentication no
+  SendEnv LANG
