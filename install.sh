@@ -181,6 +181,19 @@ shift $(($OPTIND - 1))
 
 test $# -eq 0 || usage_err "Unexpected extra arguments: $@"
 
+if test -n "$show_usage"; then
+    echo "Usage: $0 [OPTION]..."
+    echo "Install or uninstall automount config for the home network."
+    echo
+    echo "  -d  dump to stdout actions to be performed without changing anything"
+    echo "  -h  show this help and exit"
+    echo "  -i  install automount config"
+    echo "  -u  uninstall automount config"
+    echo
+    echo "If neither -i nor -u is given, behave as if run with -i -d. If both -u and -i are given, run uninstall and then install."
+    exit
+fi
+
 if test -z "$install" -a -z "$uninstall"; then
     dry_run=1
     install=1
