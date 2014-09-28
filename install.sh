@@ -20,11 +20,11 @@ dry_run=
 
 loop_mount_dirs() {
     test $# -ge 1 || err "map_dirs requires an argument"
-    "$@" bergenrabbit-photo bergenrabbit.net@www.hippyru.net:/www/site/hippy.ru/html
-    "$@" hippy.ru hippy.ru@www.hippyru.net:/www/site/hippy.ru/html
-    "$@" lubava.info lubava.info@www.hippyru.net:/www/site/lubava.info/html
-    "$@" rkino user@rkino:/user
-    "$@" kino kino@dserver:/set/kino
+    "$@" bergenrabbit-photo www.hippyru.net bergenrabbit.net /www/site/hippy.ru/html
+    "$@" hippy.ru www.hippyru.net hippy.ru /www/site/hippy.ru/html
+    "$@" lubava.info www.hippyru.net lubava.info /www/site/lubava.info/html
+    "$@" rkino rkino user /user
+    test dserver = "$(hostname -s)" || "$@" kino dserver kino /set/kino
 }
 
 err() {
@@ -110,10 +110,13 @@ add_line() {
 }
 
 add_sshfs_dir() {
-    local dir remote s
+    local dir host user remote_dir s
 
     dir="$1"
-    remote="$2"
+    host="$2"
+    user="$3"
+    remote_dir="$4"
+
     s="-fstype=fuse.sshfs,"
     s="${s}rw,nodev,nosuid,noatime,allow_other,nonempty,"
     s="${s}max_read=65536,reconnect,intr,"
@@ -126,7 +129,7 @@ add_sshfs_dir() {
     s="${s}StrictHostKeyChecking=no,"
     s="${s}UserKnownHostsFile=$ssh_known_hosts,"
     s="${s}ControlPath=none"
-    add_line "$auto_map" "$mount_dir/$dir $s $remote"
+    add_line "$auto_map" "$mount_dir/$dir $s ${user}@${host}:$remote_dir"
 }
 
 do_install() {
@@ -148,7 +151,7 @@ do_install() {
 }
 
 remove_mount_dir() {
-    # $2 is ugnored
+    # $2-$4 are ignored
     rm_if_empty_dir "$mount_dir/$1"
 }
 
