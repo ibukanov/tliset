@@ -23,7 +23,8 @@ loop_mount_dirs() {
     "$@" bergenrabbit-photo bergenrabbit.net@www.hippyru.net:/www/site/hippy.ru/html
     "$@" hippy.ru hippy.ru@www.hippyru.net:/www/site/hippy.ru/html
     "$@" lubava.info lubava.info@www.hippyru.net:/www/site/lubava.info/html
-    "$@" rkino rkino:/user
+    "$@" rkino user@rkino:/user
+    "$@" kino kino@dserver:/set/kino
 }
 
 err() {
