@@ -5,10 +5,19 @@ Host rkino
   CheckHostIP no
   Port 9092
   User user
+  Ciphers aes128-gcm@openssh.com
+  MACs umac-64-etm@openssh.com
+
+Host dserver
+  AddressFamily inet
+  CheckHostIP no
+  Ciphers aes128-gcm@openssh.com
+  MACs umac-64-etm@openssh.com
 
 Host www.hippyru.net
   AddressFamily inet
   CheckHostIP no
+  Ciphers arcfour128
 
 Host *
   GSSAPIAuthentication no
