@@ -17,7 +17,9 @@ Host dserver
 Host www.hippyru.net
   AddressFamily inet
   CheckHostIP no
-  Ciphers arcfour128
+  Port 2022
+  Ciphers aes128-gcm@openssh.com
+  MACs umac-64-etm@openssh.com
 
 Host *
   GSSAPIAuthentication no

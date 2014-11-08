@@ -19,7 +19,7 @@ show_usage=
 dry_run=
 
 loop_mount_dirs() {
-    test $# -ge 1 || err "map_dirs requires an argument"
+    test $# -ge 1 || err "loop_mount_dirs requires an argument"
     "$@" bergenrabbit-photo www.hippyru.net bergenrabbit.net /www/site/hippy.ru/html
     "$@" hippy.ru www.hippyru.net hippy.ru /www/site/hippy.ru/html
     "$@" lubava.info www.hippyru.net lubava.info /www/site/lubava.info/html
