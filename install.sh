@@ -20,11 +20,13 @@ dry_run=
 
 loop_mount_dirs() {
     test $# -ge 1 || err "loop_mount_dirs requires an argument"
+
+    # Call local_dir ssh_host ssh_user remote_path
     "$@" bergenrabbit-photo www.hippyru.net bergenrabbit.net /www/site/hippy.ru/html
     "$@" hippy.ru www.hippyru.net hippy.ru /www/site/hippy.ru/html
     "$@" lubava.info www.hippyru.net lubava.info /www/site/lubava.info/html
+    "$@" kino kino user /user
     "$@" rkino rkino user /user
-    test dserver = "$(hostname -s)" || "$@" kino dserver kino /set/kino
 }
 
 err() {
@@ -110,12 +112,7 @@ add_line() {
 }
 
 add_sshfs_dir() {
-    local dir host user remote_dir s
-
-    dir="$1"
-    host="$2"
-    user="$3"
-    remote_dir="$4"
+    local dir="$1" host="$2" user="$3" remote_dir="$4" s
 
     s="-fstype=fuse.sshfs,"
     s="${s}rw,nodev,nosuid,noatime,allow_other,nonempty,"

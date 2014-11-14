@@ -1,12 +1,18 @@
-Host rkino
-  HostKeyAlias rkino
-  HostName files.mir2.org
+Host rkino kino
   AddressFamily inet
   CheckHostIP no
   Port 9092
   User user
   Ciphers aes128-gcm@openssh.com
   MACs umac-64-etm@openssh.com
+
+Host kino
+  HostKeyAlias kino
+  HostName dserver
+
+Host rkino
+  HostKeyAlias rkino
+  HostName files.mir2.org
 
 Host dserver
   AddressFamily inet
