@@ -7,7 +7,6 @@ self="$(dirname $0)"
 ssh_config=/etc/ssh/ssh_config
 auto_master=/etc/auto.master.d/tliset.autofs
 set_etc=/etc/tliset
-set_key_dir="$set_etc/ssh_keys"
 auto_map="$set_etc/automap"
 ssh_known_hosts="/var/local/sshfs_known_hosts"
 sshfs_timeout=60
@@ -17,16 +16,19 @@ install=
 uninstall=
 show_usage=
 dry_run=
+hippyru_net=
+
+
 
 loop_mount_dirs() {
-    test $# -ge 1 || err "loop_mount_dirs requires an argument"
+    local cmd="$1"
+    shift 1
 
     # Call local_dir ssh_host ssh_user remote_path
-    "$@" bergenrabbit-photo www.hippyru.net bergenrabbit.net /www/site/hippy.ru/html
-    "$@" hippy.ru www.hippyru.net hippy.ru /www/site/hippy.ru/html
-    "$@" lubava.info www.hippyru.net lubava.info /www/site/lubava.info/html
-    "$@" kino kino user /user
-    "$@" rkino rkino user /user
+    "$cmd" "$@" bergenrabbit-photo www.hippyru.net bergenrabbit.net /www/site/hippy.ru/html
+    "$cmd" "$@" hippy.ru www.hippyru.net hippy.ru /www/site/hippy.ru/html
+    "$cmd" "$@" lubava.info www.hippyru.net lubava.info /www/site/lubava.info/html
+    "$cmd" "$@" kino kino user /user
 }
 
 err() {
@@ -114,14 +116,22 @@ add_line() {
 add_sshfs_dir() {
     local dir="$1" host="$2" user="$3" remote_dir="$4" s
 
+    if [ -z "$hippyru_net" ]; then
+	case "$host" in
+	    www.hippyru.net|hippyru.net ) return 0 ;;
+	esac
+    fi
+
     s="-fstype=fuse.sshfs,"
     s="${s}rw,nodev,nosuid,noatime,allow_other,nonempty,"
     s="${s}max_read=65536,reconnect,intr,"
     s="${s}workaround=all,transform_symlinks,follow_symlinks,"
     s="${s}uid=\$UID,gid=\$GID,"
+    if [ kino = "$dir" ]; then
+	s="${s}IdentityFile=/root/.ssh/id_ed25519,"
+    fi
     s="${s}IdentityFile=\$HOME/.ssh/id_rsa,"
     s="${s}IdentityFile=\$HOME/.ssh/id_ed25519,"
-    s="${s}IdentityFile=$set_key_dir/$dir,"
     s="${s}ServerAliveInterval=5,ServerAliveCountMax=2,"
     s="${s}StrictHostKeyChecking=no,"
     s="${s}UserKnownHostsFile=$ssh_known_hosts,"
@@ -133,7 +143,7 @@ do_install() {
     if test -f "$ssh_config.orig"; then
 	cmd mv "$ssh_config" "$ssh_config.orig"
     fi
-    cmd install -m 755 -d "$set_etc" "$set_key_dir" "$mount_dir"
+    cmd install -m 755 -d "$set_etc" "$mount_dir"
     cmd install -m 644 -T "$self/ssh_config" "$ssh_config"
 
     new_file 644 "$auto_master"
@@ -159,7 +169,6 @@ do_uninstall() {
     fi
     rm_if_exists "$auto_map"
     rm_if_exists "$auto_master"
-    rm_if_empty_dir "$set_key_dir"
     rm_if_empty_dir "$set_etc"
 
     cmd systemctl restart autofs
@@ -169,11 +178,12 @@ do_uninstall() {
     rm_if_empty_dir "$mount_dir"
 }
 
-while getopts :dihu opt; do
+while getopts :dihnu opt; do
     case "$opt" in
 	d ) dry_run=1 ;;
 	i ) install=1 ;;
 	h ) show_usage=1 ;;
+	n ) hippyru_net=1 ;;
 	u ) uninstall=1 ;;
 	/? ) usage_err "option -$OPTARG requires an argument" ;;
 	* ) usage_err "unknown -$OPTARG option" ;;
@@ -190,6 +200,7 @@ if test -n "$show_usage"; then
     echo "  -d  dump to stdout actions to be performed without changing anything"
     echo "  -h  show this help and exit"
     echo "  -i  install automount config"
+    echo "  -n  install hippyru.net-related folders"
     echo "  -u  uninstall automount config"
     echo
     echo "If neither -i nor -u is given, behave as if run with -i -d. If both -u and -i are given, run uninstall and then install."
