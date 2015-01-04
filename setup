@@ -28,7 +28,7 @@ loop_mount_dirs() {
     "$cmd" "$@" bergenrabbit-photo www.hippyru.net bergenrabbit.net /www/site/hippy.ru/html
     "$cmd" "$@" hippy.ru www.hippyru.net hippy.ru /www/site/hippy.ru/html
     "$cmd" "$@" lubava.info www.hippyru.net lubava.info /www/site/lubava.info/html
-    "$cmd" "$@" kino kino user /user
+    "$cmd" "$@" kino kino-files user /user
 }
 
 err() {
@@ -185,7 +185,7 @@ while getopts :dihnu opt; do
 	h ) show_usage=1 ;;
 	n ) hippyru_net=1 ;;
 	u ) uninstall=1 ;;
-	/? ) usage_err "option -$OPTARG requires an argument" ;;
+	\? ) usage_err "option -$OPTARG requires an argument" ;;
 	* ) usage_err "unknown -$OPTARG option" ;;
     esac
 done

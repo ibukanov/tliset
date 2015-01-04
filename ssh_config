@@ -1,6 +1,6 @@
-Host kino
-  HostKeyAlias kino
-  HostName dserver
+Host kino-files
+  HostKeyAlias kino-files
+  HostName kino
   CheckHostIP no
   Port 9092
   User user
