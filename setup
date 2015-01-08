@@ -25,7 +25,7 @@ loop_mount_dirs() {
     shift 1
 
     # Call local_dir ssh_host ssh_user remote_path
-    "$cmd" "$@" bergenrabbit-photo www.hippyru.net bergenrabbit.net /www/site/hippy.ru/html
+    "$cmd" "$@" bergenrabbit-photo www.hippyru.net bergenrabbit.net /www/site/bergenrabbit.net/html/photo
     "$cmd" "$@" hippy.ru www.hippyru.net hippy.ru /www/site/hippy.ru/html
     "$cmd" "$@" lubava.info www.hippyru.net lubava.info /www/site/lubava.info/html
     "$cmd" "$@" kino kino-files user /user
