@@ -1,9 +1,8 @@
-#!/bin/sh
+#!/bin/bash
 
 set -u
 set -e
 
-self="$(dirname $0)"
 ssh_config=/etc/ssh/ssh_config
 auto_master=/etc/auto.master.d/tliset.autofs
 set_etc=/etc/tliset
@@ -103,14 +102,21 @@ new_file() {
 }
 
 add_line() {
-    local path text
-    path="$1"
-    text="$2"
+    local path="$1" text="$2"
     if test -n "$dry_run"; then
 	echo "$text"
     else
 	echo "$text" >> "$path"
     fi
+}
+
+write_file() {
+    local path="$1"
+    if [[ -n "$dry_run" ]]; then
+	cat
+    else
+	cat > "$path"
+    fi	
 }
 
 add_sshfs_dir() {
@@ -139,12 +145,42 @@ add_sshfs_dir() {
     add_line "$auto_map" "$mount_dir/$dir $s ${user}@${host}:$remote_dir"
 }
 
-do_install() {
-    if test -f "$ssh_config.orig"; then
+create_ssh_config() {
+    if [[ ! -f "$ssh_config.orig" ]]; then
 	cmd mv "$ssh_config" "$ssh_config.orig"
     fi
+    new_file 644 "$ssh_config"
+    write_file "$ssh_config" <<EOF
+Host kino-files
+  HostKeyAlias kino-files
+  AddressFamily inet
+  HostName kino
+  CheckHostIP no
+  Port 9092
+  User user
+  Ciphers aes128-gcm@openssh.com
+
+Host dserver
+  HostKeyAlias dserver
+  AddressFamily inet
+  CheckHostIP no
+  Ciphers aes128-gcm@openssh.com
+
+Host www.hippyru.net
+  AddressFamily inet
+  CheckHostIP no
+  Port 2022
+  Ciphers aes128-gcm@openssh.com
+
+Host *
+  GSSAPIAuthentication no
+  SendEnv LANG
+EOF
+}
+
+do_install() {
+    create_ssh_config
     cmd install -m 755 -d "$set_etc" "$mount_dir"
-    cmd install -m 644 -T "$self/ssh_config" "$ssh_config"
 
     new_file 644 "$auto_master"
     add_line "$auto_master" "/- file:$auto_map --timeout=$sshfs_timeout"
