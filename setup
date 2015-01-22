@@ -3,6 +3,8 @@
 set -u
 set -e
 
+tmp_files=()
+
 ssh_config=/etc/ssh/ssh_config
 auto_master=/etc/auto.master.d/tliset.autofs
 set_etc=/etc/tliset
@@ -10,6 +12,7 @@ auto_map="$set_etc/automap"
 ssh_known_hosts="/var/local/sshfs_known_hosts"
 sshfs_timeout=60
 mount_dir=/set
+files_ssh_port=9092
 
 install=
 uninstall=
@@ -17,7 +20,13 @@ show_usage=
 dry_run=
 hippyru_net=
 
+cleanup() {
+    if [[ ${#tmp_files[@]} -ge 1 ]]; then
+	rm -f "${tmp_files[@]}"
+    fi
+}
 
+trap cleanup EXIT
 
 loop_mount_dirs() {
     local cmd="$1"
@@ -66,6 +75,8 @@ cmd() {
     fi
 }
 
+
+
 rm_if_empty_dir() {
     local dir
     dir="$1"
@@ -78,9 +89,8 @@ rm_if_empty_dir() {
 }
 
 rm_if_exists() {
-    local file
-    file="$1"
-    if test -e "$file"; then
+    local file="$1"
+    if [[ -e "$file" ]]; then
 	cmd rm "$file"
     else
 	dump_seperator
@@ -88,75 +98,121 @@ rm_if_exists() {
     fi
 }
 
-new_file() {
-    local mode path
-    mode="$1"
-    path="$2"
-    rm_if_exists "$path"
-    dump_seperator
-    log "new_file $mode $path"
-    if test -z "$dry_run"; then
-	touch "$path"
-	chmod "$mode" "$path"
-    fi
-}
-
-add_line() {
-    local path="$1" text="$2"
-    if test -n "$dry_run"; then
-	echo "$text"
-    else
-	echo "$text" >> "$path"
-    fi
-}
-
+# return false if file already exists with the given content and modes
 write_file() {
-    local path="$1"
-    if [[ -n "$dry_run" ]]; then
-	cat
+    local owner=root:root mode=644 count_mode="" OPTIND opt path body dir tmp
+
+    while getopts cm:o: opt; do
+	case "$opt" in
+	    m ) mode="$OPTARG";;
+	    o ) owner="$OPTARG";;
+	    c ) count_mode=1;;
+	    * ) err "bad write_file usage";;
+	esac
+    done
+    shift $(($OPTIND - 1))
+    [[ $# -ge 1 ]] || err "write_file - missing path argument"
+    [[ $# -le 2 ]] || err "write_file - too many arguments"
+
+    path="$1"
+    if [[ $# -ge 2 ]]; then
+	body="$2"
     else
-	cat > "$path"
-    fi	
+	body="$(cat)"
+    fi
+
+    dump_seperator
+    log "write_file $owner $mode $path"
+    if [[ -n "$dry_run" ]]; then
+	[[ -z "$body" ]] || cat <<< "$body"
+	return 0
+    fi
+
+    while true; do
+	if [[ ! -f "$path" || -L "$path" ]]; then
+	    break;
+	fi
+	if [[ "$(stat -c %U:%G:%a "$path")" != "${owner}:${mode}" ]]; then
+	    break;
+	fi
+
+	if [[ -z "$body" ]]; then
+	    if [[ "$(stat -c %s "$path")" -ne 0 ]]; then
+		break;
+	    fi
+	else
+	    # Use comm as diff may not be available like in coreos
+	    if [[ -n "$(comm --nocheck-order -3 "$path" /dev/stdin <<< "$body")" ]]; then
+		break;
+	    fi
+	fi
+
+	# No need to write anything
+	info "skipping update of a file with identical content, ownership and permissions"
+	if [[ -n "$count_mode" ]]; then
+	    return 0
+	fi
+	return 1
+    done
+
+    mkdir -p "$(dirname "$path")"
+
+    # Use temporary to ensure atomic operation on filesystem
+    tmp="$(mktemp "$path.XXXXXXXXXX")"
+    tmp_files+=($tmp)
+    if [[ -n "$body" ]]; then
+	cat <<< "$body"  > "$tmp"
+    fi
+    chmod "$mode" "$tmp"
+    chown "$owner" "$tmp"
+    mv -f "$tmp" "$path"
+
+    if [[ -n "$count_mode" ]]; then
+	let written_files_count+=1
+    fi
+    return 0
 }
 
-add_sshfs_dir() {
+print_sshfs_dir() {
     local dir="$1" host="$2" user="$3" remote_dir="$4" s
 
-    if [ -z "$hippyru_net" ]; then
+    if [[ -z "$hippyru_net" ]]; then
 	case "$host" in
 	    www.hippyru.net|hippyru.net ) return 0 ;;
 	esac
     fi
 
-    s="-fstype=fuse.sshfs,"
-    s="${s}rw,nodev,nosuid,noatime,allow_other,nonempty,"
-    s="${s}max_read=65536,reconnect,intr,"
-    s="${s}workaround=all,transform_symlinks,follow_symlinks,"
-    s="${s}uid=\$UID,gid=\$GID,"
-    if [ kino = "$dir" ]; then
-	s="${s}IdentityFile=/root/.ssh/id_ed25519,"
+    s="-fstype=fuse.sshfs"
+    s+=",rw,nodev,nosuid,noatime,allow_other,nonempty"
+    s+=",max_read=65536,reconnect,intr"
+    s+=",workaround=all,transform_symlinks,follow_symlinks"
+    s+=",uid=\$UID,gid=\$GID"
+    if [[ "$dir" == kino ]]; then
+	s+=",IdentityFile=/root/.ssh/id_ed25519"
     fi
-    s="${s}IdentityFile=\$HOME/.ssh/id_rsa,"
-    s="${s}IdentityFile=\$HOME/.ssh/id_ed25519,"
-    s="${s}ServerAliveInterval=5,ServerAliveCountMax=2,"
-    s="${s}StrictHostKeyChecking=no,"
-    s="${s}UserKnownHostsFile=$ssh_known_hosts,"
-    s="${s}ControlPath=none"
-    add_line "$auto_map" "$mount_dir/$dir $s ${user}@${host}:$remote_dir"
+    s+=",IdentityFile=\$HOME/.ssh/id_rsa"
+    s+=",IdentityFile=\$HOME/.ssh/id_ed25519"
+    s+=",ServerAliveInterval=5,ServerAliveCountMax=2"
+    s+=",StrictHostKeyChecking=no"
+    s+=",UserKnownHostsFile=$ssh_known_hosts"
+    s+=",ControlPath=none"
+    printf '%s %s %s\n' "$mount_dir/$dir" "$s" "${user}@${host}:$remote_dir"
 }
 
 create_ssh_config() {
     if [[ ! -f "$ssh_config.orig" ]]; then
 	cmd mv "$ssh_config" "$ssh_config.orig"
     fi
-    new_file 644 "$ssh_config"
     write_file "$ssh_config" <<EOF
+Match originalhost kino-files exec "grep -q '^nameserver[[:space:]]\+192.168.2.1$' /etc/resolv.conf"
+  HostName kino
+
 Host kino-files
   HostKeyAlias kino-files
   AddressFamily inet
-  HostName kino
   CheckHostIP no
-  Port 9092
+  HostName dsrv.duckdns.org
+  Port $files_ssh_port
   User user
   Ciphers aes128-gcm@openssh.com
 
@@ -178,19 +234,61 @@ Host *
 EOF
 }
 
+setup_transmission_redirect() {
+    write_file -m 755 "$set_etc/is-online" <<'EOF'
+#!/bin/bash
+set -e -u
+status="$(nmcli -f STATE -t g)"
+[[ "$status" == connected || "$status" == "connected (site only)" ]]
+EOF
+
+    write_file /etc/systemd/system/transmission-homenet.socket <<EOF
+[Socket]
+ListenStream=127.0.0.1:$files_ssh_port
+Accept=true
+
+EOF
+
+    write_file /etc/systemd/system/transmission-homenet@.service <<EOF
+[Unit]
+Requires=transmission-homenet.socket
+
+[Service]
+ExecStart=/usr/bin/ssh -W127.0.0.1:9080 kino-files
+StandardInput=socket
+
+EOF
+    write_file -m 755 /etc/NetworkManager/dispatcher.d/90-online-monitor <<EOF
+#!/bin/bash
+
+set -e -u
+
+if $set_etc/is-online; then
+    systemctl start transmission-homenet.socket
+else
+    systemctl stop transmission-homenet.socket
+fi
+EOF
+}
+
 do_install() {
     create_ssh_config
     cmd install -m 755 -d "$set_etc" "$mount_dir"
 
-    new_file 644 "$auto_master"
-    add_line "$auto_master" "/- file:$auto_map --timeout=$sshfs_timeout"
+    write_file "$auto_master" "/- file:$auto_map --timeout=$sshfs_timeout"
 
-    new_file 644 "$auto_map"
-    loop_mount_dirs add_sshfs_dir
+    loop_mount_dirs print_sshfs_dir | write_file "$auto_map"
 
-    new_file 644 "$ssh_known_hosts"
+    write_file "$ssh_known_hosts" ""
 
+    setup_transmission_redirect
+
+    cmd systemctl daemon-reload
+    if "$set_etc/is-online"; then
+	cmd systemctl start transmission-homenet.socket
+    fi
     cmd systemctl restart autofs
+    cmd systemctl enable NetworkManager-dispatcher
 }
 
 remove_mount_dir() {
@@ -205,13 +303,22 @@ do_uninstall() {
     fi
     rm_if_exists "$auto_map"
     rm_if_exists "$auto_master"
-    rm_if_empty_dir "$set_etc"
 
     cmd systemctl restart autofs
 
     rm_if_exists "$ssh_known_hosts"
     loop_mount_dirs remove_mount_dir
     rm_if_empty_dir "$mount_dir"
+
+    if [[ -e /etc/systemd/system/transmission-homenet.socket ]]; then
+	cmd systemctl stop transmission-homenet.socket
+    fi
+    rm_if_exists /etc/systemd/system/transmission-homenet.socket
+    rm_if_exists /etc/systemd/system/transmission-homenet@.service
+
+    rm_if_exists /etc/NetworkManager/dispatcher.d/90-online-monitor
+    rm_if_exists "$set_etc/is-online"
+    rm_if_empty_dir "$set_etc"
 }
 
 while getopts :dihnu opt; do
