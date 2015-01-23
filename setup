@@ -187,11 +187,6 @@ print_sshfs_dir() {
     s+=",max_read=65536,reconnect,intr"
     s+=",workaround=all,transform_symlinks,follow_symlinks"
     s+=",uid=\$UID,gid=\$GID"
-    if [[ "$dir" == kino ]]; then
-	s+=",IdentityFile=/root/.ssh/id_ed25519"
-    fi
-    s+=",IdentityFile=\$HOME/.ssh/id_rsa"
-    s+=",IdentityFile=\$HOME/.ssh/id_ed25519"
     s+=",ServerAliveInterval=5,ServerAliveCountMax=2"
     s+=",StrictHostKeyChecking=no"
     s+=",UserKnownHostsFile=$ssh_known_hosts"
@@ -203,16 +198,24 @@ create_ssh_config() {
     if [[ ! -f "$ssh_config.orig" ]]; then
 	cmd mv "$ssh_config" "$ssh_config.orig"
     fi
-    write_file "$ssh_config" <<EOF
-Match originalhost kino-files exec "grep -q '^nameserver[[:space:]]\+192.168.2.1$' /etc/resolv.conf"
-  HostName kino
 
+    # In ssh that comes with Fedora 20 Match block is not supported. 
+    local match=""
+    if ! ssh -V 2>&1 | grep -q ^OpenSSH_6.4; then
+	match="\
+Match originalhost kino-files exec $set_etc/is-outside-home-net
+  HostName dsrv.duckdns.org
+"
+    fi
+
+    write_file "$ssh_config" <<EOF
+$match
 Host kino-files
   HostKeyAlias kino-files
   AddressFamily inet
   CheckHostIP no
-  HostName dsrv.duckdns.org
   Port $files_ssh_port
+  HostName kino
   User user
   Ciphers aes128-gcm@openssh.com
 
@@ -234,14 +237,20 @@ Host *
 EOF
 }
 
-setup_transmission_redirect() {
+write_helper_utils() {
     write_file -m 755 "$set_etc/is-online" <<'EOF'
 #!/bin/bash
-set -e -u
 status="$(nmcli -f STATE -t g)"
 [[ "$status" == connected || "$status" == "connected (site only)" ]]
 EOF
 
+    write_file -m 755 "$set_etc/is-outside-home-net" <<'EOF'
+#!/bin/bash
+! grep -q '^nameserver[[:space:]]\+192.168.2.1$' /etc/resolv.conf
+EOF
+}
+
+setup_transmission_redirect() {
     write_file /etc/systemd/system/transmission-homenet.socket <<EOF
 [Socket]
 ListenStream=127.0.0.1:$files_ssh_port
@@ -254,15 +263,14 @@ EOF
 Requires=transmission-homenet.socket
 
 [Service]
-ExecStart=/usr/bin/ssh -W127.0.0.1:9080 kino-files
+ExecStart=/usr/bin/ssh -W127.0.0.1:9080 \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=$ssh_known_hosts \
+  kino-files
 StandardInput=socket
 
 EOF
     write_file -m 755 /etc/NetworkManager/dispatcher.d/90-online-monitor <<EOF
 #!/bin/bash
-
-set -e -u
-
 if $set_etc/is-online; then
     systemctl start transmission-homenet.socket
 else
@@ -281,6 +289,8 @@ do_install() {
 
     write_file "$ssh_known_hosts" ""
 
+    write_helper_utils
+    
     setup_transmission_redirect
 
     cmd systemctl daemon-reload
@@ -318,6 +328,7 @@ do_uninstall() {
 
     rm_if_exists /etc/NetworkManager/dispatcher.d/90-online-monitor
     rm_if_exists "$set_etc/is-online"
+    rm_if_exists "$set_etc/is-outside-home-net"
     rm_if_empty_dir "$set_etc"
 }
 
