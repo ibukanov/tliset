@@ -263,7 +263,7 @@ EOF
 Requires=transmission-homenet.socket
 
 [Service]
-ExecStart=/usr/bin/ssh -W127.0.0.1:9080 \
+ExecStart=/usr/bin/ssh -W127.0.0.1:9091 \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=$ssh_known_hosts \
   kino-files
 StandardInput=socket
