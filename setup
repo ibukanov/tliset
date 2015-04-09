@@ -36,7 +36,7 @@ loop_mount_dirs() {
     "$cmd" "$@" bergenrabbit-photo www.hippyru.net bergenrabbit.net /www/site/bergenrabbit.net/photo
     "$cmd" "$@" hippy.ru www.hippyru.net hippy.ru /www/site/hippy.ru
     "$cmd" "$@" lubava.info www.hippyru.net lubava.info /www/site/lubava.info
-    "$cmd" "$@" kino kino-files user /user
+    "$cmd" "$@" kino kino-files user /data/files
 }
 
 err() {
