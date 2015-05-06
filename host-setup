@@ -2,9 +2,7 @@
 
 set -u
 set -e
-
-show_usage=""
-NAME=""
+set -o pipefail
 
 tmp_files=()
 
@@ -27,31 +25,74 @@ usage_err() {
     exit 1
 }
 
-info() {
+log() {
     printf '%s\n' "$*" 1>&2
 }
 
-# return false if file already exists with the given content and modes
-write_file() {
-    local owner=root:root mode=644 count_mode="" OPTIND opt path body dir tmp
+get_temp() {
+    if [[ $# -ge 1 ]]; then
+	tmp="$(mktemp "$1.XXXXXXXXXX")"
+    else
+	tmp="$(mktemp)"
+    fi
+    tmp_files+=("$tmp")
+}
 
-    while getopts cm:o: opt; do
+# mkdir -p -m mode path does not apply mode to the intermediate
+# directories it creates.
+ensure_dir() {
+    local mode=755 OPTIND opt dir
+
+    while getopts m: opt; do
 	case "$opt" in
 	    m ) mode="$OPTARG";;
-	    o ) owner="$OPTARG";;
-	    c ) count_mode=1;;
-	    * ) err "bad write_file usage";;
+	    * ) err "bad ensure_dir usage";;
 	esac
     done
     shift $(($OPTIND - 1))
+    [[ $# -ge 1 ]] || err "ensure_dir - missing dir argument"
+    [[ $# -le 2 ]] || err "ensure_dir - too many arguments"
+    dir="$1"
+    if [[ ! -d "$dir" ]]; then
+	ensure_dir -m "$mode" "$(dirname "$dir")"
+	mkdir -m "$mode" "$dir"
+    fi
+}
+
+write_file_update=''
+write_file_count=0
+
+write_file() {
+    local owner=root:root mode=644 exec_cmd="" log_message="" log_message_default=""
+    local OPTIND opt path body dir
+
+    write_file_update=''
+    while getopts eLl:m:o: opt; do
+	case "$opt" in
+	    e ) exec_cmd=1;;
+	    L ) log_message_default=1;;
+	    l ) log_message="$OPTARG";;
+	    m ) mode="$OPTARG";;
+	    o ) owner="$OPTARG";;
+	    * ) err "bad write_file usage";;
+	esac
+    done
+    
+    shift $(($OPTIND - 1))
     [[ $# -ge 1 ]] || err "write_file - missing path argument"
     [[ $# -le 2 ]] || err "write_file - too many arguments"
+    [[ -z "$exec_cmd" || $# -ge 2 ]] || err "write_file - -e option requires command argument"
+    [[ -z "$log_message" || -z "$log_message_default" ]] || \
+	err "write_file - only one of -l , -L can be given"
 
     path="$1"
-    if [[ $# -ge 2 ]]; then
-	body="$2"
-    else
+    shift
+    if [[ $# -eq 0 ]]; then
 	body="$(cat)"
+    elif [[ -n "$exec_cmd" ]]; then
+	body="$("$@")"
+    else
+	body="$1"
     fi
 
     while true; do
@@ -68,28 +109,26 @@ write_file() {
 	fi
 
 	# No need to write anything
-	if [[ -n "$count_mode" ]]; then
-	    return 0
-	fi
-	return 1
+	return
     done
 
-    mkdir -p "$(dirname "$path")"
+    if [[ -n "$log_message" ]]; then
+	log "$log_message"
+    fi
+    if [[ -n "$log_message_default" ]]; then
+	log "Updating $path"
+    fi
+    ensure_dir "$(dirname "$path")"
 
     # Use temporary to ensure atomic operation on filesystem
-    tmp="$(mktemp "$path.XXXXXXXXXX")"
-    tmp_files+=($tmp)
-    if [[ -n "$body" ]]; then
-	cat <<< "$body"  > "$tmp"
-    fi
+    get_temp "$path"
+    cat <<< "$body"  > "$tmp"
     chmod "$mode" "$tmp"
     chown "$owner" "$tmp"
     mv -f "$tmp" "$path"
 
-    if [[ -n "$count_mode" ]]; then
-	let written_files_count+=1
-    fi
-    return 0
+    write_file_update=1
+    let write_file_count+=1
 }
 
 is_valid_hostname() {
@@ -103,7 +142,7 @@ fixup_transgui() {
     local path=/usr/share/applications/transgui.desktop
     local line='MimeType=application/x-bittorrent;x-scheme-handler/magnet;'
     if ! grep -q "^$line\$" "$path" ; then
-	info "fixing $path"
+	log "fixing $path"
 	local data="$(cat "$path" | grep -v '^MimeType=')"
 	local tmp="$(mktemp "$path.XXXXXXXXXX")"
 	tmp_files+=($tmp)
@@ -115,10 +154,10 @@ fixup_transgui() {
 
 
 setup_packages() {
-    info "Checking packages"
+    log "Checking packages"
 
     if ! rpm -q --quiet rpmfusion-free-release rpmfusion-nonfree-release ; then
-	info "Installing rpmfusion"
+	log "Installing rpmfusion"
 	local rpmfusion=http://download1.rpmfusion.org
 	local fedora_release=$(rpm -E %fedora)
 	dnf install -y --nogpgcheck \
@@ -187,7 +226,7 @@ setup_packages() {
     esac
 
     if ! rpm -q --quiet "${list[@]}" ; then
-	info "Installing missing packages"
+	log "Installing missing packages"
 	dnf install -y "${list[@]}"
 	printf 'new-session\n' > /etc/tmux.conf
     fi
@@ -203,14 +242,13 @@ setup_packages() {
 setup_fstab() {
     local fstab ids edits id disk
     if [[ "$NAME" == dserver ]]; then
-	info "Checking /etc/fstab"
-
+	log "Checking /etc/fstab"
 	fstab="$(cat /etc/fstab)"
 	# Replace lables/uids with real devices in fstab for security
 	# as an untrusted VM will access the whole disk.
-	ids=($(egrep -o '^UUID=[A-Fa-f0-9-]+' <<< "$fstab" | cut -d= -f2 ))
+	ids=($(egrep -o '^UUID=[A-Fa-f0-9-]+' <<< "$fstab" | cut -d= -f2 || true))
 	if [[ ${#ids[@]} -ge 1 ]]; then
-	    info "replacing UUID with devices for security with untrusted VM"
+	    log "replacing UUID with devices for security with untrusted VM"
 	    edits=()
 	    for id in "${ids[@]}"; do
 		[[ -b "/dev/disk/by-uuid/$id" ]] || err "failed to locate disk for uuid=$id"
@@ -229,8 +267,9 @@ setup_fstab() {
 /dev/sda2 /area/kino ext4 noauto,noatime,discard
 #custom-end#'
 
-	if write_file /etc/fstab "$fstab"; then
-	    info "/etc/fstab was updated"
+	write_file /etc/fstab "$fstab"
+	if [[ -n "$write_file_update" ]]; then
+	    log "/etc/fstab was updated"
 	fi
 	mkdir -p /area/backup
 	mkdir -p /area/kino
@@ -240,7 +279,7 @@ setup_fstab() {
 setup_grub() {
     local key custom_grub_defaults edits grub_defaults_text grub_config
     local -A config
-    info "Checking grub"
+    log "Checking grub"
 
     config=(
 	[GRUB_DEFAULT]=saved
@@ -275,32 +314,17 @@ setup_grub() {
     [[ -f "$grub_config" ]] || grub_config=/boot/efi/EFI/fedora/grub.cfg
     [[ -f "$grub_config" ]] || err "Failed to locate grub.cfg"
 
-    if write_file /etc/default/grub "$grub_defaults_text"; then
-	info "updating $grub_config"
+    write_file /etc/default/grub "$grub_defaults_text"
+    if [[ -n "$write_file_update" ]]; then
+	log "updating $grub_config"
 	grub2-mkconfig -o "$grub_config"
-    fi
-}
-
-setup_zram() {
-    info "Checking zram"
-    echo "SWAP_SIZE=200%" > /etc/sysconfig/zram
-    if [[ ! -f /usr/bin/zram-status ]]; then
-	info "installing zram support"
-	git clone https://github.com/ibukanov/zram-utils.git /tmp/zram-utils
-	/tmp/zram-utils/setup install
-	rm -rf /tmp/zram-utils
-    fi
-    if write_file /etc/sysconfig/zram "SWAP_SIZE=200%"; then
-	info "enabling zram"
-	systemctl enable zram
-	systemctl start zram
     fi
 }
 
 setup_network() {
     local -A hosts
     local hosts_text key edits
-    info "Checking network"
+    log "Checking network"
 
     hosts=(
 	[kino]=192.168.2.9
@@ -328,27 +352,28 @@ setup_network() {
 
     hosts_text="$(sed "${edits[@]}" /etc/hosts)$hosts_text"
 
-    if write_file /etc/hosts "$hosts_text"; then
-	info "updated /etc/hosts"
+    write_file /etc/hosts "$hosts_text"
+    if [[ -n "$write_file_update" ]]; then
+	log "updated /etc/hosts"
     fi
 
     if [[ "$NAME" == dserver ]]; then
 	systemctl disable firewalld
 
 	if rpm -q --quiet NetworkManager ; then
-	    info "disabling NetworkManager"
+	    log "disabling NetworkManager"
 	    systemctl disable NetworkManager
 	    systemctl stop NetworkManager
 	    dnf remove -y NetworkManager
 	fi
 
-	written_files_count=0
-	write_file -c /etc/systemd/network/80-br0.netdev <<EOF
+	write_file_count=0
+	write_file /etc/systemd/network/80-br0.netdev <<EOF
 [NetDev]
 Name=br0
 Kind=bridge
 EOF
-	write_file -c /etc/systemd/network/80-br0.network <<EOF
+	write_file /etc/systemd/network/80-br0.network <<EOF
 [Match]
 Name=br0
 [Network]
@@ -356,14 +381,14 @@ Address=192.168.2.10/24
 Gateway=192.168.2.1
 DNS=192.168.2.1
 EOF
-	write_file -c /etc/systemd/network/80-local.network <<EOF
+	write_file /etc/systemd/network/80-local.network <<EOF
 [Match]
 Name=enp4s0
 [Network]
 Bridge=br0
 EOF
-	if [[ "$written_files_count" -gt 0 ]]; then
-	    info "enabling/updating systemd-networkd config"
+	if [[ $write_file_count -gt 0 ]]; then
+	    log "enabling/updating systemd-networkd config"
 	    systemctl enable systemd-networkd
 	    systemctl start systemd-networkd
 	    systemctl restart systemd-networkd
@@ -371,7 +396,7 @@ EOF
 
 	if [[ ! -L /etc/resolv.conf || \
 		    "$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
-	    info "enabling systemd-resolved"
+	    log "enabling systemd-resolved"
 	    systemctl enable systemd-resolved
 	    systemctl start systemd-resolved
 	    ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
@@ -386,7 +411,7 @@ setup_autofs() {
     if [[ "$setup_path" -nt /etc/tliset/.installed ]]; then
 	local flags=(-u -i)
 	if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
-	    flags+=(-n)
+	    flags+=(-n -l)
 	fi
 	"$setup_path" "${flags[@]}"
 	touch /etc/tliset/.installed
@@ -394,7 +419,7 @@ setup_autofs() {
 }
 
 setup_ssh() {
-    info "Checking ssh"
+    log "Checking ssh"
     mkdir -p -m 0700 /root/.ssh
     case "$NAME" in
 	miranda | ultrabook )
@@ -406,7 +431,7 @@ setup_ssh() {
 	    for key_type in ed25519 rsa; do
 		local subpath=".ssh/id_$key_type"
 		if [[ ! -f "/root/$subpath" && -e "/home/$mainuser/$subpath" ]]; then
-		    info "Linking administrator ssh $key_type as the key for the root user"
+		    log "Linking administrator ssh $key_type as the key for the root user"
 		    rm -f "/root/$subpath" "/root/$subpath.pub"
 		    ln -s "/home/$mainuser/$subpath" "/root/$subpath"
 		    ln -s -f "/home/$mainuser/$subpath.pub" "/root/$subpath.pub"
@@ -415,7 +440,7 @@ setup_ssh() {
 	    ;;
 	* )
 	    if [[ ! -f /root/.ssh/id_ed25519 ]]; then
-		info "Generating ssh key for the root user"
+		log "Generating ssh key for the root user"
 		ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
 	    fi
 	    ;;
@@ -429,7 +454,7 @@ Ciphers chacha20-poly1305@openssh.com,aes256-ctr,aes128-ctr,aes128-gcm@openssh.c
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-ripemd160-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,hmac-ripemd160,umac-128@openssh.com
 
 SyslogFacility AUTHPRIV
-AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u /etc/ssh/authorized_keys/root
 PasswordAuthentication no
 ChallengeResponseAuthentication no
 GSSAPIAuthentication no
@@ -440,19 +465,23 @@ Subsystem sftp /usr/libexec/openssh/sftp-server
 "
     local root_authorized_keys="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuRT02EgmvQdI96X/qGdUCCSUbTHlvRiHuF0BKpNhch igor@localhost.localdomain"
 
-    # Allow root to ssh to self for debugging
-    root_authorized_keys+="$(printf '\n%s' "$(cat /root/.ssh/id_ed25519.pub)")"
+    if [[ "$NAME" == dserver ]]; then
+	# Allow root to ssh to self for debugging
+	root_authorized_keys+="$(printf '\n%s' "$(cat /root/.ssh/id_ed25519.pub)")"
+    fi
 
-    if [[ dserver == "$NAME" ]]; then
-	if write_file /etc/ssh/sshd_config "$sshd_config"; then
-	    info "Updating /etc/ssh/sshd_config"
+    if [[ "$NAME" == dserver || "$NAME" == ultrabook ]]; then
+	write_file /etc/ssh/sshd_config "$sshd_config"
+	if [[ -n "$write_file_update" ]]; then
+	    log "Updating /etc/ssh/sshd_config"
 	    systemctl enable sshd
 	    systemctl start sshd
 	    systemctl reload sshd
 	fi
 
-	if write_file -m 640 /etc/ssh/authorized_keys/root "$root_authorized_keys" ; then
-	    info "updated /etc/ssh/authorized_keys/root"
+	write_file -m 644 /etc/ssh/authorized_keys/root "$root_authorized_keys"
+	if [[ -n "$write_file_update" ]]; then
+	    log "updated /etc/ssh/authorized_keys/root"
 	fi
     fi
 }
@@ -467,7 +496,7 @@ add_user() {
 }
 
 setup_users() {
-    info "Checking users"
+    log "Checking users"
     add_user lubava 1978
     if [[ "$NAME" == dserver ]]; then
 	add_user kino 1001
@@ -475,20 +504,27 @@ setup_users() {
 }
 
 setup_docker() {
-    info "Checking docker"
+    log "Checking docker"
     local config="
 [Service]
 MountFlags=private
 "
     mkdir -p /etc/systemd/system/docker.service.d
-    if write_file /etc/systemd/system/docker.service.d/local.conf "$config" ; then
-	info "updated /etc/systemd/system/docker.service.d/local.conf"
+    write_file /etc/systemd/system/docker.service.d/local.conf "$config"
+    if [[ -n "$write_file_update" ]]; then
+	log "updated /etc/systemd/system/docker.service.d/local.conf"
 	systemctl daemon-reload
     fi
     systemctl enable docker
 }
 
-while getopts :hn: opt; do
+. "$(dirname "$0")/zram-setup"
+
+show_usage=""
+NAME=""
+remote=""
+
+while getopts :hn:r: opt; do
     case "$opt" in
 	h ) show_usage=1 ;;
 	n )
@@ -496,26 +532,40 @@ while getopts :hn: opt; do
 	    is_valid_hostname "$NAME" || \
 		usage_err "The value of -n argument '$NAME' is not a known host name."
 	    ;;
+	r )
+	    remote="$OPTARG"
+	    is_valid_hostname "$remote" || \
+		usage_err "The value of -n argument '$remote' is not a known host name."
+	    ;;
 	\? ) usage_err "option -$OPTARG requires an argument" ;;
 	* ) usage_err "unknown -$OPTARG option" ;;
     esac
 done
 shift $(($OPTIND - 1))
 
-test $# -eq 0 || usage_err "Unexpected extra arguments: $@"
+[[ $# -eq 0 ]] || usage_err "Unexpected extra arguments: $@"
 
-if test -n "$show_usage"; then
+[[ -z "$NAME" || -z "$remote" ]] || usage_err "Only one of -n, -r can be given"
+
+if [[ -n "$show_usage" ]]; then
     echo "Usage: $0 [OPTION]..."
     echo "Customize installation for the given computer."
     echo
     echo "  -h  show this help and exit"
-    echo "  -n name  assume the given name as the hostname rather than use /etc/hostname ."
+    echo "  -n name  assume the given name as the hostname rather than use /etc/hostname."
     echo "           The valid values are dserver, miranda, ultrabook."
+    echo "  -r name  execute setup on the remote machine name using ssh to copy the setup files."
     echo
     exit
 fi
 
-if [ -z "$NAME" ]; then
+if [[ -n "$remote" ]]; then
+    tar -C "$(dirname "$0")" -czf - . | \
+	ssh "$remote" "rm -rf /tmp/tliset && mkdir /tmp/tliset && tar -C /tmp/tliset -xzf - && /tmp/tliset/host-setup -n '$remote'"
+    exit
+fi
+
+if [[ -z "$NAME" ]]; then
     IFS='' read NAME < /etc/hostname
     if ! is_valid_hostname "$NAME"; then
 	err "The content of /etc/hostname is '$NAME' is not a supported name." \
@@ -528,6 +578,8 @@ else
     fi
     echo "$NAME" > /etc/hostname
 fi
+
+
 
 setup_fstab
 setup_packages

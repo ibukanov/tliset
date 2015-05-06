@@ -19,6 +19,10 @@ uninstall=
 show_usage=
 dry_run=
 hippyru_net=
+dserver_lubava=
+
+has_nm=1
+[[ -x /usr/sbin/NetworkManager ]] || has_nm=''
 
 cleanup() {
     if [[ ${#tmp_files[@]} -ge 1 ]]; then
@@ -37,6 +41,7 @@ loop_mount_dirs() {
     "$cmd" "$@" hippy.ru www.hippyru.net hippy.ru /www/site/hippy.ru
     "$cmd" "$@" lubava.info www.hippyru.net lubava.info /www/site/lubava.info
     "$cmd" "$@" kino kino-files user /data/files
+    "$cmd" "$@" dserver-lubava dserver lubava /home/lubava
 }
 
 err() {
@@ -181,6 +186,11 @@ print_sshfs_dir() {
 	    www.hippyru.net|hippyru.net ) return 0 ;;
 	esac
     fi
+    if [[ -z "$dserver_lubava" ]]; then
+	if [[ "$dir" == dserver-lubava ]]; then
+	   return 0
+	fi
+    fi
 
     s="-fstype=fuse.sshfs"
     s+=",rw,nodev,nosuid,noatime,allow_other,nonempty"
@@ -238,11 +248,19 @@ EOF
 }
 
 write_helper_utils() {
-    write_file -m 755 "$set_etc/is-online" <<'EOF'
+
+    if [[ -n "$has_nm" ]]; then
+	write_file -m 755 "$set_etc/is-online" <<'EOF'
 #!/bin/bash
 status="$(nmcli -f STATE -t g)"
 [[ "$status" == connected || "$status" == "connected (site only)" ]]
 EOF
+    else
+	write_file -m 755 "$set_etc/is-online" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+    fi
 
     write_file -m 755 "$set_etc/is-outside-home-net" <<'EOF'
 #!/bin/bash
@@ -269,7 +287,9 @@ ExecStart=/usr/bin/ssh -W127.0.0.1:9091 \
 StandardInput=socket
 
 EOF
-    write_file -m 755 /etc/NetworkManager/dispatcher.d/90-online-monitor <<EOF
+
+    if [[ -n "$has_nm" ]]; then
+	write_file -m 755 /etc/NetworkManager/dispatcher.d/90-online-monitor <<EOF
 #!/bin/bash
 if $set_etc/is-online; then
     systemctl start transmission-homenet.socket
@@ -277,6 +297,7 @@ else
     systemctl stop transmission-homenet.socket
 fi
 EOF
+    fi
 }
 
 do_install() {
@@ -298,7 +319,9 @@ do_install() {
 	cmd systemctl start transmission-homenet.socket
     fi
     cmd systemctl restart autofs
-    cmd systemctl enable NetworkManager-dispatcher
+    if [[ -n "$has_nm" ]]; then
+	cmd systemctl enable NetworkManager-dispatcher
+    fi
 }
 
 remove_mount_dir() {
@@ -332,12 +355,13 @@ do_uninstall() {
     rm_if_empty_dir "$set_etc"
 }
 
-while getopts :dihnu opt; do
+while getopts :dihlnu opt; do
     case "$opt" in
 	d ) dry_run=1 ;;
 	i ) install=1 ;;
 	h ) show_usage=1 ;;
 	n ) hippyru_net=1 ;;
+	l ) dserver_lubava=1 ;;
 	u ) uninstall=1 ;;
 	\? ) usage_err "option -$OPTARG requires an argument" ;;
 	* ) usage_err "unknown -$OPTARG option" ;;
@@ -354,7 +378,8 @@ if test -n "$show_usage"; then
     echo "  -d  dump to stdout actions to be performed without changing anything"
     echo "  -h  show this help and exit"
     echo "  -i  install automount config"
-    echo "  -n  install hippyru.net-related folders"
+    echo "  -n  enable hippyru.net-related folders"
+    echo "  -l  enable dserver-lubava"
     echo "  -u  uninstall automount config"
     echo
     echo "If neither -i nor -u is given, behave as if run with -i -d. If both -u and -i are given, run uninstall and then install."

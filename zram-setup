@@ -1,0 +1,106 @@
+#!/bin/bash
+
+setup_zram() {
+    local reload_systemd=''
+    
+    log "Checking zram"
+
+    write_file -L -m 755 /usr/bin/zram-status <<'EOF'
+#!/usr/bin/bash
+
+set -u
+set -e
+
+dir=/sys/block/zram0
+if [ ! -d "$dir" ]; then
+    echo "status: disabled"
+    exit 0
+fi
+
+mem_used_total="$(cat $dir/mem_used_total)"
+orig_data_size="$(cat $dir/orig_data_size)"
+
+echo "status: enabled"
+echo "compressed_size: $(($mem_used_total * 100 / $orig_data_size))%"
+echo "disksize: $(($(cat $dir/disksize) / 1048576))M"
+echo "compr_data_size: $(($(cat $dir/compr_data_size) / 1024))K"
+echo "orig_data_size: $(($orig_data_size / 1024))K"
+echo "mem_used_total: $(($mem_used_total / 1024))K"
+echo "max_comp_streams: $(cat $dir/max_comp_streams)"
+echo "comp_algorithm: $(cat $dir/comp_algorithm)"
+EOF
+
+    write_file -L /etc/systemd/system/zram.service <<EOF
+[Unit]
+Description=Service enabling RAM compression using zRam
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/tliset/zram-enable
+ExecStop=/etc/tliset/zram-disable
+RemainAfterExit=yes
+EOF
+    if [[ -n "$write_file_update" ]]; then
+	reload_systemd=1
+    fi
+
+    write_file -L -m 755 /etc/tliset/zram-enable <<'EOF'
+#!/usr/bin/bash
+
+set -u
+set -e
+
+EXTRA_DEVICES=0
+
+read ignore memtotal < <(grep -o '\<MemTotal:\s\+[0-9]\+' /proc/meminfo)
+SWAP_SIZE=$(($memtotal * 2 * 1024))
+
+num_cpus=$(grep -c processor /proc/cpuinfo)
+if [[ 0 = "$num_cpus" ]]; then
+    num_cpus=1
+fi
+
+/usr/sbin/rmmod zram > /dev/null 2>&1 || true
+/usr/sbin/modprobe -q zram num_devices=$((1 + $EXTRA_DEVICES)) > /dev/null 2>&1
+
+echo $num_cpus > /sys/block/zram0/max_comp_streams
+echo "${SWAP_SIZE}" > /sys/block/zram0/disksize
+
+/usr/sbin/mkswap /dev/zram0
+/usr/sbin/swapon -p 100 /dev/zram0
+EOF
+    
+    write_file -L -m 755 /etc/tliset/zram-disable <<'EOF'
+#!/usr/bin/bash
+
+set -u
+set -e
+
+if grep -q '^/dev/zram0\s' /proc/swaps; then
+    /usr/sbin/swapoff "/dev/zram0"
+fi
+
+if grep -q "^zram " /proc/modules; then
+    sleep 1
+    /usr/sbin/rmmod zram
+fi
+EOF
+
+    if [[ -n "$reload_systemd" ]]; then
+	systemctl daemon-reload
+    fi
+
+    if ! systemctl -q is-enabled zram; then
+	log "  Enabling zram"
+	systemctl enable zram
+    fi
+
+    if ! systemctl -q is-active zram; then
+	log "  Starting zram"
+	systemctl start zram
+    fi
+}
+
