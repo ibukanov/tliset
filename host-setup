@@ -4,6 +4,8 @@ set -u
 set -e
 set -o pipefail
 
+selfdir="$(dirname "$0")"
+
 tmp_files=()
 
 cleanup() {
@@ -87,12 +89,14 @@ write_file() {
 
     path="$1"
     shift
+
+    # Use base64 to support arbitrary binary data
     if [[ $# -eq 0 ]]; then
-	body="$(cat)"
+	body="$(base64 -w0)"
     elif [[ -n "$exec_cmd" ]]; then
-	body="$("$@")"
+	body="$("$@" | base64 -w0)"
     else
-	body="$1"
+	body="$(printf %s "$1" | base64 -w0)"
     fi
 
     while true; do
@@ -103,8 +107,7 @@ write_file() {
 	    break;
 	fi
 
-	# Use comm as diff may not be available like in coreos
-	if [[ -n "$(comm --nocheck-order -3 "$path" /dev/stdin <<< "$body")" ]]; then
+	if [[ "$body" != "$(base64 -w0 "$path")" ]]; then
 	    break;
 	fi
 
@@ -122,7 +125,7 @@ write_file() {
 
     # Use temporary to ensure atomic operation on filesystem
     get_temp "$path"
-    cat <<< "$body"  > "$tmp"
+    base64 -d <<< "$body" > "$tmp"
     chmod "$mode" "$tmp"
     chown "$owner" "$tmp"
     mv -f "$tmp" "$path"
@@ -198,9 +201,12 @@ setup_packages() {
 	# Graphs
 	graphviz graphviz-doc
 
+	# PDF tools
+	pdfmerge poppler-utils
+
 	# Media
 	kdenlive vlc gimp inkscape gthumb
-	scribus pdfmerge transgui openssl-devel
+	scribus transgui openssl-devel
 	evince-djvu pdf2djvu
 	linux-libertine-biolinum-fonts linux-libertine-fonts
 	gstreamer1-libav
@@ -407,7 +413,7 @@ EOF
 }
 
 setup_autofs() {
-    local setup_path="$(dirname "$0")/autofs-setup"
+    local setup_path="$selfdir/autofs-setup"
     if [[ "$setup_path" -nt /etc/tliset/.installed ]]; then
 	local flags=(-u -i)
 	if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
@@ -503,7 +509,7 @@ setup_users() {
     fi
 }
 
-setup_docker() {
+setup_services() {
     log "Checking docker"
     local config="
 [Service]
@@ -516,9 +522,14 @@ MountFlags=private
 	systemctl daemon-reload
     fi
     systemctl enable docker
+
+    if [[ "$NAME" == dserver ]]; then
+        setup_dyndns
+    fi
 }
 
-. "$(dirname "$0")/zram-setup"
+. "$selfdir/zram-setup"
+. "$selfdir/dyndns-setup"
 
 show_usage=""
 NAME=""
@@ -588,4 +599,4 @@ setup_zram
 setup_ssh
 setup_network
 setup_users
-setup_docker
+setup_services

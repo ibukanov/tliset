@@ -1,0 +1,45 @@
+#!/bin/bash
+
+setup_dyndns() {
+
+    log "Checking dyndns"
+
+    if [[ ! -s /etc/duckdns.key ]]; then
+	local api_key
+	IFS='' read -p 'Enter API key for www.duckdns.org: ' api_key
+	write_file -m 640 -o root:nobody /etc/duckdns.key "$api_key"
+    fi
+    
+    write_file_count=0
+    write_file /etc/systemd/system/dyndns_update.timer <<EOF
+
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+Persistent=true
+# Each 10 minutes
+OnCalendar=*:0/10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    write_file /etc/systemd/system/dyndns_update.service <<'EOF'
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=nobody
+SyslogIdentifier=dyndns
+ExecStart=/bin/bash -c 'key="$(< /etc/duckdns.key)"; /usr/bin/curl -s -k "https://www.duckdns.org/update?domains=dsrv&token=$key&ip="'
+Type=oneshot
+EOF
+    if [[ "$write_file_count" -gt 0 ]]; then
+	log "enabling/updating dyndns config"
+	systemctl daemon-reload
+	systemctl enable dyndns_update.timer
+	systemctl start dyndns_update.timer
+    fi
+}
