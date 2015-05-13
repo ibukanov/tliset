@@ -1,0 +1,644 @@
+#!/bin/bash
+
+set -u
+set -e
+
+tmp=''
+tmp_files=()
+
+
+log() {
+    local i
+    for i in "$@" ; do 
+	printf "%s\n" "$i" 1>&2
+    done
+}
+
+err() {
+    log "$@"
+    exit 1
+}
+
+cmd_log() {
+    [ $# -ge 1 ] || err "Command must be given"
+    printf "%s\n" "$*" 1>&2
+    "$@"
+}
+
+cleanup() {
+    if [[ ${#tmp_files[@]} -ge 1 ]]; then
+	rm -f "${tmp_files[@]}"
+    fi
+}
+
+trap cleanup EXIT
+
+get_temp() {
+    if [[ $# -ge 1 ]]; then
+	tmp="$(mktemp "$1.XXXXXXXXXX")"
+    else
+	tmp="$(mktemp)"
+    fi
+    tmp_files+=("$tmp")
+}
+
+# mkdir -p -m mode path does not apply mode to the intermediate
+# directories it creates.
+ensure_dir() {
+    local mode=755 OPTIND opt dir
+
+    while getopts m: opt; do
+	case "$opt" in
+	    m ) mode="$OPTARG";;
+	    * ) err "bad ensure_dir usage";;
+	esac
+    done
+    shift $(($OPTIND - 1))
+    [[ $# -ge 1 ]] || err "ensure_dir - missing dir argument"
+    [[ $# -le 2 ]] || err "ensure_dir - too many arguments"
+    dir="$1"
+    if [[ ! -d "$dir" ]]; then
+	ensure_dir -m "$mode" "$(dirname "$dir")"
+	mkdir -m "$mode" "$dir"
+    fi
+}
+
+write_file_update=''
+write_file_count=0
+
+write_file() {
+    local owner=root:root mode=644 exec_cmd="" log_message="" log_message_default=""
+    local OPTIND opt path body dir
+
+    write_file_update=''
+    while getopts eLl:m:o: opt; do
+	case "$opt" in
+	    e ) exec_cmd=1;;
+	    L ) log_message_default=1;;
+	    l ) log_message="$OPTARG";;
+	    m ) mode="$OPTARG";;
+	    o ) owner="$OPTARG";;
+	    * ) err "bad write_file usage";;
+	esac
+    done
+    
+    shift $(($OPTIND - 1))
+    [[ $# -ge 1 ]] || err "write_file - missing path argument"
+    [[ $# -le 2 ]] || err "write_file - too many arguments"
+    [[ -z "$exec_cmd" || $# -ge 2 ]] || err "write_file - -e option requires command argument"
+    [[ -z "$log_message" || -z "$log_message_default" ]] || \
+	err "write_file - only one of -l , -L can be given"
+
+    path="$1"
+    shift
+    if [[ $# -eq 0 ]]; then
+	body="$(cat)"
+    elif [[ -n "$exec_cmd" ]]; then
+	body="$("$@")"
+    else
+	body="$1"
+    fi
+
+    while true; do
+	if [[ ! -f "$path" || -L "$path" ]]; then
+	    break;
+	fi
+	if [[ "$(stat -c %U:%G:%a "$path")" != "${owner}:${mode}" ]]; then
+	    break;
+	fi
+
+	# Use comm as diff may not be available like in coreos
+	if [[ -n "$(comm --nocheck-order -3 "$path" /dev/stdin <<< "$body")" ]]; then
+	    break;
+	fi
+
+	# No need to write anything
+	return
+    done
+
+    if [[ -n "$log_message" ]]; then
+	log "$log_message"
+    fi
+    if [[ -n "$log_message_default" ]]; then
+	log "Updating $path"
+    fi
+    ensure_dir "$(dirname "$path")"
+
+    # Use temporary to ensure atomic operation on filesystem
+    get_temp "$path"
+    cat <<< "$body"  > "$tmp"
+    chmod "$mode" "$tmp"
+    chown "$owner" "$tmp"
+    mv -f "$tmp" "$path"
+
+    write_file_update=1
+    let write_file_count+=1
+}
+
+is_valid_vm_name() {
+    for name in "${valid_vm_names[@]}"; do
+	if [[ "$1" == "$name" ]]; then
+	    return 0
+	fi
+    done
+    return 1
+}
+
+print_vm_config() {
+    local extra_devices=""
+    if [[ -b "$disk_vol" ]]; then
+	extra_devices+="\
+    <disk type='block' device='disk'>
+      <driver name='qemu' type='raw' cache='none'/>
+      <source dev='$disk_vol'/>
+      <target dev='vdb' bus='virtio'/>
+    </disk>
+"
+    else
+	extra_devices="\
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source file='$disk_vol'/>
+      <target dev='vdb' bus='virtio'/>
+    </disk>
+"
+    fi
+    
+    cat <<EOF
+<domain type='kvm'>
+  <name>$VM</name>
+  <memory unit='MiB'>$vm_memory</memory>
+  <currentMemory unit='MiB'>$vm_memory</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <pae/>
+  </features>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>restart</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-kvm</emulator>
+    <controller type='usb' model='none' index='0'/> 
+    <serial type='pty'>
+      <target port='0'/>
+    </serial>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+    <memballoon model='virtio'/>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='$os_image'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <filesystem type='mount' accessmode='passthrough'>
+      <source dir='$config_root'/>
+      <target dir='config-2'/>
+      <readonly/>
+    </filesystem>
+    $extra_devices
+    <interface type='$net_type'>
+      <mac address='$net_mac'/>
+      <source $net_type='$net_source'/>
+      <model type='virtio'/>
+    </interface>
+  </devices>
+</domain>
+EOF
+}
+
+# Mapping from ip to host name and reverse. The maps are not reverse of each other as the value for a key can be empty if static lease specifies only MAC without host name or ip 
+declare -A net_static_dhcp_ip_to_name
+declare -A net_static_dhcp_name_to_ip
+
+get_net_static_dhcp_leases() {
+    local -a lines
+    local line ip name
+    net_static_dhcp_ip_to_name=()
+    net_static_dhcp_name_to_ip=()
+
+    # Get all <host> elements inside <dhcp> lines
+    mapfile -t lines < <(virsh net-dumpxml "$net_source" | sed -e '/<dhcp>/,/<\/dhcp>/!d' -e '/<host\>/!d')
+    if [[ "${#lines[@]}" -eq 0 ]]; then
+	return
+    fi
+    for line in "${lines[@]}"; do
+	ip="$(sed -e '/\<ip=/!d' -e "s/.*\<ip='\([^']\+\)'.*/\1/" <<< "$line")"
+	name="$(sed -e '/\<name=/!d' -e "s/.*\<name='\([^']\+\)'.*/\1/" <<< "$line")"
+	if [[ -n "$ip" ]]; then
+	    net_static_dhcp_ip_to_name["$ip"]="$name"
+	fi
+	if [[ -n "$name" ]]; then
+	    net_static_dhcp_name_to_ip["$name"]="$ip"
+	fi
+    done
+}
+
+update_hosts_with_static_leases() {
+    local hosts="$(< /etc/hosts)" name ip
+
+    hosts="$(sed -e '/^#vm-names-start$/,/^#vm-names-end$/d' <<< "$hosts")"
+    hosts+=$'\n#vm-names-start'
+    for name in "${!net_static_dhcp_name_to_ip[@]}"; do
+	ip="${net_static_dhcp_name_to_ip[$name]}"
+	if [[ -n "$ip" ]]; then
+	    hosts+=$'\n'"$ip $name"
+	fi
+    done
+    hosts+=$'\n#vm-names-end'
+    write_file -l "Updating /etc/hosts with IP for VM static leases" \
+	       /etc/hosts "$hosts"
+}
+
+setup_network() {
+    if [[ "$net_type" != network ]]; then
+	return 0;
+    fi
+
+    local net_prefix='192.168.100' dhcp_start=2 dhcp_end=254
+
+    if ! virsh net-info "$net_source" > /dev/null 2>&1 ; then
+	log "Defining network $net_source"
+	virsh net-define /dev/stdin <<EOF
+<network>
+  <name>$net_source</name>
+  <forward mode='nat'/>
+  <bridge name='virtbr0' stp='on' delay='0'/>
+  <domain name='$net_source'/>
+  <ip address='$net_prefix.1' prefix='24'>
+    <dhcp>
+      <range start='$net_prefix.$dhcp_start' end='$net_prefix.$dhcp_end'/>
+    </dhcp>
+  </ip>
+</network>
+EOF
+    fi
+
+    get_net_static_dhcp_leases
+    if [[ -z "${net_static_dhcp_name_to_ip[$VM]+isset}" ]]; then
+	log "Adding static lease for $VM"
+
+	# Find free IP in the lease list
+	local ip free_ip='' i new_xml
+	for ((i = dhcp_start; i < dhcp_end; i += 1)); do
+	    ip="$net_prefix.$i"
+	    if [[ -z "${net_static_dhcp_ip_to_name[$ip]+isset}" ]]; then
+		free_ip="$ip"
+		break
+	    fi
+	done
+	[[ -n "$free_ip" ]] || err "Failed to find free IP slot among static leases for $net_source network"
+	new_xml="<host mac='$net_mac' name='$VM' ip='$free_ip'/>"
+	virsh net-update --config "$net_source" add-last ip-dhcp-host "$new_xml"
+	if virsh net-info "$net_source" | grep -q '^Active:[[:space:]]*yes$'; then
+	    virsh net-update --live "$net_source" add-last ip-dhcp-host "$new_xml"
+	fi
+	net_static_dhcp_ip_to_name[$free_ip]="$VM"
+	net_static_dhcp_name_to_ip[$VM]="$free_ip"
+    fi
+    update_hosts_with_static_leases    
+}
+
+print_ssh_authorized_keys() {
+    local indent="$1" f lines key
+    local -A keys=()
+
+    # Use associative array to avoid duplicates
+    for f in "${ssh_authorized_sources[@]}"; do
+	if [[ -f "$f" ]]; then
+	    mapfile -t lines < "$f"
+	    for key in "${lines[@]}"; do
+		if [[ -n "$key" ]]; then
+		    keys["$key"]=1
+		fi
+	    done
+	fi
+    done
+
+    [[ "${#keys[@]}" ]] || err "No public key found to configure VM login"
+
+    # Print sorted to ensure the stable order between runs as the
+    # enumeration order is random in bash
+    (
+	for key in "${!keys[@]}"; do
+	    printf '%s%s\n' "$indent" "$key"
+	done
+    ) | sort
+}
+
+print_coreos_cloud_config() {
+    # Put all units under /etc, not /run, so at least on the second
+    # reboot everything will be according to the desired order.
+    local ssh_authorized="$(printf '\n%s' "$(print_ssh_authorized_keys '      ')")"
+    local static_ip=""
+    if [[ "$net_type" == bridge ]]; then
+	static_ip="
+    - name: 10-static-ip.network
+      content: |
+        [Match]
+        Name=eth0
+        [Network]
+        Address=$net_ip
+        Gateway=$net_gateway
+        DNS=$net_dns
+"
+    fi
+	cat <<EOF
+#cloud-config
+
+hostname: $VM
+manage_etc_hosts: localhost
+
+coreos:
+  units:$static_ip
+    - name: setup_storage.service
+      command: start
+      content: |
+        [Unit]
+        Before=docker.service
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/etc/setup_storage
+
+write_files:
+  - path: /etc/setup_storage
+    permissions: 0770
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -e -u
+      mkdir -p /vol
+      if ! mount -t ext4 /dev/vdb /vol 2>/dev/null; then 
+          mkfs.ext4 /dev/vdb
+          mount -t ext4 /dev/vdb /vol
+      fi
+
+  - path: /etc/ssh/sshd_config
+    permissions: 0600
+    owner: root:root
+    content: |
+      KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
+      HostKey /media/configvirtfs/ssh/ssh_host_key
+      Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes128-ctr
+      MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-ripemd160-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,hmac-ripemd160,umac-128@openssh.com
+      UsePrivilegeSeparation sandbox
+      Subsystem sftp internal-sftp
+      ClientAliveInterval 180
+
+      PasswordAuthentication no
+      ChallengeResponseAuthentication no
+      UseDNS no
+      AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+
+  - path: /etc/ssh/authorized_keys/core
+    permissions: 0640
+    owner: root:core
+    content: |$ssh_authorized
+
+  - path: /etc/ssh/authorized_keys/root
+    permissions: 0640
+    owner: root:root
+    content: |$ssh_authorized
+EOF
+}
+
+verify_gpg_signature() {
+    local path="$1"
+    
+    local gpg_output="$(gpg --batch --verify "$path.sig" "$path" 2>&1 || true)"
+    if ! grep -q "^gpg: Good signature from " <<< "$gpg_output"; then
+	log "$gpg_output"
+	return 1
+    fi
+    return 0
+}
+
+setup_coreos_image() {
+    local key_uid='CoreOS Buildbot (Offical Builds) <buildbot@coreos.com>'
+    local key_url="https://coreos.com/security/image-signing-key/CoreOS_Image_Signing_Key.pem"
+    local image_name="coreos_${coreos_channel}_qemu_image.img.bz2"
+    local image_url="http://$coreos_channel.release.core-os.net/amd64-usr/current/coreos_production_qemu_image.img.bz2"
+
+    if [[ ! -f "$os_image" ]]; then
+	if ! gpg -k "$key_uid" > /dev/null 2>&1 ; then
+	    log "Importing CoreOS key"
+	    get_temp
+	    curl -o "$tmp" "$key_url"
+	    gpg --import "$tmp"
+	fi
+	
+	ensure_dir "$download_dir"
+	local download_path="$download_dir/$image_name"
+	if [[ ! -f "$download_path" ]]; then
+	    # Always download file together with signature
+	    get_temp "$download_path"
+	    log "Downloading $image_url to $download_dir"
+	    curl -o "$tmp" "$image_url"
+	    log "Downloading $image_url.sig to $download_dir"
+	    curl -o "$tmp.sig" "$image_url.sig"
+	    mv "$tmp" "$download_path"
+	    mv "$tmp.sig" "$download_path.sig"
+	fi
+	log "Verifying $image_name signature"
+	if ! verify_gpg_signature "$download_path"; then
+	    log "Removing broken image and signature"
+	    rm -f "$download_path" "$download_path.sig"
+	    err
+	fi
+
+	log "Extracting $download_path into $os_image"
+	ensure_dir "$image_dir"
+	get_temp "$os_image"
+	bzcat < "$download_path" > "$tmp"
+	chmod 640 "$tmp"
+	chown qemu:qemu "$tmp"
+	mv "$tmp" "$os_image"
+    fi
+}
+
+setup_file_images() {
+    if [[ -b "$disk_vol" ]]; then
+	return 0
+    fi
+    
+    if [[ ! -f "$disk_vol" ]]; then
+	log "Allocating $disk_vol for volumes"
+
+	# write zeros at the start to facilitate detection of filesystem absence
+	get_temp "$disk_vol"
+	dd if=/dev/zero "of=$tmp" bs=64K count=1 status=none
+	fallocate -l "$disk_vol_size" "$tmp"
+	chmod 640 "$tmp"
+	chown qemu:qemu "$tmp"
+	mv "$tmp" "$disk_vol"
+    fi
+}
+
+ensure_ssh_key() {
+    local key="$1"
+    if [[ -f "$key" ]]; then
+	return 0
+    fi
+    
+    # No get_tmp as ssh-keygen creates 2 files and in a secure way 
+    tmp="$ssh_host_key.tmp"
+    tmp_files+=("$tmp" "$tmp.pub")
+    ssh-keygen -q -t ed25519 -N '' -f "$tmp" -C "hostkey:$VM"
+
+    # libvirt runs VM as qemu user and with accessmode="passthrough" it
+    # maps access requests to files as comming from the user qemu
+    # making the key inaccessible even for root in VM unless qemu owns it.
+    chown qemu:qemu "$tmp"
+    chown qemu:qemu "$tmp.pub"
+    mv -f "$tmp.pub" "$ssh_host_key.pub"
+    mv -f "$tmp" "$ssh_host_key"
+}
+
+setup_coreos_config() {
+    local dir
+    if [[ ! -d "$config_root" ]]; then
+	log "Creating $config_root and updating SELinux policy for it"
+	ensure_dir "$config_root"
+
+	# Note that restorecon is necessary even if semanage is called
+	# before mkdir.
+	semanage fcontext -a -t virt_content_t "$config_root(/.*)?"
+	restorecon -R "$config_root"
+    fi
+
+    write_file -l "Updating $config_file" -e "$config_file" print_coreos_cloud_config
+
+    ensure_dir "$(dirname "$ssh_host_key")"
+    ensure_ssh_key "$ssh_host_key"
+}
+
+setup_vm() {
+    if ! virsh dominfo "$VM" > /dev/null 2>&1 ; then
+	log "Creating new VM $VM"
+	print_vm_config | virsh define /dev/stdin
+	if [[ -n "$vm_autostart" ]]; then
+	    virsh autostart "$VM"
+	fi
+    fi
+}
+
+show_usage=""
+usage_errors=()
+VM=""
+
+valid_vm_names=(
+    kino
+    t-kino
+    thip
+)
+
+while getopts :hn: opt; do
+    case "$opt" in
+	h ) show_usage=1 ;;
+	n )
+	    [[ -z "$VM" ]] || "-n can only be given once"
+	    VM="$OPTARG"
+	    is_valid_vm_name "$VM" || \
+		usage_errors+=("the value of -n argument '$VM' is not a known VM name")
+	    ;;
+	\? ) usage_errors+=("option -$OPTARG requires an argument") ;;
+	* ) usage_errors+=("unknown -$OPTARG option") ;;
+    esac
+done
+shift $(($OPTIND - 1))
+[[ $# -eq 0 ]] || usage_errors+=("unexpected non-optional argument")
+
+if test -n "$show_usage"; then
+    echo "Usage: $0 [OPTION]..."
+    echo "Create the given virtual machine"
+    echo
+    echo "  -h       show this help and exit"
+    echo "  -n name  required machine name. The valid values are:"
+    echo "             ${valid_vm_names[*]}"
+    echo
+    exit
+fi
+
+[[ -n "$VM" ]] || usage_errors+=("-n option with VM name is not given")
+
+[[ ${#usage_errors[@]} -eq 0 ]] || \
+    err "Usage errors:" "${usage_errors[@]/#/    }" "Try $0 -h for help."
+
+image_root="/var/lib/libvirt/images"
+image_dir="$image_root/$VM"
+download_dir="$image_root/download"
+config_root="$image_dir/coreos_config"
+config_file="$config_root/openstack/latest/user_data"
+ssh_host_key="$config_root/ssh/ssh_host_key"
+coreos_channel=stable
+
+# Host root and anybody who can ssh as root to host can login to VM
+ssh_authorized_sources=(
+    /root/.ssh/id_ed25519.pub
+    /etc/ssh/authorized_keys/root
+)
+    
+case "$VM" in
+    kino )
+	vm_id=
+	vm_autostart=1
+	vm_memory=468
+	disk_vol=/dev/sda2
+	net_type=bridge
+	net_mac=52:54:00:54:6e:ef
+	net_ip=192.168.2.9/24
+	net_gateway=192.168.2.1
+	net_dns="$net_gateway"
+	;;
+    t-kino )
+	vm_autostart=''
+	vm_memory=360
+	disk_vol="$image_dir/vol.img"
+	disk_vol_size=4G
+	net_type=network
+	net_mac=52:54:00:54:6e:03
+	;;
+    thip )
+	# Memory to accont for the browser
+	vm_autostart=''
+	vm_memory=1280
+	disk_vol="$image_dir/vol.img"
+	disk_vol_size=120G
+	net_type=network
+	net_mac=52:54:00:54:6e:04
+	coreos_channel=alpha
+	;;
+esac
+
+case "$net_type" in
+    network )
+	net_source="default"
+	;;
+    bridge )
+	net_source=br0
+	;;
+esac
+
+os_image="$image_dir/coreos_${coreos_channel}_qemu_image.img"
+
+ensure_dir "$image_root"
+
+setup_coreos_image
+
+setup_file_images
+
+setup_coreos_config
+
+setup_network
+
+setup_vm
+
+log Done
