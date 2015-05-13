@@ -159,14 +159,21 @@ fixup_transgui() {
 setup_packages() {
     log "Checking packages"
 
-    if ! rpm -q --quiet rpmfusion-free-release rpmfusion-nonfree-release ; then
+    local fedora_release=$(rpm -E %fedora)
+    local rpmfusion_kinds=(
+	free
+#	rpmfusion-nonfree-release
+    )
+    local i rpmfusion_repos=()
+    for i in "${rpmfusion_kinds[@]}"; do rpmfusion_repos+=("rpmfusion-$i-release"); done
+
+    if ! rpm -q --quiet "${rpmfusion_repos[@]}" ; then
 	log "Installing rpmfusion"
-	local rpmfusion=http://download1.rpmfusion.org
-	local fedora_release=$(rpm -E %fedora)
-	dnf install -y --nogpgcheck \
-	    $rpmfusion/free/fedora/rpmfusion-free-release-$fedora_release.noarch.rpm \
-	    $rpmfusion/nonfree/fedora/rpmfusion-nonfree-release-$fedora_release.noarch.rpm \
-	    || true
+	local urls=()
+	for i in "${rpmfusion_kinds[@]}"; do
+	    urls+=("http://download1.rpmfusion.org/$i/fedora/rpmfusion-$i-release-$fedora_release.noarch.rpm")
+	done
+	dnf install -y --nogpgcheck "${urls[@]}" || true
     fi
     local list=(
 	tmux xfce4-terminal
@@ -174,7 +181,6 @@ setup_packages() {
 	quilt mercurial subversion
 	livecd-tools
 	autoconf automake gcc-c++ kernel-devel
-	docker-io
 	emacs
 	tigervnc
 	strace
@@ -183,7 +189,7 @@ setup_packages() {
 	autofs udftools inotify-tools fdupes fslint
 
 	# Archives
-	unrar libunrar
+	# unrar libunrar
 
 	# encryption and backup
 	apg duplicity perl-Digest-Bcrypt python-gdata
@@ -228,8 +234,22 @@ setup_packages() {
 		qemu-kvm
 		virt-manager
 		virt-viewer
-	    );;
+	    )
+	    if [[ "$fedora_release" -ge 22 ]]; then
+		list+=(docker)
+	    else
+		list+=(docker-io)
+	    fi
+	    ;;
     esac
+
+    if [[ "$NAME" == dserver ]]; then
+	list+=(dnsmasq)
+    fi
+
+    for i in "${list[@]}"; do
+	rpm -q --quiet "$i" || echo "Missed: $i"
+    done
 
     if ! rpm -q --quiet "${list[@]}" ; then
 	log "Installing missing packages"
@@ -407,9 +427,49 @@ EOF
 	    systemctl start systemd-resolved
 	    ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
 	fi
+
+	setup_dserver_dnsmasq
+
     fi
 
     setup_autofs
+}
+
+setup_dserver_dnsmasq() {
+    log "Checking dnsmasq server"
+    write_file /etc/dnsmasq.d/local.conf <<EOF
+interface=br0
+domain-needed
+bogus-priv
+
+# for now use Google's services
+no-resolv
+server=8.8.8.8
+server=8.8.4.4
+
+no-hosts
+dhcp-range=192.168.2.50,192.168.2.150,10m
+dhcp-host=44:C3:06:20:09:4A,50:B7:C3:79:73:B7,192.168.2.16
+address=/ultrabook/192.168.2.16
+#dhcp-host=08:60:6E:CD:96:68,192.168.2.1
+address=/wifi/192.168.2.1
+dhcp-host=8c:29:37:e8:0e:e2,192.168.2.17,miranda,infinite 
+dhcp-option=option:router,192.168.2.1
+EOF
+    local changed_dnsmasq="$write_file_update"
+    if ! systemctl -q is-enabled dnsmasq; then
+	log "  enabling dnsmasq"
+	systemctl enable dnsmasq
+    fi
+    if systemctl -q is-active dnsmasq; then
+	if [[ -n "$changed_dnsmasq" ]]; then
+	    log "  restarting dnsmasq"
+	    systemctl restart dnsmasq
+	fi
+    else
+	log "  starting dnsmasq"
+	systemctl start dnsmasq
+    fi
 }
 
 setup_autofs() {
