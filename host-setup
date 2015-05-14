@@ -119,7 +119,7 @@ write_file() {
 	log "$log_message"
     fi
     if [[ -n "$log_message_default" ]]; then
-	log "Updating $path"
+	log "  updating $path"
     fi
     ensure_dir "$(dirname "$path")"
 
@@ -349,96 +349,114 @@ setup_grub() {
 
 setup_network() {
     local -A hosts
-    local hosts_text key edits
     log "Checking network"
 
     hosts=(
-	[kino]=192.168.2.9
+#	[kino]=192.168.2.9
     )
 
     if [[ "$NAME" != dserver ]]; then
 	hosts+=(
-	    [dserver]=192.168.2.10
+#	    [dserver]=192.168.2.10
 	)
     fi
 
-    hosts_text=""
-    for key in "${!hosts[@]}"; do
-	hosts_text+="$(printf '\n%s %s' "${hosts[$key]}" "$key")"
-    done
+    if [[ ${!hosts[@]} -ne 0 ]]; then
+	local hosts_text="" key edits
+	for key in "${!hosts[@]}"; do
+	    hosts_text+="$(printf '\n%s %s' "${hosts[$key]}" "$key")"
+	done
+	
+	# Ensure stable order
+	hosts_text="$(sort <<< "$hosts_text")"
+	
+	# delete all lines matching config keys and then append the proper values
+	edits=()
+	for key in "${!hosts[@]}"; do
+	    edits+=(-e "/^[0-9.]\\+\\s\\+$key\$/d")
+	done
 
-    # Ensure stable order
-    hosts_text="$(sort <<< "$hosts_text")"
+	hosts_text="$(sed "${edits[@]}" /etc/hosts)$hosts_text"
 
-    # delete all lines matching config keys and then append the proper values
-    edits=()
-    for key in "${!hosts[@]}"; do
-	edits+=(-e "/^[0-9.]\\+\\s\\+$key\$/d")
-    done
-
-    hosts_text="$(sed "${edits[@]}" /etc/hosts)$hosts_text"
-
-    write_file /etc/hosts "$hosts_text"
-    if [[ -n "$write_file_update" ]]; then
-	log "updated /etc/hosts"
+	write_file -L /etc/hosts "$hosts_text"
     fi
 
     if [[ "$NAME" == dserver ]]; then
-	systemctl disable firewalld
-
-	if rpm -q --quiet NetworkManager ; then
-	    log "disabling NetworkManager"
-	    systemctl disable NetworkManager
-	    systemctl stop NetworkManager
-	    dnf remove -y NetworkManager
-	fi
-
-	write_file_count=0
-	write_file /etc/systemd/network/80-br0.netdev <<EOF
-[NetDev]
-Name=br0
-Kind=bridge
-EOF
-	write_file /etc/systemd/network/80-br0.network <<EOF
-[Match]
-Name=br0
-[Network]
-Address=192.168.2.10/24
-Gateway=192.168.2.1
-DNS=192.168.2.1
-EOF
-	write_file /etc/systemd/network/80-local.network <<EOF
-[Match]
-Name=enp4s0
-[Network]
-Bridge=br0
-EOF
-	if [[ $write_file_count -gt 0 ]]; then
-	    log "enabling/updating systemd-networkd config"
-	    systemctl enable systemd-networkd
-	    systemctl start systemd-networkd
-	    systemctl restart systemd-networkd
-	fi
-
-	if [[ ! -L /etc/resolv.conf || \
-		    "$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
-	    log "enabling systemd-resolved"
-	    systemctl enable systemd-resolved
-	    systemctl start systemd-resolved
-	    ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
-	fi
-
-	setup_dserver_dnsmasq
-
+	setup_dserver_network
     fi
 
     setup_autofs
 }
 
+setup_dserver_network() {
+    systemctl disable firewalld
+
+    netdev_wan=enp2s0
+    netdev_lan=enp4s0
+    netdev_bridge=macvlan0
+
+    if rpm -q --quiet NetworkManager ; then
+	log "disabling NetworkManager"
+	systemctl disable NetworkManager
+	systemctl stop NetworkManager
+	dnf remove -y NetworkManager
+    fi
+
+    write_file_count=0
+    write_file /etc/systemd/network/80-wan.network <<EOF
+[Match]
+Name=$netdev_wan
+[Network]
+DHCP=ipv4
+Name=wan
+EOF
+
+    # Use macvlan, not bridge, for more efficient setup
+    write_file /etc/systemd/network/80-macvlan.netdev <<EOF
+[NetDev]
+Name=$netdev_bridge
+Kind=macvlan
+[MACVLAN]
+Mode=bridge
+EOF
+    write_file /etc/systemd/network/80-lan.network <<EOF
+[Match]
+Name=$netdev_lan
+[Network]
+MACVLAN=$netdev_bridge
+EOF
+    write_file /etc/systemd/network/80-macvlan.network <<EOF
+[Match]
+Name=$netdev_bridge
+[Network]
+IPMasquerade=yes
+Address=192.168.2.10/24
+#Gateway=192.168.2.1
+#DNS=192.168.2.10
+EOF
+    if [[ $write_file_count -gt 0 ]]; then
+	log "  enabling/updating systemd-networkd config"
+	systemctl enable systemd-networkd
+	systemctl start systemd-networkd
+	systemctl restart systemd-networkd
+    fi
+
+    if [[ ! -L /etc/resolv.conf || \
+		"$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
+	log "  enabling systemd-resolved"
+	systemctl enable systemd-resolved
+	systemctl start systemd-resolved
+	ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
+    fi
+
+    setup_dserver_dnsmasq
+}
+
 setup_dserver_dnsmasq() {
     log "Checking dnsmasq server"
     write_file /etc/dnsmasq.d/local.conf <<EOF
-interface=br0
+interface=$netdev_bridge
+#interface=br0
 domain-needed
 bogus-priv
 
@@ -449,11 +467,13 @@ server=8.8.4.4
 
 no-hosts
 dhcp-range=192.168.2.50,192.168.2.150,10m
+dhcp-host=kino,192.168.2.9
+address=/dserver/192.168.2.10
 dhcp-host=44:C3:06:20:09:4A,50:B7:C3:79:73:B7,192.168.2.16
 address=/ultrabook/192.168.2.16
 #dhcp-host=08:60:6E:CD:96:68,192.168.2.1
 address=/wifi/192.168.2.1
-dhcp-host=8c:29:37:e8:0e:e2,192.168.2.17,miranda,infinite 
+dhcp-host=8c:29:37:e8:0e:e2,192.168.2.17,miranda,infinite
 dhcp-option=option:router,192.168.2.1
 EOF
     local changed_dnsmasq="$write_file_update"
@@ -479,7 +499,7 @@ setup_autofs() {
 	if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
 	    flags+=(-n -l)
 	fi
-	"$setup_path" "${flags[@]}"
+	bash "$setup_path" "${flags[@]}"
 	touch /etc/tliset/.installed
     fi
 }
@@ -512,21 +532,24 @@ setup_ssh() {
 	    ;;
     esac
 
-    # Based on https://stribika.github.io/2015/01/04/secure-secure-shell.html
+    # Based on https://stribika.github.io/2015/01/04/secure-secure-shell.htlm
     local sshd_config="
+UsePrivilegeSeparation sandbox
+
 KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
 HostKey /etc/ssh/ssh_host_ed25519_key
-Ciphers chacha20-poly1305@openssh.com,aes256-ctr,aes128-ctr,aes128-gcm@openssh.com
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-ripemd160-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,hmac-ripemd160,umac-128@openssh.com
 
-SyslogFacility AUTHPRIV
+UseDNS no
+ClientAliveInterval 180
+
 AuthorizedKeysFile /etc/ssh/authorized_keys/%u /etc/ssh/authorized_keys/root
 PasswordAuthentication no
 ChallengeResponseAuthentication no
 GSSAPIAuthentication no
 UsePAM yes
-UsePrivilegeSeparation sandbox
-UseDNS no
+
 Subsystem sftp /usr/libexec/openssh/sftp-server
 "
     local root_authorized_keys="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuRT02EgmvQdI96X/qGdUCCSUbTHlvRiHuF0BKpNhch igor@localhost.localdomain"
@@ -537,18 +560,28 @@ Subsystem sftp /usr/libexec/openssh/sftp-server
     fi
 
     if [[ "$NAME" == dserver || "$NAME" == ultrabook ]]; then
+	write_file_count=0
+	write_file /etc/systemd/system/sshd.service.d/local.conf <<EOF
+[Service]
+Environment=OPTIONS=-e
+EOF
+	if [[ $write_file_count -gt 0 ]]; then
+	    systemctl daemon-reload
+	fi
 	write_file /etc/ssh/sshd_config "$sshd_config"
-	if [[ -n "$write_file_update" ]]; then
-	    log "Updating /etc/ssh/sshd_config"
+
+	if [[ $write_file_count -gt 0 ]]; then
+	    log "  updating /etc/ssh/sshd_config"
 	    systemctl enable sshd
-	    systemctl start sshd
-	    systemctl reload sshd
+	    systemctl restart sshd
 	fi
 
-	write_file -m 644 /etc/ssh/authorized_keys/root "$root_authorized_keys"
-	if [[ -n "$write_file_update" ]]; then
-	    log "updated /etc/ssh/authorized_keys/root"
-	fi
+	# The file with public keys for root file should be public
+	# redable so it can be used to login to other accounts.
+	write_file -L -m 644 /etc/ssh/authorized_keys/root "$root_authorized_keys"
+	write_file -L -m 640 -o root:lubava /etc/ssh/authorized_keys/lubava <<EOF
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKGV+r2T/Mf9QrEsupuxwWMv2UtLYgD3rjBQG/W5Dfxo lubava@ultrabook.localdomain
+EOF
     fi
 }
 

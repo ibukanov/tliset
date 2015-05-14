@@ -145,6 +145,25 @@ is_valid_vm_name() {
 }
 
 print_vm_config() {
+    local network_device
+    if [[ "$net_type" == direct ]]; then
+	network_device="\
+    <interface type='$net_type' trustGuestRxFilters='no'>
+      <mac address='$net_mac'/>
+      <source dev='$net_source_dev' mode='bridge'/>
+      <model type='virtio'/>
+    </interface>
+"
+    else
+	network_device="\
+    <interface type='$net_type'>
+      <mac address='$net_mac'/>
+      <source $net_type='$net_source'/>
+      <model type='virtio'/>
+    </interface>
+"
+    fi
+    
     local extra_devices=""
     if [[ -b "$disk_vol" ]]; then
 	extra_devices+="\
@@ -203,12 +222,8 @@ print_vm_config() {
       <target dir='config-2'/>
       <readonly/>
     </filesystem>
+    $network_device
     $extra_devices
-    <interface type='$net_type'>
-      <mac address='$net_mac'/>
-      <source $net_type='$net_source'/>
-      <model type='virtio'/>
-    </interface>
   </devices>
 </domain>
 EOF
@@ -385,18 +400,22 @@ write_files:
     permissions: 0600
     owner: root:root
     content: |
+      UsePrivilegeSeparation sandbox
+
       KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
       HostKey /media/configvirtfs/ssh/ssh_host_key
-      Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes128-ctr
+      Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
       MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-ripemd160-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,hmac-ripemd160,umac-128@openssh.com
-      UsePrivilegeSeparation sandbox
-      Subsystem sftp internal-sftp
+
+      UseDNS no
       ClientAliveInterval 180
 
+      AuthorizedKeysFile /etc/ssh/authorized_keys/%u
       PasswordAuthentication no
       ChallengeResponseAuthentication no
-      UseDNS no
-      AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+      GSSAPIAuthentication no
+
+      Subsystem sftp internal-sftp
 
   - path: /etc/ssh/authorized_keys/core
     permissions: 0640
@@ -592,11 +611,13 @@ case "$VM" in
 	vm_autostart=1
 	vm_memory=468
 	disk_vol=/dev/sda2
-	net_type=bridge
+	#net_type=bridge
+	net_type=direct
+        net_source_dev=enp4s0
 	net_mac=52:54:00:54:6e:ef
 	net_ip=192.168.2.9/24
 	net_gateway=192.168.2.1
-	net_dns="$net_gateway"
+	net_dns="192.168.2.1"
 	;;
     t-kino )
 	vm_autostart=''

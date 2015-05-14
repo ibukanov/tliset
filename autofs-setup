@@ -209,17 +209,10 @@ create_ssh_config() {
 	cmd mv "$ssh_config" "$ssh_config.orig"
     fi
 
-    # In ssh that comes with Fedora 20 Match block is not supported. 
-    local match=""
-    if ! ssh -V 2>&1 | grep -q ^OpenSSH_6.4; then
-	match="\
+    write_file "$ssh_config" <<EOF
 Match originalhost kino-files exec $set_etc/is-outside-home-net
   HostName dsrv.duckdns.org
-"
-    fi
-
-    write_file "$ssh_config" <<EOF
-$match
+  Ciphers chacha20-poly1305@openssh.com
 Host kino-files
   HostKeyAlias kino-files
   AddressFamily inet
@@ -228,12 +221,18 @@ Host kino-files
   HostName kino
   User user
   Ciphers aes128-gcm@openssh.com
+  MACs umac-128@openssh.com
 
+Match originalhost dserver exec $set_etc/is-outside-home-net
+  HostName dsrv.duckdns.org
+  Ciphers chacha20-poly1305@openssh.com
+  Port 18284
 Host dserver
   HostKeyAlias dserver
   AddressFamily inet
   CheckHostIP no
   Ciphers aes128-gcm@openssh.com
+  MACs umac-128@openssh.com
 
 Host www.hippyru.net
   AddressFamily inet
@@ -264,7 +263,7 @@ EOF
 
     write_file -m 755 "$set_etc/is-outside-home-net" <<'EOF'
 #!/bin/bash
-! grep -q '^nameserver[[:space:]]\+192.168.2.1$' /etc/resolv.conf
+! grep -q '^nameserver[[:space:]]\+192\.168\.2\.[0-9]\+$' /etc/resolv.conf
 EOF
 }
 
