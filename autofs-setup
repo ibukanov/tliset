@@ -226,7 +226,6 @@ Host kino-files
 Match originalhost dserver exec $set_etc/is-outside-home-net
   HostName dsrv.duckdns.org
   Ciphers chacha20-poly1305@openssh.com
-  Port 18284
 Host dserver
   HostKeyAlias dserver
   AddressFamily inet

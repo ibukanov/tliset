@@ -43,7 +43,7 @@ ExecStart=/etc/tliset/zram-enable
 ExecStop=/etc/tliset/zram-disable
 RemainAfterExit=yes
 EOF
-    if [[ -n "$write_file_update" ]]; then
+    if [[ -n "$file_update" ]]; then
 	reload_systemd=1
     fi
 

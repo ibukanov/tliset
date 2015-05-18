@@ -1,138 +1,6 @@
 #!/bin/bash
 
-set -u
-set -e
-set -o pipefail
-
-selfdir="$(dirname "$0")"
-
-tmp_files=()
-
-cleanup() {
-    if [[ ${#tmp_files[@]} -ge 1 ]]; then
-	rm -f "${tmp_files[@]}"
-    fi
-}
-
-trap cleanup EXIT
-
-err() {
-    printf 'Error: %s\n' "$*" 1>&2
-    exit 1
-}
-
-usage_err() {
-    echo "$0: $@" 1>&2
-    echo "Try $0 -h for usage" 1>&2
-    exit 1
-}
-
-log() {
-    printf '%s\n' "$*" 1>&2
-}
-
-get_temp() {
-    if [[ $# -ge 1 ]]; then
-	tmp="$(mktemp "$1.XXXXXXXXXX")"
-    else
-	tmp="$(mktemp)"
-    fi
-    tmp_files+=("$tmp")
-}
-
-# mkdir -p -m mode path does not apply mode to the intermediate
-# directories it creates.
-ensure_dir() {
-    local mode=755 OPTIND opt dir
-
-    while getopts m: opt; do
-	case "$opt" in
-	    m ) mode="$OPTARG";;
-	    * ) err "bad ensure_dir usage";;
-	esac
-    done
-    shift $(($OPTIND - 1))
-    [[ $# -ge 1 ]] || err "ensure_dir - missing dir argument"
-    [[ $# -le 2 ]] || err "ensure_dir - too many arguments"
-    dir="$1"
-    if [[ ! -d "$dir" ]]; then
-	ensure_dir -m "$mode" "$(dirname "$dir")"
-	mkdir -m "$mode" "$dir"
-    fi
-}
-
-write_file_update=''
-write_file_count=0
-
-write_file() {
-    local owner=root:root mode=644 exec_cmd="" log_message="" log_message_default=""
-    local OPTIND opt path body dir
-
-    write_file_update=''
-    while getopts eLl:m:o: opt; do
-	case "$opt" in
-	    e ) exec_cmd=1;;
-	    L ) log_message_default=1;;
-	    l ) log_message="$OPTARG";;
-	    m ) mode="$OPTARG";;
-	    o ) owner="$OPTARG";;
-	    * ) err "bad write_file usage";;
-	esac
-    done
-
-    shift $(($OPTIND - 1))
-    [[ $# -ge 1 ]] || err "write_file - missing path argument"
-    [[ $# -le 2 ]] || err "write_file - too many arguments"
-    [[ -z "$exec_cmd" || $# -ge 2 ]] || err "write_file - -e option requires command argument"
-    [[ -z "$log_message" || -z "$log_message_default" ]] || \
-	err "write_file - only one of -l , -L can be given"
-
-    path="$1"
-    shift
-
-    # Use base64 to support arbitrary binary data
-    if [[ $# -eq 0 ]]; then
-	body="$(base64 -w0)"
-    elif [[ -n "$exec_cmd" ]]; then
-	body="$("$@" | base64 -w0)"
-    else
-	body="$(printf %s "$1" | base64 -w0)"
-    fi
-
-    while true; do
-	if [[ ! -f "$path" || -L "$path" ]]; then
-	    break;
-	fi
-	if [[ "$(stat -c %U:%G:%a "$path")" != "${owner}:${mode}" ]]; then
-	    break;
-	fi
-
-	if [[ "$body" != "$(base64 -w0 "$path")" ]]; then
-	    break;
-	fi
-
-	# No need to write anything
-	return
-    done
-
-    if [[ -n "$log_message" ]]; then
-	log "$log_message"
-    fi
-    if [[ -n "$log_message_default" ]]; then
-	log "  updating $path"
-    fi
-    ensure_dir "$(dirname "$path")"
-
-    # Use temporary to ensure atomic operation on filesystem
-    get_temp "$path"
-    base64 -d <<< "$body" > "$tmp"
-    chmod "$mode" "$tmp"
-    chown "$owner" "$tmp"
-    mv -f "$tmp" "$path"
-
-    write_file_update=1
-    let write_file_count+=1
-}
+source "$(dirname "$0")/lib.bash"
 
 is_valid_hostname() {
     case "$1" in
@@ -158,6 +26,7 @@ fixup_transgui() {
 
 setup_packages() {
     log "Checking packages"
+    inc_log_level
 
     local fedora_release=$(rpm -E %fedora)
     local rpmfusion_kinds=(
@@ -263,6 +132,7 @@ setup_packages() {
 
     systemctl enable autofs
     fixup_transgui
+    dec_log_level
 }
 
 setup_fstab() {
@@ -294,7 +164,7 @@ setup_fstab() {
 #custom-end#'
 
 	write_file /etc/fstab "$fstab"
-	if [[ -n "$write_file_update" ]]; then
+	if [[ -n "$file_update" ]]; then
 	    log "/etc/fstab was updated"
 	fi
 	mkdir -p /area/backup
@@ -341,7 +211,7 @@ setup_grub() {
     [[ -f "$grub_config" ]] || err "Failed to locate grub.cfg"
 
     write_file /etc/default/grub "$grub_defaults_text"
-    if [[ -n "$write_file_update" ]]; then
+    if [[ -n "$file_update" ]]; then
 	log "updating $grub_config"
 	grub2-mkconfig -o "$grub_config"
     fi
@@ -350,6 +220,7 @@ setup_grub() {
 setup_network() {
     local -A hosts
     log "Checking network"
+    inc_log_level
 
     hosts=(
 #	[kino]=192.168.2.9
@@ -366,10 +237,10 @@ setup_network() {
 	for key in "${!hosts[@]}"; do
 	    hosts_text+="$(printf '\n%s %s' "${hosts[$key]}" "$key")"
 	done
-	
+
 	# Ensure stable order
 	hosts_text="$(sort <<< "$hosts_text")"
-	
+
 	# delete all lines matching config keys and then append the proper values
 	edits=()
 	for key in "${!hosts[@]}"; do
@@ -386,13 +257,13 @@ setup_network() {
     fi
 
     setup_autofs
+    dec_log_level
 }
 
 setup_dserver_network() {
     systemctl disable firewalld
 
-    netdev_wan=enp2s0
-    netdev_lan=enp4s0
+    netdev_lan="$dserver_eth_lan"
     netdev_bridge=macvlan0
 
     if rpm -q --quiet NetworkManager ; then
@@ -402,59 +273,70 @@ setup_dserver_network() {
 	dnf remove -y NetworkManager
     fi
 
-    write_file_count=0
-    write_file /etc/systemd/network/80-wan.network <<EOF
+    file_update_count=0
+
+    write_file -L /etc/systemd/network/80-wan.network <<EOF
 [Match]
-Name=$netdev_wan
+MACAddress=80:ee:73:76:8f:4c
+
 [Network]
 DHCP=ipv4
-Name=wan
 EOF
 
     # Use macvlan, not bridge, for more efficient setup
-    write_file /etc/systemd/network/80-macvlan.netdev <<EOF
+    write_file -L /etc/systemd/network/80-macvlan.netdev <<EOF
 [NetDev]
 Name=$netdev_bridge
 Kind=macvlan
 [MACVLAN]
 Mode=bridge
 EOF
-    write_file /etc/systemd/network/80-lan.network <<EOF
+    write_file -L /etc/systemd/network/80-lan.network <<EOF
 [Match]
 Name=$netdev_lan
 [Network]
 MACVLAN=$netdev_bridge
 EOF
-    write_file /etc/systemd/network/80-macvlan.network <<EOF
+    write_file -L /etc/systemd/network/80-macvlan.network <<EOF
 [Match]
 Name=$netdev_bridge
 [Network]
 IPMasquerade=yes
 Address=192.168.2.10/24
 #Gateway=192.168.2.1
-#DNS=192.168.2.10
 EOF
-    if [[ $write_file_count -gt 0 ]]; then
-	log "  enabling/updating systemd-networkd config"
+    if ! systemctl -q is-enabled systemd-networkd; then
 	systemctl enable systemd-networkd
-	systemctl start systemd-networkd
+    fi
+
+    if [[ $file_update_count -gt 0 ]]; then
+	log "  restarting systemd-networkd config"
 	systemctl restart systemd-networkd
     fi
 
-    if [[ ! -L /etc/resolv.conf || \
+    if true; then
+	write_file -L /etc/resolv.conf <<EOF
+nameserver 127.0.0.1
+EOF
+	if systemctl -q is-enabled systemd-resolved; then
+	   log "disabling systemd-resolved"
+	   systemctl disable systemd-resolved
+	   systemctl stop systemd-resolved
+	fi
+    elif [[ ! -L /etc/resolv.conf || \
 		"$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
-	log "  enabling systemd-resolved"
+	log "enabling systemd-resolved"
 	systemctl enable systemd-resolved
 	systemctl start systemd-resolved
 	ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
     fi
 
     setup_dserver_dnsmasq
+    setup_dserver_port_forwarding
 }
 
 setup_dserver_dnsmasq() {
-    log "Checking dnsmasq server"
-    write_file /etc/dnsmasq.d/local.conf <<EOF
+    write_file -L /etc/dnsmasq.d/local.conf <<EOF
 interface=$netdev_bridge
 #interface=br0
 domain-needed
@@ -467,28 +349,87 @@ server=8.8.4.4
 
 no-hosts
 dhcp-range=192.168.2.50,192.168.2.150,10m
-dhcp-host=kino,192.168.2.9
+dhcp-host=$mac_kino,192.168.2.9,kino,infinite
 address=/dserver/192.168.2.10
 dhcp-host=44:C3:06:20:09:4A,50:B7:C3:79:73:B7,192.168.2.16
 address=/ultrabook/192.168.2.16
-#dhcp-host=08:60:6E:CD:96:68,192.168.2.1
-address=/wifi/192.168.2.1
-dhcp-host=8c:29:37:e8:0e:e2,192.168.2.17,miranda,infinite
-dhcp-option=option:router,192.168.2.1
+dhcp-host=08:60:6E:CD:96:68,192.168.2.2,wifi
+dhcp-host=d0:bf:9c:3b:44:e8,192.168.2.18
+address=/printer/192.168.2.18
+#dhcp-option=option:router,192.168.2.1
 EOF
-    local changed_dnsmasq="$write_file_update"
+    local changed_dnsmasq="$file_update"
     if ! systemctl -q is-enabled dnsmasq; then
-	log "  enabling dnsmasq"
+	log "enabling dnsmasq"
 	systemctl enable dnsmasq
     fi
     if systemctl -q is-active dnsmasq; then
 	if [[ -n "$changed_dnsmasq" ]]; then
-	    log "  restarting dnsmasq"
+	    log "restarting dnsmasq"
 	    systemctl restart dnsmasq
 	fi
     else
-	log "  starting dnsmasq"
+	log "starting dnsmasq"
 	systemctl start dnsmasq
+    fi
+}
+
+setup_dserver_port_forwarding() {
+    write_file -L -m 755 /etc/tliset/forward-ports <<'EOF'
+#!/bin/bash
+set -e -u
+
+wan_interface=wan
+action=$1
+errors=0
+
+forward() {
+    local protocol="$1" wan_port="$2" lan_ip="$3" lan_port
+    if [[ $# -le 3 ]]; then
+        lan_port="$wan_port"
+    else
+        lan_port="$4"
+    fi
+    if [[ "$lan_ip" == [a-z]* ]]; then
+        local host="$lan_ip"
+        lan_ip="$(getent hosts "$host" | cut -d' ' -f1)"
+        [[ -n "$lan_ip" ]] || { echo "Failed to find IP for $host" 1>&2; exit 1; }
+    fi
+
+    local flag
+    case "$action" in
+        open ) flag="-A" ;;
+        close ) flag="-D" ;;
+        * ) echo "Bad $0 action: $action" 1>&2 ;;
+    esac
+    iptables "$flag" PREROUTING \
+        -t nat -i "$wan_interface" \
+        -p "$protocol" --dport "$wan_port" \
+        -j DNAT --to "$lan_ip:$lan_port" || let errors+=1
+}
+
+forward tcp 9092 kino
+forward tcp 51413 kino
+forward udp 51413 kino
+
+[[ $errors -eq 0 ]] || exit 1
+EOF
+
+    write_file -L /etc/systemd/system/forward-ports.service <<EOF
+[Unit]
+After=network-online.target
+[Install]
+WantedBy=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/etc/tliset/forward-ports open
+ExecStop=/etc/tliset/forward-ports close
+EOF
+    
+    if ! systemctl -q is-enabled forward-ports; then
+	log "enabling forward-ports"
+	systemctl enable forward-ports
     fi
 }
 
@@ -560,20 +501,24 @@ Subsystem sftp /usr/libexec/openssh/sftp-server
     fi
 
     if [[ "$NAME" == dserver || "$NAME" == ultrabook ]]; then
-	write_file_count=0
-	write_file /etc/systemd/system/sshd.service.d/local.conf <<EOF
+	file_update_count=0
+	write_file -L /etc/systemd/system/sshd.service.d/local.conf <<EOF
 [Service]
 Environment=OPTIONS=-e
 EOF
-	if [[ $write_file_count -gt 0 ]]; then
+	if [[ $file_update_count -gt 0 ]]; then
 	    systemctl daemon-reload
 	fi
-	write_file /etc/ssh/sshd_config "$sshd_config"
+	write_file -L /etc/ssh/sshd_config "$sshd_config"
 
-	if [[ $write_file_count -gt 0 ]]; then
-	    log "  updating /etc/ssh/sshd_config"
-	    systemctl enable sshd
-	    systemctl restart sshd
+	if [[ "$NAME" == dserver ]]; then
+	    if ! systemctl -q is-enabled sshd; then
+		systemctl enable sshd
+	    fi
+	fi
+
+	if [[ $file_update_count -gt 0 ]]; then
+	    systemctl try-restart sshd
 	fi
 
 	# The file with public keys for root file should be public
@@ -603,19 +548,25 @@ setup_users() {
 }
 
 setup_services() {
-    log "Checking docker"
-    local config="
+    if true; then
+	if systemctl -q is-enabled docker; then
+	    log "disabling docker service"
+	    systemctl disable docker
+	fi
+    else
+	log "Checking docker"
+	local config="
 [Service]
 MountFlags=private
 "
-    mkdir -p /etc/systemd/system/docker.service.d
-    write_file /etc/systemd/system/docker.service.d/local.conf "$config"
-    if [[ -n "$write_file_update" ]]; then
-	log "updated /etc/systemd/system/docker.service.d/local.conf"
-	systemctl daemon-reload
+	mkdir -p /etc/systemd/system/docker.service.d
+	write_file /etc/systemd/system/docker.service.d/local.conf "$config"
+	if [[ -n "$file_update" ]]; then
+	    log "updated /etc/systemd/system/docker.service.d/local.conf"
+	    systemctl daemon-reload
+	fi
+	systemctl enable docker
     fi
-    systemctl enable docker
-
     if [[ "$NAME" == dserver ]]; then
         setup_dyndns
     fi
@@ -626,12 +577,13 @@ setup_dyndns() {
     log "Checking dyndns"
 
     if [[ ! -s /etc/duckdns.key ]]; then
+	[[ -t 1 ]] || err "cannot ask for /etc/duckdns.key value as input is not tty"
 	local api_key
 	IFS='' read -p 'Enter API key for www.duckdns.org: ' api_key
 	write_file -m 640 -o root:nobody /etc/duckdns.key "$api_key"
     fi
 
-    write_file_count=0
+    file_update_count=0
     write_file /etc/systemd/system/dyndns_update.timer <<EOF
 
 [Unit]
@@ -653,11 +605,10 @@ Wants=network-online.target
 
 [Service]
 User=nobody
-SyslogIdentifier=dyndns
-ExecStart=/bin/bash -c 'key="$(< /etc/duckdns.key)"; /usr/bin/curl -s -k "https://www.duckdns.org/update?domains=dsrv&token=$key&ip="'
+ExecStart=/bin/bash -c '[[ "$(/usr/bin/curl -s "https://www.duckdns.org/update?domains=dsrv&token=$(< /etc/duckdns.key)&ip=")" == OK ]]'
 Type=oneshot
 EOF
-    if [[ "$write_file_count" -gt 0 ]]; then
+    if [[ "$file_update_count" -gt 0 ]]; then
 	log "enabling/updating dyndns config"
 	systemctl daemon-reload
 	systemctl enable dyndns_update.timer
@@ -707,9 +658,7 @@ if [[ -n "$show_usage" ]]; then
 fi
 
 if [[ -n "$remote" ]]; then
-    tar -C "$(dirname "$0")" -czf - . | \
-	ssh "$remote" "rm -rf /tmp/tliset && mkdir /tmp/tliset && tar -C /tmp/tliset -xzf - && /tmp/tliset/host-setup -n '$remote'"
-    exit
+    run_remotely "$remote" -n "$remote"
 fi
 
 if [[ -z "$NAME" ]]; then

@@ -1,139 +1,8 @@
 #!/bin/bash
 
-set -u
-set -e
+source "$(dirname "$0")/lib.bash"
 
 tmp=''
-tmp_files=()
-
-
-log() {
-    local i
-    for i in "$@" ; do 
-	printf "%s\n" "$i" 1>&2
-    done
-}
-
-err() {
-    log "$@"
-    exit 1
-}
-
-cmd_log() {
-    [ $# -ge 1 ] || err "Command must be given"
-    printf "%s\n" "$*" 1>&2
-    "$@"
-}
-
-cleanup() {
-    if [[ ${#tmp_files[@]} -ge 1 ]]; then
-	rm -f "${tmp_files[@]}"
-    fi
-}
-
-trap cleanup EXIT
-
-get_temp() {
-    if [[ $# -ge 1 ]]; then
-	tmp="$(mktemp "$1.XXXXXXXXXX")"
-    else
-	tmp="$(mktemp)"
-    fi
-    tmp_files+=("$tmp")
-}
-
-# mkdir -p -m mode path does not apply mode to the intermediate
-# directories it creates.
-ensure_dir() {
-    local mode=755 OPTIND opt dir
-
-    while getopts m: opt; do
-	case "$opt" in
-	    m ) mode="$OPTARG";;
-	    * ) err "bad ensure_dir usage";;
-	esac
-    done
-    shift $(($OPTIND - 1))
-    [[ $# -ge 1 ]] || err "ensure_dir - missing dir argument"
-    [[ $# -le 2 ]] || err "ensure_dir - too many arguments"
-    dir="$1"
-    if [[ ! -d "$dir" ]]; then
-	ensure_dir -m "$mode" "$(dirname "$dir")"
-	mkdir -m "$mode" "$dir"
-    fi
-}
-
-write_file_update=''
-write_file_count=0
-
-write_file() {
-    local owner=root:root mode=644 exec_cmd="" log_message="" log_message_default=""
-    local OPTIND opt path body dir
-
-    write_file_update=''
-    while getopts eLl:m:o: opt; do
-	case "$opt" in
-	    e ) exec_cmd=1;;
-	    L ) log_message_default=1;;
-	    l ) log_message="$OPTARG";;
-	    m ) mode="$OPTARG";;
-	    o ) owner="$OPTARG";;
-	    * ) err "bad write_file usage";;
-	esac
-    done
-    
-    shift $(($OPTIND - 1))
-    [[ $# -ge 1 ]] || err "write_file - missing path argument"
-    [[ $# -le 2 ]] || err "write_file - too many arguments"
-    [[ -z "$exec_cmd" || $# -ge 2 ]] || err "write_file - -e option requires command argument"
-    [[ -z "$log_message" || -z "$log_message_default" ]] || \
-	err "write_file - only one of -l , -L can be given"
-
-    path="$1"
-    shift
-    if [[ $# -eq 0 ]]; then
-	body="$(cat)"
-    elif [[ -n "$exec_cmd" ]]; then
-	body="$("$@")"
-    else
-	body="$1"
-    fi
-
-    while true; do
-	if [[ ! -f "$path" || -L "$path" ]]; then
-	    break;
-	fi
-	if [[ "$(stat -c %U:%G:%a "$path")" != "${owner}:${mode}" ]]; then
-	    break;
-	fi
-
-	# Use comm as diff may not be available like in coreos
-	if [[ -n "$(comm --nocheck-order -3 "$path" /dev/stdin <<< "$body")" ]]; then
-	    break;
-	fi
-
-	# No need to write anything
-	return
-    done
-
-    if [[ -n "$log_message" ]]; then
-	log "$log_message"
-    fi
-    if [[ -n "$log_message_default" ]]; then
-	log "Updating $path"
-    fi
-    ensure_dir "$(dirname "$path")"
-
-    # Use temporary to ensure atomic operation on filesystem
-    get_temp "$path"
-    cat <<< "$body"  > "$tmp"
-    chmod "$mode" "$tmp"
-    chown "$owner" "$tmp"
-    mv -f "$tmp" "$path"
-
-    write_file_update=1
-    let write_file_count+=1
-}
 
 is_valid_vm_name() {
     for name in "${valid_vm_names[@]}"; do
@@ -145,42 +14,45 @@ is_valid_vm_name() {
 }
 
 print_vm_config() {
-    local network_device
-    if [[ "$net_type" == direct ]]; then
-	network_device="\
+    if [[ -z "$net_config_xml" ]]; then
+	if [[ "$net_type" == direct ]]; then
+	    net_config_xml="\
     <interface type='$net_type' trustGuestRxFilters='no'>
       <mac address='$net_mac'/>
       <source dev='$net_source_dev' mode='bridge'/>
       <model type='virtio'/>
     </interface>
 "
-    else
-	network_device="\
+	else
+	    net_config_xml="\
     <interface type='$net_type'>
       <mac address='$net_mac'/>
       <source $net_type='$net_source'/>
       <model type='virtio'/>
     </interface>
 "
+	fi
     fi
     
     local extra_devices=""
-    if [[ -b "$disk_vol" ]]; then
-	extra_devices+="\
+    if [[ -n "$disk_vol" ]]; then
+	if [[ -b "$disk_vol" ]]; then
+	    extra_devices+="\
     <disk type='block' device='disk'>
       <driver name='qemu' type='raw' cache='none'/>
       <source dev='$disk_vol'/>
       <target dev='vdb' bus='virtio'/>
     </disk>
 "
-    else
-	extra_devices="\
+	else
+	    extra_devices="\
     <disk type='file' device='disk'>
       <driver name='qemu' type='raw'/>
       <source file='$disk_vol'/>
       <target dev='vdb' bus='virtio'/>
     </disk>
 "
+	fi
     fi
     
     cat <<EOF
@@ -222,7 +94,7 @@ print_vm_config() {
       <target dir='config-2'/>
       <readonly/>
     </filesystem>
-    $network_device
+    $net_config_xml
     $extra_devices
   </devices>
 </domain>
@@ -484,7 +356,7 @@ setup_coreos_image() {
 }
 
 setup_file_images() {
-    if [[ -b "$disk_vol" ]]; then
+    if [[ -z "$disk_vol" || -b "$disk_vol" ]]; then
 	return 0
     fi
     
@@ -533,7 +405,7 @@ setup_coreos_config() {
 	restorecon -R "$config_root"
     fi
 
-    write_file -l "Updating $config_file" -e "$config_file" print_coreos_cloud_config
+    write_file -L -e "$config_file" print_coreos_cloud_config
 
     ensure_dir "$(dirname "$ssh_host_key")"
     ensure_ssh_key "$ssh_host_key"
@@ -552,14 +424,16 @@ setup_vm() {
 show_usage=""
 usage_errors=()
 VM=""
+remote=""
 
 valid_vm_names=(
     kino
+    drouter
     t-kino
     thip
 )
 
-while getopts :hn: opt; do
+while getopts :hn:r: opt; do
     case "$opt" in
 	h ) show_usage=1 ;;
 	n )
@@ -567,6 +441,10 @@ while getopts :hn: opt; do
 	    VM="$OPTARG"
 	    is_valid_vm_name "$VM" || \
 		usage_errors+=("the value of -n argument '$VM' is not a known VM name")
+	    ;;
+	r )
+	    [[ -z "$remote" ]] || "-r can only be given once"
+	    remote="$OPTARG"
 	    ;;
 	\? ) usage_errors+=("option -$OPTARG requires an argument") ;;
 	* ) usage_errors+=("unknown -$OPTARG option") ;;
@@ -582,6 +460,7 @@ if test -n "$show_usage"; then
     echo "  -h       show this help and exit"
     echo "  -n name  required machine name. The valid values are:"
     echo "             ${valid_vm_names[*]}"
+    echo "  -r host  run remotely on the given host"
     echo
     exit
 fi
@@ -590,6 +469,10 @@ fi
 
 [[ ${#usage_errors[@]} -eq 0 ]] || \
     err "Usage errors:" "${usage_errors[@]/#/    }" "Try $0 -h for help."
+
+if [[ -n "$remote" ]]; then
+    run_remotely "$remote" -n "$VM"
+fi
 
 image_root="/var/lib/libvirt/images"
 image_dir="$image_root/$VM"
@@ -605,20 +488,36 @@ ssh_authorized_sources=(
     /etc/ssh/authorized_keys/root
 )
     
+net_config_xml=""
 case "$VM" in
     kino )
-	vm_id=
 	vm_autostart=1
 	vm_memory=468
 	disk_vol=/dev/sda2
 	#net_type=bridge
 	net_type=direct
-        net_source_dev=enp4s0
-	net_mac=52:54:00:54:6e:ef
-	net_ip=192.168.2.9/24
-	net_gateway=192.168.2.1
-	net_dns="192.168.2.1"
+	net_mac="$mac_kino"
 	;;
+    drouter )
+	vm_autostart=1
+	vm_memory=384
+	disk_vol=
+	net_type=direct
+        net_source_dev=enp4s0
+	net_config_xml="\
+<interface type='direct' trustGuestRxFilters='yes'>
+  <mac address='$mac_drouter_wan'/>
+  <source dev='$dserver_eth_wan' mode='passthrough'/>
+  <model type='virtio'/>
+</interface>
+<interface type='direct' trustGuestRxFilters='yes'>
+  <mac address='$mac_drouter_lan'/>
+  <source dev='$dserver_eth_lan' mode='bridge'/>
+  <model type='virtio'/>
+</interface>
+"
+	;;
+	
     t-kino )
 	vm_autostart=''
 	vm_memory=360
