@@ -212,7 +212,6 @@ create_ssh_config() {
     write_file "$ssh_config" <<EOF
 Match originalhost kino-files exec $set_etc/is-outside-home-net
   HostName dsrv.duckdns.org
-  Ciphers chacha20-poly1305@openssh.com
 Host kino-files
   HostKeyAlias kino-files
   AddressFamily inet

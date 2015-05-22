@@ -80,9 +80,10 @@ setup_packages() {
 	pdfmerge poppler-utils
 
 	# Media
-	kdenlive vlc gimp inkscape gthumb
+	#kdenlive
+	vlc gimp inkscape gthumb
 	scribus transgui openssl-devel
-	evince-djvu pdf2djvu
+	evince evince-djvu pdf2djvu
 	linux-libertine-biolinum-fonts linux-libertine-fonts
 	gstreamer1-libav
 	gstreamer1-plugins-bad-free
@@ -112,7 +113,7 @@ setup_packages() {
 	    ;;
     esac
 
-    if [[ "$NAME" == dserver ]]; then
+    if [[ "$NAME" == dserver || "$NAME" == miranda ]]; then
 	list+=(dnsmasq)
     fi
 
@@ -252,28 +253,63 @@ setup_network() {
 	write_file -L /etc/hosts "$hosts_text"
     fi
 
-    if [[ "$NAME" == dserver ]]; then
-	setup_dserver_network
-    fi
+    case "$NAME" in
+	dserver ) setup_dserver_network ;;
+	miranda ) setup_miranda_network ;;
+    esac
 
     setup_autofs
     dec_log_level
 }
 
-setup_dserver_network() {
-    systemctl disable firewalld
-
-    netdev_lan="$dserver_eth_lan"
-    netdev_bridge=macvlan0
-
+enable_networkd() {
     if rpm -q --quiet NetworkManager ; then
 	log "disabling NetworkManager"
 	systemctl disable NetworkManager
 	systemctl stop NetworkManager
 	dnf remove -y NetworkManager
     fi
+    if ! systemctl -q is-enabled systemd-networkd; then
+	log "enabling systemd-networkd"
+	systemctl enable systemd-networkd
+    fi
+}
+
+enable_resolved() {
+    if ! systemctl -q is-enabled systemd-resolved; then
+	log "enabling systemd-resolved"
+	systemctl enable systemd-resolved 
+    fi
+
+    if [[ ! -f /run/systemd/resolve/resolv.conf ]]; then
+	systemctl start systemd-resolved 
+    fi
+
+    if [[ ! -L /etc/resolv.conf || \
+		"$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
+	log "symlinking /etc/resolv.conf"
+	ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
+    fi
+}
+
+disable_firewalld() {
+    if systemctl -q is-enabled firewalld; then
+	log "disabling firewalld"
+	systemctl disable firewalld
+	systemctl stop firewalld
+    fi
+}
+
+
+setup_dserver_network() {
+    disable_firewalld
+
+    netdev_lan="$dserver_eth_lan"
+    netdev_bridge=macvlan0
 
     file_update_count=0
+
+    enable_networkd
 
     write_file -L /etc/systemd/network/80-wan.network <<EOF
 [Match]
@@ -305,12 +341,9 @@ IPMasquerade=yes
 Address=192.168.2.10/24
 #Gateway=192.168.2.1
 EOF
-    if ! systemctl -q is-enabled systemd-networkd; then
-	systemctl enable systemd-networkd
-    fi
 
     if [[ $file_update_count -gt 0 ]]; then
-	log "  restarting systemd-networkd config"
+	log "restarting systemd-networkd"
 	systemctl restart systemd-networkd
     fi
 
@@ -323,12 +356,8 @@ EOF
 	   systemctl disable systemd-resolved
 	   systemctl stop systemd-resolved
 	fi
-    elif [[ ! -L /etc/resolv.conf || \
-		"$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
-	log "enabling systemd-resolved"
-	systemctl enable systemd-resolved
-	systemctl start systemd-resolved
-	ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
+    else
+	enable_resolved
     fi
 
     setup_dserver_dnsmasq
@@ -349,13 +378,17 @@ server=8.8.4.4
 
 no-hosts
 dhcp-range=192.168.2.50,192.168.2.150,10m
-dhcp-host=$mac_kino,192.168.2.9,kino,infinite
+
 address=/dserver/192.168.2.10
-dhcp-host=44:C3:06:20:09:4A,50:B7:C3:79:73:B7,192.168.2.16
-address=/ultrabook/192.168.2.16
-dhcp-host=08:60:6E:CD:96:68,192.168.2.2,wifi
-dhcp-host=d0:bf:9c:3b:44:e8,192.168.2.18
-address=/printer/192.168.2.18
+address=/dsrv.duckdns.org/192.168.2.10
+
+dhcp-host=08:60:6E:CD:96:68,192.168.2.2
+address=/wifi/192.168.2.2
+
+# Virtual machine needs a stable ip to use with iptables rules
+dhcp-host=$mac_kino,192.168.2.9
+address=/kino/192.168.2.9
+
 #dhcp-option=option:router,192.168.2.1
 EOF
     local changed_dnsmasq="$file_update"
@@ -430,6 +463,41 @@ EOF
     if ! systemctl -q is-enabled forward-ports; then
 	log "enabling forward-ports"
 	systemctl enable forward-ports
+    fi
+}
+
+setup_miranda_network() {
+
+    # TODO use dnsmasq to integrate with VM names
+
+    if systemd-detect-virt -v -q; then
+
+	enable_networkd
+
+	write_file -L /etc/systemd/network/zz-default.network <<EOF
+[Network]
+DHCP=v4
+
+[DHCP]
+UseMTU=true
+UseDomains=true
+EOF
+	if let file_update; then
+	    log "restarting systemd-networkd"
+	    systemctl restart systemd-networkd
+	fi
+	enable_resolved
+
+	disable_firewalld
+
+    else
+	write_file -L /etc/NetworkManager/conf.d/99-local.conf <<EOF
+[main]
+#dns=dnsmasq
+EOF
+	if [[ -n "$file_update" ]]; then
+	    cmd_log systemctl restart NetworkManager
+	fi
     fi
 }
 
@@ -548,6 +616,8 @@ setup_users() {
 }
 
 setup_services() {
+    log "Checking services"
+    inc_log_level
     if true; then
 	if systemctl -q is-enabled docker; then
 	    log "disabling docker service"
@@ -570,6 +640,7 @@ MountFlags=private
     if [[ "$NAME" == dserver ]]; then
         setup_dyndns
     fi
+    dec_log_level
 }
 
 setup_dyndns() {
@@ -639,9 +710,9 @@ while getopts :hn:r: opt; do
 	* ) usage_err "unknown -$OPTARG option" ;;
     esac
 done
-shift $(($OPTIND - 1))
 
-[[ $# -eq 0 ]] || usage_err "Unexpected extra arguments: $@"
+#[[ $# -eq $(($OPTIND - 1)) ]] || usage_err "Unexpected extra arguments: $@"
+let OPTIND==1+$# || usage_err "Unexpected extra arguments: $@"
 
 [[ -z "$NAME" || -z "$remote" ]] || usage_err "Only one of -n, -r can be given"
 
@@ -659,6 +730,10 @@ fi
 
 if [[ -n "$remote" ]]; then
     run_remotely "$remote" -n "$remote"
+fi
+
+if [[ "$(id -u)" -ne 0 ]]; then
+    exec sudo "$0" "$@"
 fi
 
 if [[ -z "$NAME" ]]; then
