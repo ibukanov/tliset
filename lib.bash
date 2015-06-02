@@ -95,8 +95,8 @@ file_update=''
 file_update_count=0
 
 write_file() {
-    local before_write="" owner=root:root mode=644 log_message=""
-    local -i exec_cmd=0 log_message_default=1
+    local before_write="" owner=root:root mode=644 log_message="updating %s"
+    local -i exec_cmd=0
     local OPTIND opt path body dir
 
     file_update=''
@@ -104,7 +104,7 @@ write_file() {
 	case "$opt" in
 	    b ) before_write="$OPTARG";;
 	    e ) let exec_cmd=1;;
-	    l ) log_message="$OPTARG"; log_message_default=0;;
+	    l ) log_message="$OPTARG";;
 	    m ) mode="$OPTARG";;
 	    o ) owner="$OPTARG";;
 	    * ) err "bad write_file usage";;
@@ -148,10 +148,7 @@ write_file() {
     done
 
     if let ${#log_message}; then
-	log "$log_message"
-    fi
-    if let log_message_default; then
-	log "updating $path"
+	log "$(printf "$log_message" "$path")"
     fi
 
     if let ${#before_write}; then
@@ -172,13 +169,12 @@ write_file() {
 }
 
 remove_file() {
-    local log_message="" log_message_default=""
+    local log_message="removing %s"
     local OPTIND opt
 
     file_update=''
-    while getopts Ll: opt; do
+    while getopts l: opt; do
 	case "$opt" in
-	    L ) log_message_default=1;;
 	    l ) log_message="$OPTARG";;
 	    * ) err "bad remove_file usage";;
 	esac
@@ -187,8 +183,6 @@ remove_file() {
     shift $(($OPTIND - 1))
     [[ $# -ge 1 ]] || err "remove_file - missing path argument"
     [[ $# -le 2 ]] || err "remove_file - too many arguments"
-    [[ -z "$log_message" || -z "$log_message_default" ]] || \
-	err "remove_file - only one of -l , -L can be given"
 
     local path="$1"
     shift
@@ -197,11 +191,8 @@ remove_file() {
 	return
     fi
 
-    if [[ -n "$log_message" ]]; then
-	log "$log_message"
-    fi
-    if [[ -n "$log_message_default" ]]; then
-	log "removing $path"
+    if let ${#log_message}; then
+	log "$(printf "$log_message" "$path")"
     fi
 
     rm "$path"

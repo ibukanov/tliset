@@ -548,7 +548,7 @@ setup_miranda_network() {
 
 	enable_networkd
 
-	write_file -L /etc/systemd/network/zz-default.network <<EOF
+	write_file /etc/systemd/network/zz-default.network <<EOF
 [Network]
 DHCP=v4
 
@@ -565,7 +565,7 @@ EOF
 	disable_firewalld
 
     else
-	write_file -L /etc/NetworkManager/conf.d/99-local.conf <<EOF
+	write_file /etc/NetworkManager/conf.d/99-local.conf <<EOF
 [main]
 #dns=dnsmasq
 EOF
