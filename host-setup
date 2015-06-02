@@ -387,7 +387,6 @@ no-hosts
 dhcp-range=192.168.2.50,192.168.2.150,10m
 
 address=/dserver/192.168.2.10
-address=/dsrv.duckdns.org/192.168.2.10
 address=/dserver.mir2.org/192.168.2.10
 
 dhcp-host=08:60:6E:CD:96:68,192.168.2.2
@@ -532,6 +531,41 @@ EOF
 
     else
 	write_file /etc/NetworkManager/conf.d/99-local.conf <<EOF
+[main]
+#dns=dnsmasq
+EOF
+	if [[ -n "$file_update" ]]; then
+	    cmd_log systemctl restart NetworkManager
+	fi
+    fi
+}
+
+setup_miranda_network() {
+
+    # TODO use dnsmasq to integrate with VM names
+
+    if systemd-detect-virt -v -q; then
+
+	enable_networkd
+
+	write_file -L /etc/systemd/network/zz-default.network <<EOF
+[Network]
+DHCP=v4
+
+[DHCP]
+UseMTU=true
+UseDomains=true
+EOF
+	if let file_update; then
+	    log "restarting systemd-networkd"
+	    systemctl restart systemd-networkd
+	fi
+	enable_resolved
+
+	disable_firewalld
+
+    else
+	write_file -L /etc/NetworkManager/conf.d/99-local.conf <<EOF
 [main]
 #dns=dnsmasq
 EOF
