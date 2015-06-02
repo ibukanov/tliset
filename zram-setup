@@ -5,7 +5,7 @@ setup_zram() {
     
     log "Checking zram"
 
-    write_file -L -m 755 /usr/bin/zram-status <<'EOF'
+    write_file -m 755 /usr/bin/zram-status <<'EOF'
 #!/usr/bin/bash
 
 set -u
@@ -30,7 +30,7 @@ echo "max_comp_streams: $(cat $dir/max_comp_streams)"
 echo "comp_algorithm: $(cat $dir/comp_algorithm)"
 EOF
 
-    write_file -L /etc/systemd/system/zram.service <<EOF
+    write_file /etc/systemd/system/zram.service <<EOF
 [Unit]
 Description=Service enabling RAM compression using zRam
 
@@ -47,7 +47,7 @@ EOF
 	reload_systemd=1
     fi
 
-    write_file -L -m 755 /etc/tliset/zram-enable <<'EOF'
+    write_file -m 755 /etc/tliset/zram-enable <<'EOF'
 #!/usr/bin/bash
 
 set -u
@@ -73,7 +73,7 @@ echo "${SWAP_SIZE}" > /sys/block/zram0/disksize
 /usr/sbin/swapon -p 100 /dev/zram0
 EOF
     
-    write_file -L -m 755 /etc/tliset/zram-disable <<'EOF'
+    write_file -m 755 /etc/tliset/zram-disable <<'EOF'
 #!/usr/bin/bash
 
 set -u

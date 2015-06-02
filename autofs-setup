@@ -210,24 +210,19 @@ create_ssh_config() {
     fi
 
     write_file "$ssh_config" <<EOF
-Match originalhost kino-files exec $set_etc/is-outside-home-net
-  HostName dsrv.duckdns.org
-  Ciphers chacha20-poly1305@openssh.com
 Host kino-files
   HostKeyAlias kino-files
   AddressFamily inet
   CheckHostIP no
   Port $files_ssh_port
-  HostName kino
+  HostName extra.mir2.org
   User user
   Ciphers aes128-gcm@openssh.com
   MACs umac-128@openssh.com
 
-Match originalhost dserver exec $set_etc/is-outside-home-net
-  HostName dsrv.duckdns.org
-  Ciphers chacha20-poly1305@openssh.com
 Host dserver
   HostKeyAlias dserver
+  HostName dserver.mir2.org
   AddressFamily inet
   CheckHostIP no
   Ciphers aes128-gcm@openssh.com

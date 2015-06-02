@@ -262,6 +262,7 @@ write_files:
     content: |
       #!/bin/bash
       set -e -u
+      [[ -b /dev/vdb ]] || { echo "/dev/vdb must exist" 1>&2; exit 1 }
       mkdir -p /vol
       if ! mount -t ext4 /dev/vdb /vol 2>/dev/null; then 
           mkfs.ext4 /dev/vdb
@@ -405,7 +406,7 @@ setup_coreos_config() {
 	restorecon -R "$config_root"
     fi
 
-    write_file -L -e "$config_file" print_coreos_cloud_config
+    write_file -e "$config_file" print_coreos_cloud_config
 
     ensure_dir "$(dirname "$ssh_host_key")"
     ensure_ssh_key "$ssh_host_key"

@@ -2,10 +2,15 @@
 
 source "$(dirname "$0")/lib.bash"
 
-is_valid_hostname() {
-    case "$1" in
-	dserver | miranda | ultrabook ) return 0;;
-    esac
+valid_host_names=(dserver miranda ultrabook thip)
+
+is_valid_host_name() {
+    local name="$1" i
+    for i in "${valid_host_names[@]}"; do
+	if [[ "$i" == "$name" ]]; then
+	    return 0
+	fi
+    done
     return 1;
 }
 
@@ -31,7 +36,7 @@ setup_packages() {
     local fedora_release=$(rpm -E %fedora)
     local rpmfusion_kinds=(
 	free
-#	rpmfusion-nonfree-release
+	nonfree
     )
     local i rpmfusion_repos=()
     for i in "${rpmfusion_kinds[@]}"; do rpmfusion_repos+=("rpmfusion-$i-release"); done
@@ -58,7 +63,7 @@ setup_packages() {
 	autofs udftools inotify-tools fdupes fslint
 
 	# Archives
-	# unrar libunrar
+	unrar libunrar
 
 	# encryption and backup
 	apg duplicity perl-Digest-Bcrypt python-gdata
@@ -71,7 +76,9 @@ setup_packages() {
 
 	# GUI
 	gnome-tweak-tool
+	dconf-editor
 	nautilus-open-terminal
+	gnome-shell-extension-alternate-tab
 
 	# Graphs
 	graphviz graphviz-doc
@@ -80,9 +87,10 @@ setup_packages() {
 	pdfmerge poppler-utils
 
 	# Media
-	kdenlive vlc gimp inkscape gthumb
+	kdenlive
+	vlc gimp inkscape gthumb
 	scribus transgui openssl-devel
-	evince-djvu pdf2djvu
+	evince evince-djvu pdf2djvu
 	linux-libertine-biolinum-fonts linux-libertine-fonts
 	gstreamer1-libav
 	gstreamer1-plugins-bad-free
@@ -112,7 +120,7 @@ setup_packages() {
 	    ;;
     esac
 
-    if [[ "$NAME" == dserver ]]; then
+    if [[ "$NAME" == dserver || "$NAME" == miranda ]]; then
 	list+=(dnsmasq)
     fi
 
@@ -249,33 +257,68 @@ setup_network() {
 
 	hosts_text="$(sed "${edits[@]}" /etc/hosts)$hosts_text"
 
-	write_file -L /etc/hosts "$hosts_text"
+	write_file /etc/hosts "$hosts_text"
     fi
 
-    if [[ "$NAME" == dserver ]]; then
-	setup_dserver_network
-    fi
+    case "$NAME" in
+	dserver ) setup_dserver_network ;;
+	miranda ) setup_miranda_network ;;
+    esac
 
     setup_autofs
     dec_log_level
 }
 
-setup_dserver_network() {
-    systemctl disable firewalld
-
-    netdev_lan="$dserver_eth_lan"
-    netdev_bridge=macvlan0
-
+enable_networkd() {
     if rpm -q --quiet NetworkManager ; then
 	log "disabling NetworkManager"
 	systemctl disable NetworkManager
 	systemctl stop NetworkManager
 	dnf remove -y NetworkManager
     fi
+    if ! systemctl -q is-enabled systemd-networkd; then
+	log "enabling systemd-networkd"
+	systemctl enable systemd-networkd
+    fi
+}
+
+enable_resolved() {
+    if ! systemctl -q is-enabled systemd-resolved; then
+	log "enabling systemd-resolved"
+	systemctl enable systemd-resolved 
+    fi
+
+    if [[ ! -f /run/systemd/resolve/resolv.conf ]]; then
+	systemctl start systemd-resolved 
+    fi
+
+    if [[ ! -L /etc/resolv.conf || \
+		"$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
+	log "symlinking /etc/resolv.conf"
+	ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
+    fi
+}
+
+disable_firewalld() {
+    if systemctl -q is-enabled firewalld; then
+	log "disabling firewalld"
+	systemctl disable firewalld
+	systemctl stop firewalld
+    fi
+}
+
+
+setup_dserver_network() {
+    disable_firewalld
+
+    netdev_lan="$dserver_eth_lan"
+    netdev_bridge=macvlan0
 
     file_update_count=0
 
-    write_file -L /etc/systemd/network/80-wan.network <<EOF
+    enable_networkd
+
+    write_file /etc/systemd/network/80-wan.network <<EOF
 [Match]
 MACAddress=80:ee:73:76:8f:4c
 
@@ -284,20 +327,20 @@ DHCP=ipv4
 EOF
 
     # Use macvlan, not bridge, for more efficient setup
-    write_file -L /etc/systemd/network/80-macvlan.netdev <<EOF
+    write_file /etc/systemd/network/80-macvlan.netdev <<EOF
 [NetDev]
 Name=$netdev_bridge
 Kind=macvlan
 [MACVLAN]
 Mode=bridge
 EOF
-    write_file -L /etc/systemd/network/80-lan.network <<EOF
+    write_file /etc/systemd/network/80-lan.network <<EOF
 [Match]
 Name=$netdev_lan
 [Network]
 MACVLAN=$netdev_bridge
 EOF
-    write_file -L /etc/systemd/network/80-macvlan.network <<EOF
+    write_file /etc/systemd/network/80-macvlan.network <<EOF
 [Match]
 Name=$netdev_bridge
 [Network]
@@ -305,17 +348,14 @@ IPMasquerade=yes
 Address=192.168.2.10/24
 #Gateway=192.168.2.1
 EOF
-    if ! systemctl -q is-enabled systemd-networkd; then
-	systemctl enable systemd-networkd
-    fi
 
     if [[ $file_update_count -gt 0 ]]; then
-	log "  restarting systemd-networkd config"
+	log "restarting systemd-networkd"
 	systemctl restart systemd-networkd
     fi
 
     if true; then
-	write_file -L /etc/resolv.conf <<EOF
+	write_file /etc/resolv.conf <<EOF
 nameserver 127.0.0.1
 EOF
 	if systemctl -q is-enabled systemd-resolved; then
@@ -323,12 +363,8 @@ EOF
 	   systemctl disable systemd-resolved
 	   systemctl stop systemd-resolved
 	fi
-    elif [[ ! -L /etc/resolv.conf || \
-		"$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
-	log "enabling systemd-resolved"
-	systemctl enable systemd-resolved
-	systemctl start systemd-resolved
-	ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
+    else
+	enable_resolved
     fi
 
     setup_dserver_dnsmasq
@@ -336,7 +372,7 @@ EOF
 }
 
 setup_dserver_dnsmasq() {
-    write_file -L /etc/dnsmasq.d/local.conf <<EOF
+    write_file /etc/dnsmasq.d/local.conf <<EOF
 interface=$netdev_bridge
 #interface=br0
 domain-needed
@@ -349,13 +385,22 @@ server=8.8.4.4
 
 no-hosts
 dhcp-range=192.168.2.50,192.168.2.150,10m
-dhcp-host=$mac_kino,192.168.2.9,kino,infinite
+
 address=/dserver/192.168.2.10
-dhcp-host=44:C3:06:20:09:4A,50:B7:C3:79:73:B7,192.168.2.16
-address=/ultrabook/192.168.2.16
-dhcp-host=08:60:6E:CD:96:68,192.168.2.2,wifi
-dhcp-host=d0:bf:9c:3b:44:e8,192.168.2.18
-address=/printer/192.168.2.18
+address=/dsrv.duckdns.org/192.168.2.10
+address=/dserver.mir2.org/192.168.2.10
+
+dhcp-host=08:60:6E:CD:96:68,192.168.2.2
+address=/wifi/192.168.2.2
+
+# Virtual machine needs a stable ip to use with iptables rules
+dhcp-host=$mac_kino,192.168.2.9
+address=/kino/192.168.2.9
+address=/extra.mir2.org/192.168.2.9
+
+# Terentiy's tablet
+dhcp-host=34:23:ba:a4:0f:85,192.168.2.20
+
 #dhcp-option=option:router,192.168.2.1
 EOF
     local changed_dnsmasq="$file_update"
@@ -374,48 +419,69 @@ EOF
     fi
 }
 
+# Stop port forwarding before changing the script the setup it so the
+# stop uses the old definition.
+stop_old_port_forwarding() {
+    if systemctl -q is-active forward-ports; then
+	log "stopping old port forwarding"
+	systemctl stop forward-ports
+    fi
+}
+
 setup_dserver_port_forwarding() {
-    write_file -L -m 755 /etc/tliset/forward-ports <<'EOF'
+    file_update_count=0
+    write_file -m 755 -b stop_old_port_forwarding \
+	       /etc/tliset/forward-ports <<EOF
 #!/bin/bash
 set -e -u
 
-wan_interface=wan
-action=$1
+wan_interface=$dserver_eth_wan
+action=\$1
 errors=0
 
+get_ip() {
+    local host="\$1"
+    local lan_ip="\$(getent hosts "\$host" | cut -d' ' -f1)"
+    [[ -n "\$lan_ip" ]] || { echo "Failed to find IP for \$host" 1>&2; exit 1; }
+    printf '%s' "\$lan_ip"
+}
+
 forward() {
-    local protocol="$1" wan_port="$2" lan_ip="$3" lan_port
-    if [[ $# -le 3 ]]; then
-        lan_port="$wan_port"
+    local protocol="\$1" wan_port="\$2" lan_ip="\$3" lan_port
+    if [[ \$# -le 3 ]]; then
+        lan_port="\$wan_port"
     else
-        lan_port="$4"
-    fi
-    if [[ "$lan_ip" == [a-z]* ]]; then
-        local host="$lan_ip"
-        lan_ip="$(getent hosts "$host" | cut -d' ' -f1)"
-        [[ -n "$lan_ip" ]] || { echo "Failed to find IP for $host" 1>&2; exit 1; }
+        lan_port="\$4"
     fi
 
     local flag
-    case "$action" in
+    case "\$action" in
         open ) flag="-A" ;;
         close ) flag="-D" ;;
-        * ) echo "Bad $0 action: $action" 1>&2 ;;
+        * ) echo "Bad \$0 action: \$action" 1>&2 ;;
     esac
-    iptables "$flag" PREROUTING \
-        -t nat -i "$wan_interface" \
-        -p "$protocol" --dport "$wan_port" \
-        -j DNAT --to "$lan_ip:$lan_port" || let errors+=1
+    iptables "\$flag" PREROUTING \
+        -t nat -i "\$wan_interface" \
+        -p "\$protocol" --dport "\$wan_port" \
+        -j DNAT --to "\$lan_ip:\$lan_port" || let errors+=1
 }
 
-forward tcp 9092 kino
-forward tcp 51413 kino
-forward udp 51413 kino
+#kino="\$(get_ip kino)"
+kino="$ip_kino"
 
-[[ $errors -eq 0 ]] || exit 1
+forward tcp 9092 \$kino
+forward tcp 51413 \$kino
+forward udp 51413 \$kino
+
+# Minecraft server
+forward tcp 19132 192.168.2.20
+forward udp 19132 192.168.2.20
+
+let "!errors" || exit 1
 EOF
 
-    write_file -L /etc/systemd/system/forward-ports.service <<EOF
+    write_file -b stop_old_port_forwarding \
+	       /etc/systemd/system/forward-ports.service <<EOF
 [Unit]
 After=network-online.target
 [Install]
@@ -430,6 +496,48 @@ EOF
     if ! systemctl -q is-enabled forward-ports; then
 	log "enabling forward-ports"
 	systemctl enable forward-ports
+    fi
+
+    if let file_update_count; then
+	log "starting port forwarding"
+	systemctl daemon-reload
+	systemctl start forward-ports
+    fi
+}
+
+setup_miranda_network() {
+
+    # TODO use dnsmasq to integrate with VM names
+
+    if systemd-detect-virt -v -q; then
+
+	enable_networkd
+
+	write_file /etc/systemd/network/zz-default.network <<EOF
+[Network]
+DHCP=v4
+
+[DHCP]
+UseMTU=true
+UseDomains=true
+CriticalConnection=true
+EOF
+	if let file_update; then
+	    log "restarting systemd-networkd"
+	    systemctl restart systemd-networkd
+	fi
+	enable_resolved
+
+	disable_firewalld
+
+    else
+	write_file /etc/NetworkManager/conf.d/99-local.conf <<EOF
+[main]
+#dns=dnsmasq
+EOF
+	if [[ -n "$file_update" ]]; then
+	    cmd_log systemctl restart NetworkManager
+	fi
     fi
 }
 
@@ -447,6 +555,7 @@ setup_autofs() {
 
 setup_ssh() {
     log "Checking ssh"
+    inc_log_level
     mkdir -p -m 0700 /root/.ssh
     case "$NAME" in
 	miranda | ultrabook )
@@ -466,9 +575,11 @@ setup_ssh() {
 	    done
 	    ;;
 	* )
-	    if [[ ! -f /root/.ssh/id_ed25519 ]]; then
-		log "Generating ssh key for the root user"
-		ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
+	    if let kind_fedora; then
+		if [[ ! -f /root/.ssh/id_ed25519 ]]; then
+		    log "Generating ssh key for the root user"
+		    ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
+		fi
 	    fi
 	    ;;
     esac
@@ -485,7 +596,7 @@ MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-ripemd160-
 UseDNS no
 ClientAliveInterval 180
 
-AuthorizedKeysFile /etc/ssh/authorized_keys/%u /etc/ssh/authorized_keys/root
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u
 PasswordAuthentication no
 ChallengeResponseAuthentication no
 GSSAPIAuthentication no
@@ -493,46 +604,61 @@ UsePAM yes
 
 Subsystem sftp /usr/libexec/openssh/sftp-server
 "
-    local root_authorized_keys="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuRT02EgmvQdI96X/qGdUCCSUbTHlvRiHuF0BKpNhch igor@localhost.localdomain"
+    local root_authorized_keys="$ssh_pubkey_igor"
 
     if [[ "$NAME" == dserver ]]; then
 	# Allow root to ssh to self for debugging
-	root_authorized_keys+="$(printf '\n%s' "$(cat /root/.ssh/id_ed25519.pub)")"
+	root_authorized_keys+="$(< /root/.ssh/id_ed25519.pub)$NL"
     fi
 
-    if [[ "$NAME" == dserver || "$NAME" == ultrabook ]]; then
-	file_update_count=0
-	write_file -L /etc/systemd/system/sshd.service.d/local.conf <<EOF
+    file_update_count=0
+    if let kind_fedora; then
+	write_file /etc/systemd/system/sshd.service.d/local.conf <<EOF
 [Service]
 Environment=OPTIONS=-e
 EOF
-	if [[ $file_update_count -gt 0 ]]; then
+	if let file_update_count; then
 	    systemctl daemon-reload
 	fi
-	write_file -L /etc/ssh/sshd_config "$sshd_config"
-
-	if [[ "$NAME" == dserver ]]; then
-	    if ! systemctl -q is-enabled sshd; then
-		systemctl enable sshd
-	    fi
-	fi
-
-	if [[ $file_update_count -gt 0 ]]; then
-	    systemctl try-restart sshd
-	fi
-
-	# The file with public keys for root file should be public
-	# redable so it can be used to login to other accounts.
-	write_file -L -m 644 /etc/ssh/authorized_keys/root "$root_authorized_keys"
-	write_file -L -m 640 -o root:lubava /etc/ssh/authorized_keys/lubava <<EOF
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKGV+r2T/Mf9QrEsupuxwWMv2UtLYgD3rjBQG/W5Dfxo lubava@ultrabook.localdomain
-EOF
     fi
+    write_file /etc/ssh/sshd_config "$sshd_config"
+    
+    if [[ "$NAME" == dserver ]]; then
+	if ! systemctl -q is-enabled sshd; then
+	    log "enabling sshd"
+	    systemctl enable sshd
+	fi
+    elif [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
+	if systemctl -q is-enabled sshd; then
+	    log "disabling sshd"
+	    systemctl disable sshd
+	fi
+    fi
+    
+    if let file_update_count && systemctl -q is-active sshd; then
+	log "restarting sshd"
+	systemctl restart sshd
+    fi
+    
+    write_file -m 640 /etc/ssh/authorized_keys/root "$root_authorized_keys"
+    if let kind_coreos; then
+	write_file -m 640 -o root:core /etc/ssh/authorized_keys/core "$root_authorized_keys"
+	remove_file /home/core/.ssh/authorized_keys.d/coreos-cloudinit
+	remove_file /home/core/.ssh/authorized_keys
+    fi
+    if [[ "$NAME" == dserver ]]; then
+	# Also allow the admin to login directly as user so sshfs from
+	# the admin account to the user dir works.
+	write_file -m 640 -o root:lubava /etc/ssh/authorized_keys/lubava \
+		   "$root_authorized_keys$ssh_pubkey_lubava"
+    fi
+    dec_log_level
 }
 
 add_user() {
     local user="$1" id="$2"
     if ! id -u "$user" 2>/dev/null 1>&2; then
+	log "creating user name=$user id=$id"
 	groupadd -g "$id" "$user"
 	useradd -g "$id" -u "$id" "$user"
 	passwd -d "$user"
@@ -541,35 +667,80 @@ add_user() {
 
 setup_users() {
     log "Checking users"
-    add_user lubava 1978
+    inc_log_level
+    if [[ "$NAME" == dserver || "$NAME" == ultrabook || "$NAME" == miranda ]]; then
+	add_user lubava 1978
+    fi
     if [[ "$NAME" == dserver ]]; then
 	add_user kino 1001
     fi
+    dec_log_level
 }
 
 setup_services() {
-    if true; then
+    log "Checking services"
+    inc_log_level
+    if let kind_fedora; then
 	if systemctl -q is-enabled docker; then
 	    log "disabling docker service"
 	    systemctl disable docker
 	fi
-    else
-	log "Checking docker"
-	local config="
+    elif let kind_coreos; then
+	# Ignore system configs
+	if systemctl -q is-enabled system-cloudinit@; then
+	    log "masking system-cloudinit@"
+	    systemctl mask system-cloudinit@
+	fi
+
+	# On CoreOS docker is socket-activated by default which breaks
+	# restarting containers on boot.
+	if ! systemctl -q is-enabled docker; then
+	    log "enabling docker"
+	    systemctl enable docker
+	fi
+
+	file_update_count=0
+ 	write_file -m 755 /etc/local-storage <<'EOF'
+#!/bin/bash
+set -e -u
+case "$(systemd-detect-virt)" in
+    kvm ) device=/dev/vdb ;;
+    vmware ) device=/dev/sdb ;;
+    * ) echo "unsupported hypervisor" 1>&2; exit 1 ;;
+esac
+mkdir -p /vol
+[[ -b "$device" ]] || { echo "No extra storage" 1>&2; exit 0; }
+if ! grep -q "^$device\>" /proc/mounts && ! mount -t ext4 "$device" /vol 2>/dev/null; then 
+    mkfs.ext4 "$device"
+    mount -t ext4 "$device" /vol
+fi
+EOF
+	write_file /etc/systemd/system/local-storage.service <<EOF
+[Unit]
+Before=docker.service
+[Install]
+WantedBy=docker.service
 [Service]
-MountFlags=private
-"
-	mkdir -p /etc/systemd/system/docker.service.d
-	write_file /etc/systemd/system/docker.service.d/local.conf "$config"
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/local-storage
+EOF
 	if [[ -n "$file_update" ]]; then
-	    log "updated /etc/systemd/system/docker.service.d/local.conf"
 	    systemctl daemon-reload
 	fi
-	systemctl enable docker
+	if let file_update_count; then
+	    systemctl restart local-storage
+	fi
+	if ! systemctl -q is-enabled local-storage; then
+	    log "enabling local-storage"
+	    systemctl enable local-storage
+	fi
     fi
+
     if [[ "$NAME" == dserver ]]; then
         setup_dyndns
     fi
+    dec_log_level
 }
 
 setup_dyndns() {
@@ -627,21 +798,21 @@ while getopts :hn:r: opt; do
 	h ) show_usage=1 ;;
 	n )
 	    NAME="$OPTARG"
-	    is_valid_hostname "$NAME" || \
+	    is_valid_host_name "$NAME" || \
 		usage_err "The value of -n argument '$NAME' is not a known host name."
 	    ;;
 	r )
 	    remote="$OPTARG"
-	    is_valid_hostname "$remote" || \
+	    is_valid_host_name "$remote" || \
 		usage_err "The value of -n argument '$remote' is not a known host name."
 	    ;;
 	\? ) usage_err "option -$OPTARG requires an argument" ;;
 	* ) usage_err "unknown -$OPTARG option" ;;
     esac
 done
-shift $(($OPTIND - 1))
 
-[[ $# -eq 0 ]] || usage_err "Unexpected extra arguments: $@"
+#[[ $# -eq $(($OPTIND - 1)) ]] || usage_err "Unexpected extra arguments: $@"
+let OPTIND==1+$# || usage_err "Unexpected extra arguments: $@"
 
 [[ -z "$NAME" || -z "$remote" ]] || usage_err "Only one of -n, -r can be given"
 
@@ -651,7 +822,7 @@ if [[ -n "$show_usage" ]]; then
     echo
     echo "  -h  show this help and exit"
     echo "  -n name  assume the given name as the hostname rather than use /etc/hostname."
-    echo "           The valid values are dserver, miranda, ultrabook."
+    echo "           The valid values are (${valid_host_names[*]})."
     echo "  -r name  execute setup on the remote machine name using ssh to copy the setup files."
     echo
     exit
@@ -661,27 +832,58 @@ if [[ -n "$remote" ]]; then
     run_remotely "$remote" -n "$remote"
 fi
 
+if [[ "$(id -u)" -ne 0 ]]; then
+    exec sudo "$0" "$@"
+fi
+
 if [[ -z "$NAME" ]]; then
     IFS='' read NAME < /etc/hostname
-    if ! is_valid_hostname "$NAME"; then
+    if ! is_valid_host_name "$NAME"; then
 	err "The content of /etc/hostname is '$NAME' is not a supported name." \
 	    "Use -n option to set the hostname explicitly."
     fi
 else
-    IFS='' read current_hostname < /etc/hostname
-    if is_valid_hostname "$current_hostname" && [ "$NAME" != "$current_hostname" ]; then
-	err "Already setup as $current_hostname. To force put localhost into /etc/hostname"
+    if [[ -f /etc/hostname ]]; then
+	IFS='' read current_hostname < /etc/hostname
+	if is_valid_host_name "$current_hostname" && [ "$NAME" != "$current_hostname" ]; then
+	    err "Already setup as $current_hostname. To force put localhost into /etc/hostname"
+	fi
     fi
     echo "$NAME" > /etc/hostname
 fi
 
+declare -i kind_fedora=0
+declare -i kind_coreos=0
 
+case "$NAME" in
+    dserver )
+	kind_fedora=1
+	;;
+    ultrabook )
+	kind_fedora=1
+	;;
+    miranda )
+	kind_fedora=1
+	;;
+    thip )
+	kind_coreos=1
+	;;
+esac
 
-setup_fstab
-setup_packages
-setup_grub
-setup_zram
+if let kind_coreos; then
+    [[ ! -d /media/configdrive && ! -d /media/configvirtfs ]] || \
+	err "Cannot configure CoreOS that under cloudconfig control"
+fi
+    
+if let kind_fedora; then
+    setup_fstab
+    setup_packages
+    setup_grub
+    setup_zram
+fi
 setup_ssh
-setup_network
-setup_users
+if let kind_fedora; then
+    setup_network
+    setup_users
+fi
 setup_services
