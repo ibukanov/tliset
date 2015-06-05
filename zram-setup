@@ -39,6 +39,7 @@ WantedBy=multi-user.target
 
 [Service]
 Type=oneshot
+ExecStart=/usr/sbin/modprobe zram num_devices=1
 ExecStart=/etc/tliset/zram-enable
 ExecStop=/etc/tliset/zram-disable
 RemainAfterExit=yes
@@ -53,8 +54,6 @@ EOF
 set -u
 set -e
 
-EXTRA_DEVICES=0
-
 read ignore memtotal < <(grep -o '\<MemTotal:\s\+[0-9]\+' /proc/meminfo)
 SWAP_SIZE=$(($memtotal * 2 * 1024))
 
@@ -62,9 +61,6 @@ num_cpus=$(grep -c processor /proc/cpuinfo)
 if [[ 0 = "$num_cpus" ]]; then
     num_cpus=1
 fi
-
-/usr/sbin/rmmod zram > /dev/null 2>&1 || true
-/usr/sbin/modprobe -q zram num_devices=$((1 + $EXTRA_DEVICES)) > /dev/null 2>&1
 
 echo $num_cpus > /sys/block/zram0/max_comp_streams
 echo "${SWAP_SIZE}" > /sys/block/zram0/disksize
@@ -81,11 +77,6 @@ set -e
 
 if grep -q '^/dev/zram0\s' /proc/swaps; then
     /usr/sbin/swapoff "/dev/zram0"
-fi
-
-if grep -q "^zram " /proc/modules; then
-    sleep 1
-    /usr/sbin/rmmod zram
 fi
 EOF
 
