@@ -21,8 +21,8 @@ dry_run=
 hippyru_net=
 dserver_lubava=
 
-has_nm=1
-[[ -x /usr/sbin/NetworkManager ]] || has_nm=''
+declare -i has_nm=1
+[[ -x /usr/sbin/NetworkManager ]] || has_nm=0
 
 cleanup() {
     if [[ ${#tmp_files[@]} -ge 1 ]]; then
@@ -242,7 +242,7 @@ EOF
 
 write_helper_utils() {
 
-    if [[ -n "$has_nm" ]]; then
+    if let has_nm; then
 	write_file -m 755 "$set_etc/is-online" <<'EOF'
 #!/bin/bash
 status="$(nmcli -f STATE -t g)"
@@ -262,11 +262,20 @@ EOF
 }
 
 setup_transmission_redirect() {
+
+    local socket_install=""
+    if let !has_nm; then
+	socket_install="\
+[Install]
+WantedBy=network-online.target
+"
+    fi
+
     write_file /etc/systemd/system/transmission-homenet.socket <<EOF
+$socket_install
 [Socket]
 ListenStream=127.0.0.1:$files_ssh_port
 Accept=true
-
 EOF
 
     write_file /etc/systemd/system/transmission-homenet@.service <<EOF
@@ -281,7 +290,7 @@ StandardInput=socket
 
 EOF
 
-    if [[ -n "$has_nm" ]]; then
+    if let has_nm; then
 	write_file -m 755 /etc/NetworkManager/dispatcher.d/90-online-monitor <<EOF
 #!/bin/bash
 if $set_etc/is-online; then
@@ -312,8 +321,12 @@ do_install() {
 	cmd systemctl start transmission-homenet.socket
     fi
     cmd systemctl restart autofs
-    if [[ -n "$has_nm" ]]; then
+    if let has_nm; then
 	cmd systemctl enable NetworkManager-dispatcher
+    else
+	if ! systemctl -q is-enabled transmission-homenet.socket; then
+	    cmd systemctl enable transmission-homenet.socket
+	fi
     fi
 }
 
@@ -338,6 +351,7 @@ do_uninstall() {
 
     if [[ -e /etc/systemd/system/transmission-homenet.socket ]]; then
 	cmd systemctl stop transmission-homenet.socket
+	cmd systemctl disable transmission-homenet.socket
     fi
     rm_if_exists /etc/systemd/system/transmission-homenet.socket
     rm_if_exists /etc/systemd/system/transmission-homenet@.service
