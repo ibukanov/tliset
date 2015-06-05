@@ -262,7 +262,7 @@ write_files:
     content: |
       #!/bin/bash
       set -e -u
-      [[ -b /dev/vdb ]] || { echo "/dev/vdb must exist" 1>&2; exit 1 }
+      [[ -b /dev/vdb ]] || { echo "/dev/vdb must exist" 1>&2; exit 1; }
       mkdir -p /vol
       if ! mount -t ext4 /dev/vdb /vol 2>/dev/null; then 
           mkfs.ext4 /dev/vdb
@@ -493,18 +493,19 @@ net_config_xml=""
 case "$VM" in
     kino )
 	vm_autostart=1
-	vm_memory=468
+	vm_memory=408
 	disk_vol=/dev/sda2
 	#net_type=bridge
 	net_type=direct
+	net_source_dev="$dserver_eth_lan"
 	net_mac="$mac_kino"
 	;;
     drouter )
 	vm_autostart=1
 	vm_memory=384
-	disk_vol=
+	disk_vol=""
 	net_type=direct
-        net_source_dev=enp4s0
+	net_source_dev="$dserver_eth_lan"
 	net_config_xml="\
 <interface type='direct' trustGuestRxFilters='yes'>
   <mac address='$mac_drouter_wan'/>
