@@ -13,7 +13,11 @@ dserver_eth_lan=enp4s0
 mac_drouter_wan=52:54:00:54:6e:dd
 mac_drouter_lan=52:54:00:54:6e:de
 mac_kino=52:54:00:54:6e:ef
+mac_mc=52:54:00:54:6e:f0
+
 ip_kino=192.168.2.9
+ip_drouter=192.168.2.8
+ip_mc=192.168.2.7
 
 ssh_pubkey_igor="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuRT02EgmvQdI96X/qGdUCCSUbTHlvRiHuF0BKpNhch igor@localhost.localdomain$NL"
 ssh_pubkey_lubava="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKGV+r2T/Mf9QrEsupuxwWMv2UtLYgD3rjBQG/W5Dfxo lubava@localhost.localdomain$NL"

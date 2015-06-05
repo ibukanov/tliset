@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/lib.bash"
 
-valid_host_names=(dserver miranda ultrabook thip)
+valid_host_names=(dserver miranda ultrabook thip rserv)
 
 is_valid_host_name() {
     local name="$1" i
@@ -231,7 +231,7 @@ setup_network() {
     inc_log_level
 
     hosts=(
-#	[kino]=192.168.2.9
+#	[kino]=$ip_kino
     )
 
     if [[ "$NAME" != dserver ]]; then
@@ -393,9 +393,12 @@ dhcp-host=08:60:6E:CD:96:68,192.168.2.2
 address=/wifi/192.168.2.2
 
 # Virtual machine needs a stable ip to use with iptables rules
-dhcp-host=$mac_kino,192.168.2.9
-address=/kino/192.168.2.9
-address=/extra.mir2.org/192.168.2.9
+dhcp-host=$mac_kino,$ip_kino
+address=/kino/$ip_kino
+address=/extra.mir2.org/$ip_kino
+
+dhcp-host=$mac_mc,$ip_mc
+address=/mc/$ip_mc
 
 # Terentiy's tablet
 dhcp-host=34:23:ba:a4:0f:85,192.168.2.20
@@ -472,7 +475,11 @@ forward tcp 9092 \$kino
 forward tcp 51413 \$kino
 forward udp 51413 \$kino
 
-# Minecraft server
+# Minecraft servers
+
+#forward tcp 25565 \$kino
+#forward udp 25565 \$kino
+
 forward tcp 19132 192.168.2.20
 forward udp 19132 192.168.2.20
 
@@ -733,8 +740,9 @@ setup_services() {
 	    systemctl enable docker
 	fi
 
-	file_update_count=0
- 	write_file -m 755 /etc/local-storage <<'EOF'
+	if let with_extra_storage; then
+	    file_update_count=0
+ 	    write_file -m 755 /etc/local-storage <<'EOF'
 #!/bin/bash
 set -e -u
 case "$(systemd-detect-virt)" in
@@ -749,7 +757,7 @@ if ! grep -q "^$device\>" /proc/mounts && ! mount -t ext4 "$device" /vol 2>/dev/
     mount -t ext4 "$device" /vol
 fi
 EOF
-	write_file /etc/systemd/system/local-storage.service <<EOF
+	    write_file /etc/systemd/system/local-storage.service <<EOF
 [Unit]
 Before=docker.service
 [Install]
@@ -759,15 +767,16 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/etc/local-storage
 EOF
-	if [[ -n "$file_update" ]]; then
-	    systemctl daemon-reload
-	fi
-	if let file_update_count; then
-	    systemctl restart local-storage
-	fi
-	if ! systemctl -q is-enabled local-storage; then
-	    log "enabling local-storage"
-	    systemctl enable local-storage
+	    if [[ -n "$file_update" ]]; then
+		systemctl daemon-reload
+	    fi
+	    if let file_update_count; then
+		systemctl restart local-storage
+	    fi
+	    if ! systemctl -q is-enabled local-storage; then
+		log "enabling local-storage"
+		systemctl enable local-storage
+	    fi
 	fi
     fi
 
@@ -778,8 +787,6 @@ EOF
 }
 
 setup_dyndns() {
-
-    log "Checking dyndns"
 
     if [[ ! -s /etc/duckdns.key ]]; then
 	[[ -t 1 ]] || err "cannot ask for /etc/duckdns.key value as input is not tty"
@@ -888,6 +895,8 @@ fi
 
 declare -i kind_fedora=0
 declare -i kind_coreos=0
+declare -i with_extra_storage=0
+
 
 case "$NAME" in
     dserver )
@@ -900,6 +909,10 @@ case "$NAME" in
 	kind_fedora=1
 	;;
     thip )
+	kind_coreos=1
+	with_extra_storage=1
+	;;
+    rserv )
 	kind_coreos=1
 	;;
 esac
