@@ -5,10 +5,11 @@ set -o pipefail
 declare -r NL=$'\n'
 
 selfdir="$(dirname "$0")"
-tmp_files=()
 
 dserver_eth_wan=enp2s0
 dserver_eth_lan=enp4s0
+
+dserver_bridge=macvlan0
 
 mac_drouter_wan=52:54:00:54:6e:dd
 mac_drouter_lan=52:54:00:54:6e:de
@@ -19,12 +20,21 @@ ip_kino=192.168.2.9
 ip_drouter=192.168.2.8
 ip_mc=192.168.2.7
 
+miranda_vm_net_device=eth1
+miranda_vm_net_prefix=192.168.5
+miranda_vm_net_own_ip=$miranda_vm_net_prefix.1
+miranda_vm_net_thip_ip=$miranda_vm_net_prefix.2
+
+
+
 ssh_pubkey_igor="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuRT02EgmvQdI96X/qGdUCCSUbTHlvRiHuF0BKpNhch igor@localhost.localdomain$NL"
 ssh_pubkey_lubava="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKGV+r2T/Mf9QrEsupuxwWMv2UtLYgD3rjBQG/W5Dfxo lubava@localhost.localdomain$NL"
 
+tmp_files=()
+
 cleanup() {
     if [[ ${#tmp_files[@]} -ge 1 ]]; then
-	rm -f "${tmp_files[@]}"
+	rm -rf "${tmp_files[@]}"
     fi
 }
 
@@ -95,7 +105,7 @@ ensure_dir() {
     fi
 }
 
-file_update=''
+file_update=0
 file_update_count=0
 
 write_file() {
@@ -103,7 +113,7 @@ write_file() {
     local -i exec_cmd=0
     local OPTIND opt path body dir
 
-    file_update=''
+    file_update=0
     while getopts b:el:m:o: opt; do
 	case "$opt" in
 	    b ) before_write="$OPTARG";;
@@ -176,7 +186,7 @@ remove_file() {
     local log_message="removing %s"
     local OPTIND opt
 
-    file_update=''
+    file_update=0
     while getopts l: opt; do
 	case "$opt" in
 	    l ) log_message="$OPTARG";;

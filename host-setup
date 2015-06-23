@@ -28,7 +28,6 @@ fixup_transgui() {
     fi
 }
 
-
 setup_packages() {
     log "Checking packages"
     inc_log_level
@@ -134,8 +133,8 @@ setup_packages() {
 	printf 'new-session\n' > /etc/tmux.conf
     fi
 
-    if rpm -q --quiet transmission-remote-gtk ; then
-	dnf remove -y transmission-remote-gtk
+    if rpm -q --quiet transmission-gtk transmission-remote-gtk ; then
+	cmd_log dnf remove -y transmission-gtk transmission-remote-gtk
     fi
 
     systemctl enable autofs
@@ -144,7 +143,9 @@ setup_packages() {
 }
 
 setup_fstab() {
+    log "Checking fstab"
     local fstab ids edits id disk
+    inc_log_level
     if [[ "$NAME" == dserver ]]; then
 	log "Checking /etc/fstab"
 	fstab="$(cat /etc/fstab)"
@@ -172,12 +173,45 @@ setup_fstab() {
 #custom-end#'
 
 	write_file /etc/fstab "$fstab"
-	if [[ -n "$file_update" ]]; then
+	if let file_update; then
 	    log "/etc/fstab was updated"
 	fi
 	mkdir -p /area/backup
 	mkdir -p /area/kino
     fi
+    if [[ "$NAME" == miranda ]]; then
+	if [[ ! -d /downloads ]]; then
+	    log "creating /downloads"
+	    mkdir /downloads.tmp
+	    chmod 770 /downloads.tmp
+	    chown igor:igor /downloads.tmp
+	    mv /downloads.tmp /downloads
+	fi
+	if systemd-detect-virt -v -q && lsmod | grep -q '^vboxsf\>' ; then
+	    # Mount shared folders
+	    local mount_uid="$(id -u igor)" mount_gid="$(id -g igor)"
+	    write_file /etc/systemd/system/mount-virt-dirs.service <<EOF
+[Install]
+WantedBy=multi-user.target
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -c 'for ((i=0; i<10; i+=1)); do\n\
+    /sbin/mount.vboxsf -o uid=$mount_uid,gid=$mount_gid,nosuid,nodev Downloads /downloads \
+        && exit 0\n\
+    sleep 5\n\
+done\n\
+echo "failed to mount /downloads" 1>&2\n\
+exit 0'
+EOF
+	    if let file_update; then
+		cmd_log systemctl daemon-reload
+	    fi
+	    if ! systemctl -q is-enabled mount-virt-dirs; then
+		cmd_log systemctl enable mount-virt-dirs
+	    fi
+	fi
+    fi
+    dec_log_level
 }
 
 setup_grub() {
@@ -219,7 +253,7 @@ setup_grub() {
     [[ -f "$grub_config" ]] || err "Failed to locate grub.cfg"
 
     write_file /etc/default/grub "$grub_defaults_text"
-    if [[ -n "$file_update" ]]; then
+    if let file_update; then
 	log "updating $grub_config"
 	grub2-mkconfig -o "$grub_config"
     fi
@@ -260,111 +294,54 @@ setup_network() {
 	write_file /etc/hosts "$hosts_text"
     fi
 
+    if let with_networkd; then
+	local s="$(print_network_generator)"
+	if [[ -n "$s" ]]; then
+	    write_file -m 755 /etc/systemd/system-generators/l-network-generator \
+		       "#!/bin/sh${NL}set -e -u$NL$s"
+	    if let file_update; then
+		cmd_log systemctl daemon-reload
+	    fi
+	fi
+    fi
     case "$NAME" in
 	dserver ) setup_dserver_network ;;
 	miranda ) setup_miranda_network ;;
     esac
-
-    setup_autofs
+    if ! let kind_coreos; then
+	setup_autofs
+    fi
     dec_log_level
 }
 
 enable_networkd() {
     if rpm -q --quiet NetworkManager ; then
-	log "disabling NetworkManager"
-	systemctl disable NetworkManager
-	systemctl stop NetworkManager
-	dnf remove -y NetworkManager
+	cmd_log systemctl disable NetworkManager
+	cmd_log systemctl stop NetworkManager
+	cmd_log dnf remove -y NetworkManager
     fi
     if ! systemctl -q is-enabled systemd-networkd; then
-	log "enabling systemd-networkd"
-	systemctl enable systemd-networkd
+	cmd_log systemctl enable systemd-networkd
     fi
 }
 
-enable_resolved() {
-    if ! systemctl -q is-enabled systemd-resolved; then
-	log "enabling systemd-resolved"
-	systemctl enable systemd-resolved 
-    fi
-
-    if [[ ! -f /run/systemd/resolve/resolv.conf ]]; then
-	systemctl start systemd-resolved 
-    fi
-
+use_resolved_nameservices() {
     if [[ ! -L /etc/resolv.conf || \
 		"$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
-	log "symlinking /etc/resolv.conf"
-	ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
+	cmd_log ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
     fi
 }
-
-disable_firewalld() {
-    if systemctl -q is-enabled firewalld; then
-	log "disabling firewalld"
-	systemctl disable firewalld
-	systemctl stop firewalld
-    fi
-}
-
 
 setup_dserver_network() {
-    disable_firewalld
-
-    netdev_lan="$dserver_eth_lan"
-    netdev_bridge=macvlan0
-
     file_update_count=0
-
-    enable_networkd
-
-    write_file /etc/systemd/network/80-wan.network <<EOF
-[Match]
-MACAddress=80:ee:73:76:8f:4c
-
-[Network]
-DHCP=ipv4
-EOF
-
-    # Use macvlan, not bridge, for more efficient setup
-    write_file /etc/systemd/network/80-macvlan.netdev <<EOF
-[NetDev]
-Name=$netdev_bridge
-Kind=macvlan
-[MACVLAN]
-Mode=bridge
-EOF
-    write_file /etc/systemd/network/80-lan.network <<EOF
-[Match]
-Name=$netdev_lan
-[Network]
-MACVLAN=$netdev_bridge
-EOF
-    write_file /etc/systemd/network/80-macvlan.network <<EOF
-[Match]
-Name=$netdev_bridge
-[Network]
-IPMasquerade=yes
-Address=192.168.2.10/24
-#Gateway=192.168.2.1
-EOF
-
-    if [[ $file_update_count -gt 0 ]]; then
-	log "restarting systemd-networkd"
-	systemctl restart systemd-networkd
-    fi
 
     if true; then
 	write_file /etc/resolv.conf <<EOF
 nameserver 127.0.0.1
 EOF
-	if systemctl -q is-enabled systemd-resolved; then
-	   log "disabling systemd-resolved"
-	   systemctl disable systemd-resolved
-	   systemctl stop systemd-resolved
-	fi
     else
 	enable_resolved
+	use_resolved_nameservices
     fi
 
     setup_dserver_dnsmasq
@@ -373,7 +350,7 @@ EOF
 
 setup_dserver_dnsmasq() {
     write_file /etc/dnsmasq.d/local.conf <<EOF
-interface=$netdev_bridge
+interface=$dserver_bridge
 #interface=br0
 domain-needed
 bogus-priv
@@ -405,19 +382,8 @@ dhcp-host=34:23:ba:a4:0f:85,192.168.2.20
 
 #dhcp-option=option:router,192.168.2.1
 EOF
-    local changed_dnsmasq="$file_update"
-    if ! systemctl -q is-enabled dnsmasq; then
-	log "enabling dnsmasq"
-	systemctl enable dnsmasq
-    fi
-    if systemctl -q is-active dnsmasq; then
-	if [[ -n "$changed_dnsmasq" ]]; then
-	    log "restarting dnsmasq"
-	    systemctl restart dnsmasq
-	fi
-    else
-	log "starting dnsmasq"
-	systemctl start dnsmasq
+    if systemctl -q is-active dnsmasq && let file_update; then
+	cmd_log systemctl restart dnsmasq
     fi
 }
 
@@ -511,72 +477,123 @@ EOF
     fi
 }
 
-setup_miranda_network() {
+# Write generator that setups networking at boot including
+# enabling/disabling relevant services. I use multi-line strings and
+# avoid here documents as the latter need temporary files and /tmp can
+# be on a read-only filesystem when generator runs. It also avoids
+# invocation of extra cat processes.
 
-    # TODO use dnsmasq to integrate with VM names
+print_network_generator() {
+    if let with_networkd; then
+	local resolver
+	case "$NAME" in
+	    dserver ) resolver='dnsmasq' ;;
+	    miranda ) resolver='systemd-resolved' ;;
+	esac
+	cat <<EOF
 
-    if systemd-detect-virt -v -q; then
+self="\${0##*/}"
+mkdir -p "\$1/sockets.target.d"
+> "\$1/sockets.target.d/\$self.conf" printf "\
+[Unit]
+Wants=systemd-networkd.socket
+"
 
-	enable_networkd
+mkdir -p "\$1/multi-user.target.d"
+> "\$1/multi-user.target.d/\$self.conf" printf "\
+[Unit]
+Wants=systemd-networkd.service
+Wants=$resolver.service
+"
 
-	write_file /etc/systemd/network/zz-default.network <<EOF
+ln -s /dev/null "\$1/NetworkManager.service"
+ln -s /dev/null "\$1/NetworkManager-dispatcher.service"
+ln -s /dev/null "\$1/NetworkManager-wait-online.service"
+ln -s /dev/null "\$1/firewalld.service"
+ln -s /dev/null "\$1/dbus-org.fedoraproject.FirewallD1.service"
+
+net_dir="\$1/../network"
+mkdir -p "\$net_dir"
+EOF
+	case "$NAME" in
+	    dserver ) print_dserver_network_files ;;
+	    miranda ) print_miranda_network_files ;;
+	esac
+    fi
+	    
+}
+
+print_dserver_network_files() {
+    # disable systemd-resolved as dserver uses dnsmasq
+    cat <<EOF
+ln -s /dev/null "\$1/systemd-resolved.service"
+EOF
+
+    # Generate setup to allow for VMs that are accessible from the
+    # lan. Use macvlan, not bridge, for beter efficiency.
+    cat <<EOF
+> "\$net_dir/80-wan.network" printf "\
+[Match]
+MACAddress=80:ee:73:76:8f:4c
+
+[Network]
+DHCP=ipv4
+"
+
+> "\$net_dir/80-macvlan.netdev" printf "\
+[NetDev]
+Name=$dserver_bridge
+Kind=macvlan
+[MACVLAN]
+Mode=bridge
+"
+
+> "\$net_dir/80-lan.network" printf "\
+[Match]
+Name=$dserver_eth_lan
+[Network]
+MACVLAN=$dserver_bridge
+"
+
+> "\$net_dir/80-macvlan.network" printf "\
+[Match]
+Name=$dserver_bridge
+[Network]
+IPMasquerade=yes
+Address=192.168.2.10/24
+#Gateway=192.168.2.1
+"
+EOF
+}
+
+print_miranda_network_files() {
+    cat <<EOF
+ln -s /dev/null "\$1/dnsmasq.service"
+EOF
+    cat <<EOF
+> "\$net_dir/zz-default.network" printf "\
 [Network]
 DHCP=v4
 
 [DHCP]
 UseMTU=true
 UseDomains=true
-CriticalConnection=true
+"
 EOF
-	if let file_update; then
-	    log "restarting systemd-networkd"
-	    systemctl restart systemd-networkd
-	fi
-	enable_resolved
-
-	disable_firewalld
-
-    else
-	write_file /etc/NetworkManager/conf.d/99-local.conf <<EOF
-[main]
-#dns=dnsmasq
-EOF
-	if [[ -n "$file_update" ]]; then
-	    cmd_log systemctl restart NetworkManager
-	fi
-    fi
 }
 
 setup_miranda_network() {
 
     # TODO use dnsmasq to integrate with VM names
-
     if systemd-detect-virt -v -q; then
-
-	enable_networkd
-
-	write_file /etc/systemd/network/zz-default.network <<EOF
-[Network]
-DHCP=v4
-
-[DHCP]
-UseMTU=true
-UseDomains=true
-EOF
-	if let file_update; then
-	    log "restarting systemd-networkd"
-	    systemctl restart systemd-networkd
-	fi
-	enable_resolved
-
-	disable_firewalld
+	use_resolved_nameservices
 
     else
 	write_file /etc/NetworkManager/conf.d/99-local.conf <<EOF
 [main]
 #dns=dnsmasq
 EOF
-	if [[ -n "$file_update" ]]; then
+	if let file_update; then
 	    cmd_log systemctl restart NetworkManager
 	fi
     fi
@@ -715,6 +732,12 @@ setup_users() {
     if [[ "$NAME" == dserver ]]; then
 	add_user kino 1001
     fi
+    if [[ "$NAME" == miranda ]]; then
+	add_user igor 1973
+	if ! getent group vboxsf >/dev/null ; then
+	    cmd_log usermod -a -G vboxsf igor
+	fi
+    fi
     dec_log_level
 }
 
@@ -727,10 +750,14 @@ setup_services() {
 	    systemctl disable docker
 	fi
     elif let kind_coreos; then
+	if [[ ! -d /vol ]]; then
+	    cmd_log mkdir -m 755 /vol
+	fi
+
+
 	# Ignore system configs
 	if systemctl -q is-enabled system-cloudinit@; then
-	    log "masking system-cloudinit@"
-	    systemctl mask system-cloudinit@
+	    cmd_log systemctl mask system-cloudinit@
 	fi
 
 	# On CoreOS docker is socket-activated by default which breaks
@@ -745,16 +772,26 @@ setup_services() {
  	    write_file -m 755 /etc/local-storage <<'EOF'
 #!/bin/bash
 set -e -u
-case "$(systemd-detect-virt)" in
-    kvm ) device=/dev/vdb ;;
-    vmware ) device=/dev/sdb ;;
-    * ) echo "unsupported hypervisor" 1>&2; exit 1 ;;
+root_mount="$(grep ' / ' /proc/mounts)"
+root_device_prefix="${root_mount%%[0-9]*}"
+case "$root_device_prefix" in
+    /dev/sda ) device=/dev/sdb ;;
+    /dev/vda ) device=/dev/vdb ;;
+    * ) echo "Cannot deduce storage device, root_device_prefix='$root_device_prefix' root_mount='$root_mount'" 1>&2; exit 1 ;;
 esac
-mkdir -p /vol
 [[ -b "$device" ]] || { echo "No extra storage" 1>&2; exit 0; }
 if ! grep -q "^$device\>" /proc/mounts && ! mount -t ext4 "$device" /vol 2>/dev/null; then 
+    set -x
     mkfs.ext4 "$device"
     mount -t ext4 "$device" /vol
+    set +x
+fi
+if [[ ! -d /vol/src ]]; then
+    set -x
+    tmp="$(mktemp -d -p /vol)"
+    chmod 755 "$tmp" && chown core:core "$tmp" && mv "$tmp" /vol/src || \
+        { rmdir "$tmp"; exit 1; }
+    set +x
 fi
 EOF
 	    write_file /etc/systemd/system/local-storage.service <<EOF
@@ -767,7 +804,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/etc/local-storage
 EOF
-	    if [[ -n "$file_update" ]]; then
+	    if let file_update; then
 		systemctl daemon-reload
 	    fi
 	    if let file_update_count; then
@@ -896,41 +933,50 @@ fi
 declare -i kind_fedora=0
 declare -i kind_coreos=0
 declare -i with_extra_storage=0
-
+declare -i with_zram=1
+declare -i with_networkd=0
 
 case "$NAME" in
     dserver )
 	kind_fedora=1
+	with_networkd=1
 	;;
     ultrabook )
 	kind_fedora=1
 	;;
     miranda )
 	kind_fedora=1
+	if systemd-detect-virt -v -q; then
+	    with_networkd=1
+	fi
+	
 	;;
     thip )
 	kind_coreos=1
 	with_extra_storage=1
+	with_zram=1
 	;;
     rserv )
 	kind_coreos=1
 	;;
 esac
 
-if let kind_coreos; then
-    [[ ! -d /media/configdrive && ! -d /media/configvirtfs ]] || \
-	err "Cannot configure CoreOS that under cloudconfig control"
-fi
+#if let kind_coreos; then
+#    [[ ! -d /media/configdrive && ! -d /media/configvirtfs ]] || \
+#	err "Cannot configure CoreOS that under cloudconfig control"
+#fi
     
 if let kind_fedora; then
     setup_fstab
     setup_packages
     setup_grub
+fi
+if let with_zram; then
     setup_zram
 fi
 setup_ssh
+setup_network
 if let kind_fedora; then
-    setup_network
     setup_users
 fi
 setup_services

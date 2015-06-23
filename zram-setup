@@ -1,11 +1,15 @@
 #!/bin/bash
 
 setup_zram() {
-    local reload_systemd=''
+    local reload_systemd=0
     
     log "Checking zram"
 
-    write_file -m 755 /usr/bin/zram-status <<'EOF'
+    local status_path=/usr/bin/zram-status
+    if let kind_coreos; then
+	status_path=/opt/bin/zram-status
+    fi
+    write_file -m 755 "$status_path" <<'EOF'
 #!/usr/bin/bash
 
 set -u
@@ -44,7 +48,7 @@ ExecStart=/etc/tliset/zram-enable
 ExecStop=/etc/tliset/zram-disable
 RemainAfterExit=yes
 EOF
-    if [[ -n "$file_update" ]]; then
+    if let file_update; then
 	reload_systemd=1
     fi
 
@@ -80,7 +84,7 @@ if grep -q '^/dev/zram0\s' /proc/swaps; then
 fi
 EOF
 
-    if [[ -n "$reload_systemd" ]]; then
+    if let reload_systemd; then
 	systemctl daemon-reload
     fi
 
