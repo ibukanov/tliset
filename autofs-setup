@@ -215,7 +215,7 @@ Host kino-files
   AddressFamily inet
   CheckHostIP no
   Port $files_ssh_port
-  HostName extra.mir2.org
+  HostName rserv.mir2.org
   User user
   Ciphers aes128-gcm@openssh.com
   MACs umac-128@openssh.com
