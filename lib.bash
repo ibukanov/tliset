@@ -20,12 +20,11 @@ ip_kino=192.168.2.9
 ip_drouter=192.168.2.8
 ip_mc=192.168.2.7
 
-miranda_vm_net_device=eth1
-miranda_vm_net_prefix=192.168.5
-miranda_vm_net_own_ip=$miranda_vm_net_prefix.1
-miranda_vm_net_thip_ip=$miranda_vm_net_prefix.2
-
-
+dserver_port_forwards=(
+    "tcp:9092:$ip_kino"
+    "tcp:51413:$ip_kino"
+    "udp:51413:$ip_kino"
+)
 
 ssh_pubkey_igor="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuRT02EgmvQdI96X/qGdUCCSUbTHlvRiHuF0BKpNhch igor@localhost.localdomain$NL"
 ssh_pubkey_lubava="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKGV+r2T/Mf9QrEsupuxwWMv2UtLYgD3rjBQG/W5Dfxo lubava@localhost.localdomain$NL"
@@ -109,14 +108,13 @@ file_update=0
 file_update_count=0
 
 write_file() {
-    local before_write="" owner=root:root mode=644 log_message="updating %s"
+    local owner=root:root mode=644 log_message="updating %s"
     local -i exec_cmd=0
     local OPTIND opt path body dir
 
     file_update=0
-    while getopts b:el:m:o: opt; do
+    while getopts el:m:o: opt; do
 	case "$opt" in
-	    b ) before_write="$OPTARG";;
 	    e ) let exec_cmd=1;;
 	    l ) log_message="$OPTARG";;
 	    m ) mode="$OPTARG";;
@@ -165,10 +163,6 @@ write_file() {
 	log "$(printf "$log_message" "$path")"
     fi
 
-    if let ${#before_write}; then
-	"$before_write" "$path"
-    fi
-    
     ensure_dir "$(dirname "$path")"
 
     # Use temporary to ensure atomic operation on filesystem

@@ -187,7 +187,7 @@ setup_fstab() {
 	    chown igor:igor /downloads.tmp
 	    mv /downloads.tmp /downloads
 	fi
-	if systemd-detect-virt -v -q && lsmod | grep -q '^vboxsf\>' ; then
+	if [[ -n "$virt" ]] && lsmod | grep -q '^vboxsf\>' ; then
 	    # Mount shared folders
 	    local mount_uid="$(id -u igor)" mount_gid="$(id -g igor)"
 	    write_file /etc/systemd/system/mount-virt-dirs.service <<EOF
@@ -268,13 +268,7 @@ setup_network() {
 #	[kino]=$ip_kino
     )
 
-    if [[ "$NAME" != dserver ]]; then
-	hosts+=(
-#	    [dserver]=192.168.2.10
-	)
-    fi
-
-    if [[ ${!hosts[@]} -ne 0 ]]; then
+    if [[ ${#hosts[@]} -ne 0 ]]; then
 	local hosts_text="" key edits
 	for key in "${!hosts[@]}"; do
 	    hosts_text+="$(printf '\n%s %s' "${hosts[$key]}" "$key")"
@@ -294,14 +288,12 @@ setup_network() {
 	write_file /etc/hosts "$hosts_text"
     fi
 
-    if let with_networkd; then
-	local s="$(print_network_generator)"
-	if [[ -n "$s" ]]; then
-	    write_file -m 755 /etc/systemd/system-generators/l-network-generator \
-		       "#!/bin/sh${NL}set -e -u$NL$s"
-	    if let file_update; then
-		cmd_log systemctl daemon-reload
-	    fi
+    local s="$(print_network_generator)"
+    if [[ -n "$s" ]]; then
+	write_file -m 755 /etc/systemd/system-generators/l-network-generator \
+		   "#!/bin/sh${NL}set -e -u$NL$s"
+	if let file_update; then
+	    cmd_log systemctl daemon-reload
 	fi
     fi
     case "$NAME" in
@@ -312,17 +304,6 @@ setup_network() {
 	setup_autofs
     fi
     dec_log_level
-}
-
-enable_networkd() {
-    if rpm -q --quiet NetworkManager ; then
-	cmd_log systemctl disable NetworkManager
-	cmd_log systemctl stop NetworkManager
-	cmd_log dnf remove -y NetworkManager
-    fi
-    if ! systemctl -q is-enabled systemd-networkd; then
-	cmd_log systemctl enable systemd-networkd
-    fi
 }
 
 use_resolved_nameservices() {
@@ -345,7 +326,6 @@ EOF
     fi
 
     setup_dserver_dnsmasq
-    setup_dserver_port_forwarding
 }
 
 setup_dserver_dnsmasq() {
@@ -387,96 +367,6 @@ EOF
     fi
 }
 
-# Stop port forwarding before changing the script the setup it so the
-# stop uses the old definition.
-stop_old_port_forwarding() {
-    if systemctl -q is-active forward-ports; then
-	log "stopping old port forwarding"
-	systemctl stop forward-ports
-    fi
-}
-
-setup_dserver_port_forwarding() {
-    file_update_count=0
-    write_file -m 755 -b stop_old_port_forwarding \
-	       /etc/tliset/forward-ports <<EOF
-#!/bin/bash
-set -e -u
-
-wan_interface=$dserver_eth_wan
-action=\$1
-errors=0
-
-get_ip() {
-    local host="\$1"
-    local lan_ip="\$(getent hosts "\$host" | cut -d' ' -f1)"
-    [[ -n "\$lan_ip" ]] || { echo "Failed to find IP for \$host" 1>&2; exit 1; }
-    printf '%s' "\$lan_ip"
-}
-
-forward() {
-    local protocol="\$1" wan_port="\$2" lan_ip="\$3" lan_port
-    if [[ \$# -le 3 ]]; then
-        lan_port="\$wan_port"
-    else
-        lan_port="\$4"
-    fi
-
-    local flag
-    case "\$action" in
-        open ) flag="-A" ;;
-        close ) flag="-D" ;;
-        * ) echo "Bad \$0 action: \$action" 1>&2 ;;
-    esac
-    iptables "\$flag" PREROUTING \
-        -t nat -i "\$wan_interface" \
-        -p "\$protocol" --dport "\$wan_port" \
-        -j DNAT --to "\$lan_ip:\$lan_port" || let errors+=1
-}
-
-#kino="\$(get_ip kino)"
-kino="$ip_kino"
-
-forward tcp 9092 \$kino
-forward tcp 51413 \$kino
-forward udp 51413 \$kino
-
-# Minecraft servers
-
-#forward tcp 25565 \$kino
-#forward udp 25565 \$kino
-
-forward tcp 19132 192.168.2.20
-forward udp 19132 192.168.2.20
-
-let "!errors" || exit 1
-EOF
-
-    write_file -b stop_old_port_forwarding \
-	       /etc/systemd/system/forward-ports.service <<EOF
-[Unit]
-After=network-online.target
-[Install]
-WantedBy=network-online.target
-[Service]
-Type=oneshot
-RemainAfterExit=true
-ExecStart=/etc/tliset/forward-ports open
-ExecStop=/etc/tliset/forward-ports close
-EOF
-    
-    if ! systemctl -q is-enabled forward-ports; then
-	log "enabling forward-ports"
-	systemctl enable forward-ports
-    fi
-
-    if let file_update_count; then
-	log "starting port forwarding"
-	systemctl daemon-reload
-	systemctl start forward-ports
-    fi
-}
-
 # Write generator that setups networking at boot including
 # enabling/disabling relevant services. I use multi-line strings and
 # avoid here documents as the latter need temporary files and /tmp can
@@ -491,7 +381,6 @@ print_network_generator() {
 	    miranda ) resolver='systemd-resolved' ;;
 	esac
 	cat <<EOF
-
 self="\${0##*/}"
 mkdir -p "\$1/sockets.target.d"
 > "\$1/sockets.target.d/\$self.conf" printf "\
@@ -511,7 +400,8 @@ ln -s /dev/null "\$1/NetworkManager-dispatcher.service"
 ln -s /dev/null "\$1/NetworkManager-wait-online.service"
 ln -s /dev/null "\$1/firewalld.service"
 ln -s /dev/null "\$1/dbus-org.fedoraproject.FirewallD1.service"
-
+EOF
+	cat <<EOF
 net_dir="\$1/../network"
 mkdir -p "\$net_dir"
 EOF
@@ -520,7 +410,6 @@ EOF
 	    miranda ) print_miranda_network_files ;;
 	esac
     fi
-	    
 }
 
 print_dserver_network_files() {
@@ -564,6 +453,60 @@ Address=192.168.2.10/24
 #Gateway=192.168.2.1
 "
 EOF
+
+    # Print port forwarding initialization service and its scripts
+    cat <<EOF
+> "\$1/l-forward-ports.service" printf %s "\
+[Unit]
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/bin/sh /run/tliset/open-ports
+ExecStop=/bin/sh /run/tliset/close-ports
+"
+
+mkdir -p "\$1/network-online.target.wants"
+ln -s "\$1/l-forward-ports.service" "\$1/network-online.target.wants"
+
+mkdir -p /run/tliset
+> /run/tliset/open-ports printf %s $(print_dserver_port_forwards)
+EOF
+}
+
+# Output string for a script that runs iptables to setup port
+# forwarding and generate another script to close those. This 2-stage
+# generation allows to close ports using the old definition after the
+# open part is changed with new defines.
+print_dserver_port_forwards() {
+    local i rules=()
+    for i in "${dserver_port_forwards[@]}"; do
+	if [[ "$i" =~ ^(tcp|udp):([0-9]+):([0-9.]+)(:([0-9]+))?$ ]]; then
+	    local protocol="${BASH_REMATCH[1]}"
+	    local wan_port="${BASH_REMATCH[2]}"
+	    local lan_ip="${BASH_REMATCH[3]}"
+	    local lan_port="${BASH_REMATCH[5]}"
+	    if [[ -z "$lan_port" ]]; then
+		lan_port="$wan_port"
+	    fi
+	    rules+=("PREROUTING -t nat -i $dserver_eth_wan -p $protocol --dport $wan_port -j DNAT --to $lan_ip:$lan_port")
+	else
+	    err "Bad port forwarding spec: $i"
+	fi
+    done
+
+    
+    local s=""
+    for i in "${rules[@]}"; do
+	s+="iptables -A $i$NL"
+    done
+    s+="> /run/tliset/close-ports printf %s \"\\$NL"
+    for i in "${rules[@]}"; do
+	s+="iptables -D $i$NL"
+    done
+    s+="\""
+    printf %q "$s"
 }
 
 print_miranda_network_files() {
@@ -584,11 +527,10 @@ EOF
 
 setup_miranda_network() {
 
-    # TODO use dnsmasq to integrate with VM names
-    if systemd-detect-virt -v -q; then
+    if [[ -n "$virt" ]]; then
 	use_resolved_nameservices
-
     else
+	# TODO use dnsmasq to integrate with VM names
 	write_file /etc/NetworkManager/conf.d/99-local.conf <<EOF
 [main]
 #dns=dnsmasq
@@ -936,6 +878,12 @@ declare -i with_extra_storage=0
 declare -i with_zram=1
 declare -i with_networkd=0
 
+virt="$(systemd-detect-virt -v || true)"
+if [[ "$virt" == none ]]; then
+    virt=""
+fi
+
+
 case "$NAME" in
     dserver )
 	kind_fedora=1
@@ -946,7 +894,7 @@ case "$NAME" in
 	;;
     miranda )
 	kind_fedora=1
-	if systemd-detect-virt -v -q; then
+	if [[ -n "$virt" ]]; then
 	    with_networkd=1
 	fi
 	
