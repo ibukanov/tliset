@@ -288,17 +288,52 @@ setup_network() {
 	write_file /etc/hosts "$hosts_text"
     fi
 
-    local s="$(print_network_generator)"
-    if [[ -n "$s" ]]; then
+    multi_user_wants=()
+    gen_body=""
+    print_network_generator
+    if let with_dyndns; then
+	print_dyndns
+    fi
+    if [[ "$NAME" == dserver ]]; then
+	print_dserver_dnsmasq
+    fi
+    
+    if [[ -n "$gen_body" ]]; then
+        if let ${#multi_user_wants[@]}; then
+	    pl ''
+	    pl 'mkdir -p "$1/multi-user.target.d"'
+	    local i wants_body="[Unit]$NL"
+	    for i in "${multi_user_wants[@]}"; do
+		wants_body+="Wants=$i$NL"
+	    done
+	    p_file '"$1/multi-user.target.d/tliset.conf"' "$wants_body"
+        fi
+
+	
+	local prefix=''
+	prefix+=$'#!/bin/sh\n'
+	if true; then
+	    prefix+='
+if [[ -z "${TLISET_HAS_LOG-}" ]]; then
+    export TLISET_HAS_LOG=1
+    exec "$0" "$@" > /run/tliset.log 2>&1
+fi
+date '+%Y-%m-%d_%H:%M:%S'
+set -x
+'
+	fi
+	prefix+=$'set -u\n'
+	prefix+=$'mkdir -p /run/tliset\n'
+
 	write_file -m 755 /etc/systemd/system-generators/l-network-generator \
-		   "#!/bin/sh${NL}set -e -u$NL$s"
+		   "$prefix$gen_body"
 	if let file_update; then
 	    cmd_log systemctl daemon-reload
 	fi
     fi
     case "$NAME" in
-	dserver ) setup_dserver_network ;;
-	miranda ) setup_miranda_network ;;
+	dserver ) intall_dserver_network ;;
+	miranda ) install_miranda_network ;;
     esac
     if ! let kind_coreos; then
 	setup_autofs
@@ -313,23 +348,207 @@ use_resolved_nameservices() {
     fi
 }
 
-setup_dserver_network() {
-    file_update_count=0
-
-    if true; then
-	write_file /etc/resolv.conf <<EOF
-nameserver 127.0.0.1
-EOF
-    else
-	enable_resolved
-	use_resolved_nameservices
-    fi
-
-    setup_dserver_dnsmasq
+# Escape argument using single quotas
+escape_for_shell() {
+    printf %s "'${1//\'/\'\\\'\'}'"
 }
 
-setup_dserver_dnsmasq() {
-    write_file /etc/dnsmasq.d/local.conf <<EOF
+pl() {
+    gen_body+="$1$NL"
+}
+
+# The first argument is path already properly quoted to read as single
+# word in a shell. The second argument is text that should be written
+# into the file at that path. Option -x indicattes that file must be
+# executable.
+p_file() {
+    local -i executable=0
+    if [[ "$1" == "-x" ]]; then
+	shift
+	executable=1
+    fi
+    local path="$1"
+    local body="$2"
+    pl "> $path printf %s $(escape_for_shell "$body")"
+    if let executable; then
+	pl "chmod 755 $path"
+    fi
+}
+
+p_mask_service() {
+    pl "ln -s /dev/null \"\$1/$1\""
+}
+
+# Write generator that setups networking at boot including
+# enabling/disabling relevant services. I use multi-line strings and
+# avoid here documents as the latter need temporary files and /tmp can
+# be on a read-only filesystem when generator runs. It also avoids
+# invocation of extra cat processes.
+
+print_network_generator() {
+    if let with_networkd; then
+	multi_user_wants+=(systemd-networkd.service)
+	case "$NAME" in
+	    miranda ) multi_user_wants+=(systemd-resolved.service) ;;
+	esac
+	pl ''
+	pl 'mkdir -p "$1/sockets.target.d"'
+	p_file '"$1/sockets.target.d/tliset.conf"' "\
+[Unit]
+Wants=systemd-networkd.socket
+"
+	# Mask all NetworkManager-related services
+	p_mask_service NetworkManager.service
+	p_mask_service NetworkManager-dispatcher.service
+	p_mask_service NetworkManager-wait-online.service
+	p_mask_service firewalld.service
+	p_mask_service dbus-org.fedoraproject.FirewallD1.service
+
+	# Make sure that system-suplied dnsmasq is masked
+	p_mask_service dnsmasq.service
+
+	pl ''
+	pl 'net_dir="$1/../network"'
+	pl 'mkdir -p "$net_dir"'
+
+	case "$NAME" in
+	    dserver ) print_dserver_network_files ;;
+	    miranda ) print_miranda_network_files ;;
+	esac
+    fi
+}
+
+print_dserver_network_files() {
+    pl ''
+
+    # disable systemd-resolved as dserver uses dnsmasq
+    p_mask_service systemd-resolved.service
+
+    # Generate setup to allow for VMs that are accessible from the
+    # lan. Use macvlan, not bridge, for beter efficiency.
+    p_file '"$net_dir/80-wan.network"' "\
+[Match]
+MACAddress=80:ee:73:76:8f:4c
+
+[Network]
+DHCP=ipv4
+"
+    p_file '"$net_dir/80-macvlan.netdev"' "\
+[NetDev]
+Name=$dserver_bridge
+Kind=macvlan
+[MACVLAN]
+Mode=bridge
+"
+
+    p_file '"$net_dir/80-lan.network"' "\
+[Match]
+Name=$dserver_eth_lan
+[Network]
+MACVLAN=$dserver_bridge
+"
+
+    p_file '"$net_dir/80-macvlan.network"' "\
+[Match]
+Name=$dserver_bridge
+[Network]
+IPMasquerade=yes
+Address=192.168.2.10/24
+#Gateway=192.168.2.1
+"
+
+    # Print port forwarding initialization service and its scripts
+    pl ''
+    p_file '"$1/tliset-forward-ports.service"' "\
+[Unit]
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/run/tliset/open-ports
+ExecStop=/bin/sh /run/tliset/close-ports
+"
+
+    pl 'mkdir -p "$1/network-online.target.wants"'
+    pl 'ln -s "$1/tliset-forward-ports.service" "$1/network-online.target.wants"'
+    p_file -x '/run/tliset/open-ports' "$(print_dserver_port_forwards)"
+}
+
+# Output string for a script that runs iptables to setup port
+# forwarding and generate another script to close those. This 2-stage
+# generation allows to close ports using the old definition after the
+# open part is changed with new defines.
+print_dserver_port_forwards() {
+    local open_text="#!/bin/sh$NL"
+    local close_text="#!/bin/sh$NL"
+    local i
+    for i in "${dserver_port_forwards[@]}"; do
+	if [[ "$i" =~ ^(tcp|udp):([0-9]+):([0-9.]+)(:([0-9]+))?$ ]]; then
+	    local protocol="${BASH_REMATCH[1]}"
+	    local wan_port="${BASH_REMATCH[2]}"
+	    local lan_ip="${BASH_REMATCH[3]}"
+	    local lan_port="${BASH_REMATCH[5]}"
+	    if [[ -z "$lan_port" ]]; then
+		lan_port="$wan_port"
+	    fi
+	    local s="PREROUTING -t nat -i $dserver_eth_wan -p $protocol --dport $wan_port -j DNAT --to $lan_ip:$lan_port"
+	    open_text+="iptables -A $s$NL"
+	    close_text+="iptables -D $s$NL"
+	else
+	    err "Bad port forwarding spec: $i"
+	fi
+    done
+
+    open_text+="> /run/tliset/close-ports printf %s $(escape_for_shell "$close_text")$NL"
+    open_text+="chmod 755 /run/tliset/close-ports$NL"
+    printf %s "$open_text"
+}
+ 
+print_dyndns() {
+    if [[ ! -s /etc/duckdns.key ]]; then
+	[[ -t 1 ]] || err "cannot ask for /etc/duckdns.key value as input is not tty"
+	local api_key
+	IFS='' read -p 'Enter API key for www.duckdns.org: ' api_key
+	write_file -m 640 -o root:nobody /etc/duckdns.key "$api_key"
+    fi
+    local key="$(< /etc/duckdns.key)"
+    local url="https://www.duckdns.org/update?domains=dsrv&token=$key&ip="
+    
+    multi_user_wants+=(tliset-dyndns.timer)
+    pl ''
+    p_file '"$1/tliset-dyndns.timer"' "\
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+Persistent=true
+# Each 10 minutes
+OnCalendar=*:0/10
+"
+    p_file '"$1/tliset-dyndns.service"' "\
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=nobody
+Type=oneshot
+ExecStart=/run/tliset/dyndns-update
+"
+    p_file -x '/run/tliset/dyndns-update' '#!/bin/sh
+s="$(/usr/bin/curl -s '"$(escape_for_shell "$url")"')"
+printf "curl output: %s\n" "$s" 1>&2
+test OK = "$s"
+'
+}
+
+print_dserver_dnsmasq() {
+
+    local -a dnsmasq_config
+    mapfile -t dnsmasq_config <<EOF
+
 interface=$dserver_bridge
 #interface=br0
 domain-needed
@@ -341,7 +560,7 @@ server=8.8.8.8
 server=8.8.4.4
 
 no-hosts
-dhcp-range=192.168.2.50,192.168.2.150,10m
+dhcp-range=192.168.2.50,192.168.2.150,6h
 
 address=/dserver/192.168.2.10
 address=/dserver.mir2.org/192.168.2.10
@@ -362,159 +581,34 @@ dhcp-host=34:23:ba:a4:0f:85,192.168.2.20
 
 #dhcp-option=option:router,192.168.2.1
 EOF
-    if systemctl -q is-active dnsmasq && let file_update; then
-	cmd_log systemctl restart dnsmasq
-    fi
-}
 
-# Write generator that setups networking at boot including
-# enabling/disabling relevant services. I use multi-line strings and
-# avoid here documents as the latter need temporary files and /tmp can
-# be on a read-only filesystem when generator runs. It also avoids
-# invocation of extra cat processes.
-
-print_network_generator() {
-    if let with_networkd; then
-	local resolver
-	case "$NAME" in
-	    dserver ) resolver='dnsmasq' ;;
-	    miranda ) resolver='systemd-resolved' ;;
-	esac
-	cat <<EOF
-self="\${0##*/}"
-mkdir -p "\$1/sockets.target.d"
-> "\$1/sockets.target.d/\$self.conf" printf "\
-[Unit]
-Wants=systemd-networkd.socket
-"
-
-mkdir -p "\$1/multi-user.target.d"
-> "\$1/multi-user.target.d/\$self.conf" printf "\
-[Unit]
-Wants=systemd-networkd.service
-Wants=$resolver.service
-"
-
-ln -s /dev/null "\$1/NetworkManager.service"
-ln -s /dev/null "\$1/NetworkManager-dispatcher.service"
-ln -s /dev/null "\$1/NetworkManager-wait-online.service"
-ln -s /dev/null "\$1/firewalld.service"
-ln -s /dev/null "\$1/dbus-org.fedoraproject.FirewallD1.service"
-EOF
-	cat <<EOF
-net_dir="\$1/../network"
-mkdir -p "\$net_dir"
-EOF
-	case "$NAME" in
-	    dserver ) print_dserver_network_files ;;
-	    miranda ) print_miranda_network_files ;;
-	esac
-    fi
-}
-
-print_dserver_network_files() {
-    # disable systemd-resolved as dserver uses dnsmasq
-    cat <<EOF
-ln -s /dev/null "\$1/systemd-resolved.service"
-EOF
-
-    # Generate setup to allow for VMs that are accessible from the
-    # lan. Use macvlan, not bridge, for beter efficiency.
-    cat <<EOF
-> "\$net_dir/80-wan.network" printf "\
-[Match]
-MACAddress=80:ee:73:76:8f:4c
-
-[Network]
-DHCP=ipv4
-"
-
-> "\$net_dir/80-macvlan.netdev" printf "\
-[NetDev]
-Name=$dserver_bridge
-Kind=macvlan
-[MACVLAN]
-Mode=bridge
-"
-
-> "\$net_dir/80-lan.network" printf "\
-[Match]
-Name=$dserver_eth_lan
-[Network]
-MACVLAN=$dserver_bridge
-"
-
-> "\$net_dir/80-macvlan.network" printf "\
-[Match]
-Name=$dserver_bridge
-[Network]
-IPMasquerade=yes
-Address=192.168.2.10/24
-#Gateway=192.168.2.1
-"
-EOF
-
-    # Print port forwarding initialization service and its scripts
-    cat <<EOF
-> "\$1/l-forward-ports.service" printf %s "\
-[Unit]
-After=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=true
-ExecStart=/bin/sh /run/tliset/open-ports
-ExecStop=/bin/sh /run/tliset/close-ports
-"
-
-mkdir -p "\$1/network-online.target.wants"
-ln -s "\$1/l-forward-ports.service" "\$1/network-online.target.wants"
-
-mkdir -p /run/tliset
-> /run/tliset/open-ports printf %s $(print_dserver_port_forwards)
-EOF
-}
-
-# Output string for a script that runs iptables to setup port
-# forwarding and generate another script to close those. This 2-stage
-# generation allows to close ports using the old definition after the
-# open part is changed with new defines.
-print_dserver_port_forwards() {
-    local i rules=()
-    for i in "${dserver_port_forwards[@]}"; do
-	if [[ "$i" =~ ^(tcp|udp):([0-9]+):([0-9.]+)(:([0-9]+))?$ ]]; then
-	    local protocol="${BASH_REMATCH[1]}"
-	    local wan_port="${BASH_REMATCH[2]}"
-	    local lan_ip="${BASH_REMATCH[3]}"
-	    local lan_port="${BASH_REMATCH[5]}"
-	    if [[ -z "$lan_port" ]]; then
-		lan_port="$wan_port"
-	    fi
-	    rules+=("PREROUTING -t nat -i $dserver_eth_wan -p $protocol --dport $wan_port -j DNAT --to $lan_ip:$lan_port")
-	else
-	    err "Bad port forwarding spec: $i"
+    # For simpler setup convert config into a list of options while
+    # stripping spaces, comments and blunk lines and embedd it
+    # directly into the unit file.
+    local i s=''
+    for i in "${dnsmasq_config[@]}"; do
+	i="${i## }"
+	i="${i%% }"
+	i="${i%%#*}"
+	if [[ -n "$i" ]]; then
+	    s+=" \\$NL    --$i"
 	fi
     done
 
+    multi_user_wants+=(tliset-dnsmasq.service)
     
-    local s=""
-    for i in "${rules[@]}"; do
-	s+="iptables -A $i$NL"
-    done
-    s+="> /run/tliset/close-ports printf %s \"\\$NL"
-    for i in "${rules[@]}"; do
-	s+="iptables -D $i$NL"
-    done
-    s+="\""
-    printf %q "$s"
+    pl ''
+    p_file '"$1/tliset-dnsmasq.service"' "\
+[Unit]
+After=network.target
+
+[Service]
+ExecStart=/usr/sbin/dnsmasq -k --conf-file=/dev/null$s
+"
 }
 
 print_miranda_network_files() {
-    cat <<EOF
-ln -s /dev/null "\$1/dnsmasq.service"
-EOF
-    cat <<EOF
-> "\$net_dir/zz-default.network" printf "\
+    p_file '"$net_dir/zz-default.network"' "\
 [Network]
 DHCP=v4
 
@@ -522,10 +616,15 @@ DHCP=v4
 UseMTU=true
 UseDomains=true
 "
-EOF
 }
 
-setup_miranda_network() {
+intall_dserver_network() {
+    write_file /etc/resolv.conf "\
+nameserver 127.0.0.1
+"
+}
+
+install_miranda_network() {
 
     if [[ -n "$virt" ]]; then
 	use_resolved_nameservices
@@ -758,53 +857,7 @@ EOF
 	    fi
 	fi
     fi
-
-    if [[ "$NAME" == dserver ]]; then
-        setup_dyndns
-    fi
     dec_log_level
-}
-
-setup_dyndns() {
-
-    if [[ ! -s /etc/duckdns.key ]]; then
-	[[ -t 1 ]] || err "cannot ask for /etc/duckdns.key value as input is not tty"
-	local api_key
-	IFS='' read -p 'Enter API key for www.duckdns.org: ' api_key
-	write_file -m 640 -o root:nobody /etc/duckdns.key "$api_key"
-    fi
-
-    file_update_count=0
-    write_file /etc/systemd/system/dyndns_update.timer <<EOF
-
-[Unit]
-After=network-online.target
-Wants=network-online.target
-
-[Timer]
-Persistent=true
-# Each 10 minutes
-OnCalendar=*:0/10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    write_file /etc/systemd/system/dyndns_update.service <<'EOF'
-[Unit]
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=nobody
-ExecStart=/bin/bash -c '[[ "$(/usr/bin/curl -s "https://www.duckdns.org/update?domains=dsrv&token=$(< /etc/duckdns.key)&ip=")" == OK ]]'
-Type=oneshot
-EOF
-    if [[ "$file_update_count" -gt 0 ]]; then
-	log "enabling/updating dyndns config"
-	systemctl daemon-reload
-	systemctl enable dyndns_update.timer
-	systemctl start dyndns_update.timer
-    fi
 }
 
 . "$selfdir/zram-setup"
@@ -877,6 +930,7 @@ declare -i kind_coreos=0
 declare -i with_extra_storage=0
 declare -i with_zram=1
 declare -i with_networkd=0
+declare -i with_dyndns=0
 
 virt="$(systemd-detect-virt -v || true)"
 if [[ "$virt" == none ]]; then
@@ -888,6 +942,7 @@ case "$NAME" in
     dserver )
 	kind_fedora=1
 	with_networkd=1
+	with_dyndns=1
 	;;
     ultrabook )
 	kind_fedora=1
