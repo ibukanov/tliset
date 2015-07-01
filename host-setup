@@ -288,9 +288,7 @@ setup_network() {
 	write_file /etc/hosts "$hosts_text"
     fi
 
-    multi_user_wants=()
-    gen_body=""
-    print_network_generator
+    print_network
     if let with_dyndns; then
 	print_dyndns
     fi
@@ -298,39 +296,6 @@ setup_network() {
 	print_dserver_dnsmasq
     fi
     
-    if [[ -n "$gen_body" ]]; then
-        if let ${#multi_user_wants[@]}; then
-	    pl ''
-	    pl 'mkdir -p "$1/multi-user.target.d"'
-	    local i wants_body="[Unit]$NL"
-	    for i in "${multi_user_wants[@]}"; do
-		wants_body+="Wants=$i$NL"
-	    done
-	    p_file '"$1/multi-user.target.d/tliset.conf"' "$wants_body"
-        fi
-
-	
-	local prefix=''
-	prefix+=$'#!/bin/sh\n'
-	if true; then
-	    prefix+='
-if [[ -z "${TLISET_HAS_LOG-}" ]]; then
-    export TLISET_HAS_LOG=1
-    exec "$0" "$@" > /run/tliset.log 2>&1
-fi
-date '+%Y-%m-%d_%H:%M:%S'
-set -x
-'
-	fi
-	prefix+=$'set -u\n'
-	prefix+=$'mkdir -p /run/tliset\n'
-
-	write_file -m 755 /etc/systemd/system-generators/l-network-generator \
-		   "$prefix$gen_body"
-	if let file_update; then
-	    cmd_log systemctl daemon-reload
-	fi
-    fi
     case "$NAME" in
 	dserver ) intall_dserver_network ;;
 	miranda ) install_miranda_network ;;
@@ -351,6 +316,47 @@ use_resolved_nameservices() {
 # Escape argument using single quotas
 escape_for_shell() {
     printf %s "'${1//\'/\'\\\'\'}'"
+}
+
+start_generator_write() {
+    multi_user_wants=()
+    gen_body=""
+}
+
+finish_generator_write() {
+    if [[ -z "$gen_body" ]] || ! let ${#multi_user_wants[@]}; then
+	return
+    fi
+
+    if let ${#multi_user_wants[@]}; then
+	pl ''
+	pl 'mkdir -p "$1/multi-user.target.d"'
+	local i wants_body="[Unit]$NL"
+	for i in "${multi_user_wants[@]}"; do
+	    wants_body+="Wants=$i$NL"
+	done
+	p_file '"$1/multi-user.target.d/tliset.conf"' "$wants_body"
+    fi
+
+    local prefix=''
+    prefix+=$'#!/bin/sh\n'
+    if true; then
+	prefix+='
+if [[ -z "${TLISET_HAS_LOG-}" ]]; then
+    export TLISET_HAS_LOG=1
+    exec "$0" "$@" > /run/tliset.log 2>&1
+fi
+date '+%Y-%m-%d_%H:%M:%S'
+set -x
+'
+    fi
+    prefix+=$'set -u\n'
+    prefix+=$'mkdir -p /run/tliset\n'
+    
+    write_file -m 755 /etc/systemd/system-generators/tliset "$prefix$gen_body"
+    if let file_update; then
+	cmd_log systemctl daemon-reload
+    fi
 }
 
 pl() {
@@ -379,13 +385,7 @@ p_mask_service() {
     pl "ln -s /dev/null \"\$1/$1\""
 }
 
-# Write generator that setups networking at boot including
-# enabling/disabling relevant services. I use multi-line strings and
-# avoid here documents as the latter need temporary files and /tmp can
-# be on a read-only filesystem when generator runs. It also avoids
-# invocation of extra cat processes.
-
-print_network_generator() {
+print_network() {
     if let with_networkd; then
 	multi_user_wants+=(systemd-networkd.service)
 	case "$NAME" in
@@ -969,6 +969,8 @@ esac
 #	err "Cannot configure CoreOS that under cloudconfig control"
 #fi
     
+start_generator_write
+    
 if let kind_fedora; then
     setup_fstab
     setup_packages
@@ -983,3 +985,5 @@ if let kind_fedora; then
     setup_users
 fi
 setup_services
+
+finish_generator_write
