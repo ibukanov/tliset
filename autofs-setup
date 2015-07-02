@@ -240,68 +240,6 @@ Host *
 EOF
 }
 
-write_helper_utils() {
-
-    if let has_nm; then
-	write_file -m 755 "$set_etc/is-online" <<'EOF'
-#!/bin/bash
-status="$(nmcli -f STATE -t g)"
-[[ "$status" == connected || "$status" == "connected (site only)" ]]
-EOF
-    else
-	write_file -m 755 "$set_etc/is-online" <<'EOF'
-#!/bin/bash
-exit 0
-EOF
-    fi
-
-    write_file -m 755 "$set_etc/is-outside-home-net" <<'EOF'
-#!/bin/bash
-! grep -q '^nameserver[[:space:]]\+192\.168\.2\.[0-9]\+$' /etc/resolv.conf
-EOF
-}
-
-setup_transmission_redirect() {
-
-    local socket_install=""
-    if let !has_nm; then
-	socket_install="\
-[Install]
-WantedBy=network-online.target
-"
-    fi
-
-    write_file /etc/systemd/system/transmission-homenet.socket <<EOF
-$socket_install
-[Socket]
-ListenStream=127.0.0.1:$files_ssh_port
-Accept=true
-EOF
-
-    write_file /etc/systemd/system/transmission-homenet@.service <<EOF
-[Unit]
-Requires=transmission-homenet.socket
-
-[Service]
-ExecStart=/usr/bin/ssh -W127.0.0.1:9091 \
-  -o StrictHostKeyChecking=no -o UserKnownHostsFile=$ssh_known_hosts \
-  kino-files
-StandardInput=socket
-
-EOF
-
-    if let has_nm; then
-	write_file -m 755 /etc/NetworkManager/dispatcher.d/90-online-monitor <<EOF
-#!/bin/bash
-if $set_etc/is-online; then
-    systemctl start transmission-homenet.socket
-else
-    systemctl stop transmission-homenet.socket
-fi
-EOF
-    fi
-}
-
 do_install() {
     create_ssh_config
     cmd install -m 755 -d "$set_etc" "$mount_dir"
@@ -311,23 +249,6 @@ do_install() {
     loop_mount_dirs print_sshfs_dir | write_file "$auto_map"
 
     write_file "$ssh_known_hosts" ""
-
-    write_helper_utils
-    
-    setup_transmission_redirect
-
-    cmd systemctl daemon-reload
-    if "$set_etc/is-online"; then
-	cmd systemctl start transmission-homenet.socket
-    fi
-    cmd systemctl restart autofs
-    if let has_nm; then
-	cmd systemctl enable NetworkManager-dispatcher
-    else
-	if ! systemctl -q is-enabled transmission-homenet.socket; then
-	    cmd systemctl enable transmission-homenet.socket
-	fi
-    fi
 }
 
 remove_mount_dir() {
@@ -349,16 +270,7 @@ do_uninstall() {
     loop_mount_dirs remove_mount_dir
     rm_if_empty_dir "$mount_dir"
 
-    if [[ -e /etc/systemd/system/transmission-homenet.socket ]]; then
-	cmd systemctl stop transmission-homenet.socket
-	cmd systemctl disable transmission-homenet.socket
-    fi
-    rm_if_exists /etc/systemd/system/transmission-homenet.socket
-    rm_if_exists /etc/systemd/system/transmission-homenet@.service
-
     rm_if_exists /etc/NetworkManager/dispatcher.d/90-online-monitor
-    rm_if_exists "$set_etc/is-online"
-    rm_if_exists "$set_etc/is-outside-home-net"
     rm_if_empty_dir "$set_etc"
 }
 

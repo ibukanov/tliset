@@ -297,9 +297,11 @@ setup_network() {
 	dserver ) intall_dserver_network ;;
 	miranda ) install_miranda_network ;;
     esac
-    if ! let kind_coreos; then
-	setup_autofs
+
+    if let with_transmission_redirect; then
+	setup_transmission_redirect
     fi
+
     dec_log_level
 }
 
@@ -638,6 +640,57 @@ EOF
     fi
 }
 
+setup_transmission_redirect() {
+    pl ''
+    p_file '"$1/tliset-transmission.socket"' "\
+[Socket]
+ListenStream=127.0.0.1:$kino_ssh_port
+Accept=true
+"
+    pl ''
+    p_file '"$1/tliset-transmission@.service"' "\
+[Unit]
+Requires=tliset-transmission.socket
+
+[Service]
+ExecStart=/usr/bin/ssh -W127.0.0.1:9091 \\
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=$autofs_ssh_known_hosts \\
+  kino-files
+StandardInput=socket
+"
+    if let with_networkd; then
+	pl ''
+	pl 'mkdir -p "$1/network-online.target.wants"'
+	pl 'ln -s "$1/tliset-transmission.socket" "$1/network-online.target.wants"'
+    else
+	multi_user_wants+=(NetworkManager-dispatcher)
+	pl ''
+	p_file -x "/run/tliset/is-online" "$(cat <<'EOF'
+#!/bin/sh
+case "$(nmcli -f STATE -t g)" in
+    connected | "connected (site only)" ) exit 0 ;;
+esac
+exit 1
+EOF
+)"
+	pl ''
+	p_file -x "/run/tliset/is-outside-home-net" "$(cat <<'EOF'
+#!/bin/sh
+! grep -q '^nameserver[[:space:]]\+192\.168\.2\.[0-9]\+$' /etc/resolv.conf
+EOF
+)"
+	
+	write_file -m 755 /etc/NetworkManager/dispatcher.d/90-online-monitor <<EOF
+#!/bin/bash
+if /run/tliset/is-online; then
+    systemctl start tliset-transmission.socket
+else
+    systemctl stop tliset-transmission.socket
+fi
+EOF
+    fi
+}
+
 setup_autofs() {
     local setup_path="$selfdir/autofs-setup"
     if [[ "$setup_path" -nt /etc/tliset/.installed ]]; then
@@ -911,6 +964,7 @@ declare -i with_vol_storage=0
 declare -i with_zram=1
 declare -i with_networkd=0
 declare -i with_dyndns=0
+declare -i with_transmission_redirect=0
 
 virt="$(systemd-detect-virt -v || true)"
 if [[ "$virt" == none ]]; then
@@ -923,15 +977,18 @@ case "$NAME" in
 	kind_fedora=1
 	with_networkd=1
 	with_dyndns=1
+	with_transmission_redirect=1
 	;;
     ultrabook )
 	kind_fedora=1
+	with_transmission_redirect=1
 	;;
     miranda )
 	kind_fedora=1
 	if [[ -n "$virt" ]]; then
 	    with_networkd=1
 	fi
+	with_transmission_redirect=1
 	
 	;;
     thip )
@@ -963,6 +1020,7 @@ setup_ssh
 setup_network
 if let kind_fedora; then
     setup_users
+    setup_autofs
 fi
 setup_services
 

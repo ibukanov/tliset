@@ -29,6 +29,10 @@ dserver_port_forwards=(
 ssh_pubkey_igor="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuRT02EgmvQdI96X/qGdUCCSUbTHlvRiHuF0BKpNhch igor@localhost.localdomain$NL"
 ssh_pubkey_lubava="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKGV+r2T/Mf9QrEsupuxwWMv2UtLYgD3rjBQG/W5Dfxo lubava@localhost.localdomain$NL"
 
+kino_ssh_port=9092
+autofs_ssh_known_hosts="/var/local/sshfs_known_hosts"
+
+
 tmp_files=()
 
 cleanup() {
