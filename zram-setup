@@ -1,22 +1,15 @@
 #!/bin/bash
 
 setup_zram() {
-    local reload_systemd=0
-    
     log "Checking zram"
 
-    local status_path=/usr/bin/zram-status
-    if let kind_coreos; then
-	status_path=/opt/bin/zram-status
-    fi
-    write_file -m 755 "$status_path" <<'EOF'
-#!/usr/bin/bash
-
-set -u
-set -e
+    pl ''
+    p_file -x /run/tliset/zram-status "$(cat <<'EOF'
+#!/bin/sh
+set -e -u
 
 dir=/sys/block/zram0
-if [ ! -d "$dir" ]; then
+if test ! -d "$dir"; then
     echo "status: disabled"
     exit 0
 fi
@@ -33,32 +26,16 @@ echo "mem_used_total: $(($mem_used_total / 1024))K"
 echo "max_comp_streams: $(cat $dir/max_comp_streams)"
 echo "comp_algorithm: $(cat $dir/comp_algorithm)"
 EOF
+)"
 
-    write_file /etc/systemd/system/zram.service <<EOF
-[Unit]
-Description=Service enabling RAM compression using zRam
+    pl ''
+    p_file -x /run/tliset/zram-enable "$(cat <<'EOF'
+#!/bin/sh
+set -e -u
 
-[Install]
-WantedBy=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/modprobe zram num_devices=1
-ExecStart=/etc/tliset/zram-enable
-ExecStop=/etc/tliset/zram-disable
-RemainAfterExit=yes
-EOF
-    if let file_update; then
-	reload_systemd=1
-    fi
-
-    write_file -m 755 /etc/tliset/zram-enable <<'EOF'
-#!/usr/bin/bash
-
-set -u
-set -e
-
-read ignore memtotal < <(grep -o '\<MemTotal:\s\+[0-9]\+' /proc/meminfo)
+read ignore memtotal <<eof
+$(grep -o '\<MemTotal:\s\+[0-9]\+' /proc/meminfo)
+eof
 SWAP_SIZE=$(($memtotal * 2 * 1024))
 
 num_cpus=$(grep -c processor /proc/cpuinfo)
@@ -72,30 +49,34 @@ echo "${SWAP_SIZE}" > /sys/block/zram0/disksize
 /usr/sbin/mkswap /dev/zram0
 /usr/sbin/swapon -p 100 /dev/zram0
 EOF
+)"
     
-    write_file -m 755 /etc/tliset/zram-disable <<'EOF'
-#!/usr/bin/bash
-
-set -u
-set -e
+    pl ''
+    p_file -x /run/tliset/zram-disable "$(cat <<'EOF'
+#!/bin/sh
+set -e -u
 
 if grep -q '^/dev/zram0\s' /proc/swaps; then
     /usr/sbin/swapoff "/dev/zram0"
 fi
 EOF
+)"
 
-    if let reload_systemd; then
-	systemctl daemon-reload
-    fi
+    pl ''
+    p_file '"$1/tliset-zram.service"' "\
+[Unit]
+Description=Service enabling RAM compression using zRam
 
-    if ! systemctl -q is-enabled zram; then
-	log "  Enabling zram"
-	systemctl enable zram
-    fi
+[Install]
+WantedBy=multi-user.target
 
-    if ! systemctl -q is-active zram; then
-	log "  Starting zram"
-	systemctl start zram
-    fi
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/modprobe zram num_devices=1
+ExecStart=/run/tliset/zram-enable
+ExecStop=/run/tliset/zram-disable
+RemainAfterExit=yes
+"
+    multi_user_wants+=(tliset-zram.service)
+
 }
-
