@@ -189,26 +189,23 @@ setup_fstab() {
 	fi
 	if [[ -n "$virt" ]] && lsmod | grep -q '^vboxsf\>' ; then
 	    # Mount shared folders
-	    local mount_uid="$(id -u igor)" mount_gid="$(id -g igor)"
-	    write_file /etc/systemd/system/mount-virt-dirs.service <<EOF
-[Install]
-WantedBy=multi-user.target
+	    p_file -x '/run/tliset/mount-downloads' "$(cat <<'EOF'
+#!/bin/bash
+mount_options="uid=$(id -u igor),gid=$(id -g igor),nosuid,nodev"
+for ((i=0; i<10; i+=1)); do
+    /sbin/mount.vboxsf -o "$mount_options" Downloads /downloads && exit 0
+    sleep 5
+done
+echo "failed to mount /downloads" 1>&2
+exit 0
+EOF
+)"
+	    p_file '"$1/tliset-mount-downloads.service"' "\
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c 'for ((i=0; i<10; i+=1)); do\n\
-    /sbin/mount.vboxsf -o uid=$mount_uid,gid=$mount_gid,nosuid,nodev Downloads /downloads \
-        && exit 0\n\
-    sleep 5\n\
-done\n\
-echo "failed to mount /downloads" 1>&2\n\
-exit 0'
-EOF
-	    if let file_update; then
-		cmd_log systemctl daemon-reload
-	    fi
-	    if ! systemctl -q is-enabled mount-virt-dirs; then
-		cmd_log systemctl enable mount-virt-dirs
-	    fi
+ExecStart=/run/tliset/mount-downloads
+"
+            multi_user_wants+=(tliset-mount-downloads.service)
 	fi
     fi
     dec_log_level
@@ -315,7 +312,8 @@ use_resolved_nameservices() {
 
 # Escape argument using single quotas
 escape_for_shell() {
-    printf %s "'${1//\'/\'\\\'\'}'"
+    local replacement="'\\''"
+    printf %s "'${1//\'/$replacement}'"
 }
 
 start_generator_write() {
@@ -324,7 +322,7 @@ start_generator_write() {
 }
 
 finish_generator_write() {
-    if [[ -z "$gen_body" ]] || ! let ${#multi_user_wants[@]}; then
+    if [[ -z "$gen_body" ]] && ! let ${#multi_user_wants[@]}; then
 	return
     fi
 
@@ -712,13 +710,11 @@ Subsystem sftp /usr/libexec/openssh/sftp-server
 
     file_update_count=0
     if let kind_fedora; then
-	write_file /etc/systemd/system/sshd.service.d/local.conf <<EOF
+	pl 'mkdir -p "$1/sshd.service.d/"'
+	p_file '"$1/sshd.service.d/tliset.conf"' "\
 [Service]
 Environment=OPTIONS=-e
-EOF
-	if let file_update_count; then
-	    systemctl daemon-reload
-	fi
+"
     fi
     write_file /etc/ssh/sshd_config "$sshd_config"
     
@@ -785,34 +781,27 @@ setup_users() {
 setup_services() {
     log "Checking services"
     inc_log_level
+
     if let kind_fedora; then
-	if systemctl -q is-enabled docker; then
-	    log "disabling docker service"
-	    systemctl disable docker
-	fi
-    elif let kind_coreos; then
-	if [[ ! -d /vol ]]; then
-	    cmd_log mkdir -m 755 /vol
-	fi
+	p_mask_service docker.service
+    fi
 
-
+    if let kind_coreos; then
 	# Ignore system configs
 	if systemctl -q is-enabled system-cloudinit@; then
 	    cmd_log systemctl mask system-cloudinit@
 	fi
 
 	# On CoreOS docker is socket-activated by default which breaks
-	# restarting containers on boot.
-	if ! systemctl -q is-enabled docker; then
-	    log "enabling docker"
-	    systemctl enable docker
-	fi
-
-	if let with_extra_storage; then
-	    file_update_count=0
- 	    write_file -m 755 /etc/local-storage <<'EOF'
-#!/bin/bash
+	# restarting containers on boot unless a docker client runs
+	multi_user_wants+=(docker.service)
+    fi
+	
+    if let with_vol_storage; then
+	p_file -x '/run/tliset/mount-vol' "$(cat <<'EOF'
+#!/bin/sh
 set -e -u
+mkdir -p /vol
 root_mount="$(grep ' / ' /proc/mounts)"
 root_device_prefix="${root_mount%%[0-9]*}"
 case "$root_device_prefix" in
@@ -820,7 +809,8 @@ case "$root_device_prefix" in
     /dev/vda ) device=/dev/vdb ;;
     * ) echo "Cannot deduce storage device, root_device_prefix='$root_device_prefix' root_mount='$root_mount'" 1>&2; exit 1 ;;
 esac
-[[ -b "$device" ]] || { echo "No extra storage" 1>&2; exit 0; }
+
+test -b "$device" || { echo "No extra storage" 1>&2; exit 0; }
 if ! grep -q "^$device\>" /proc/mounts && ! mount -t ext4 "$device" /vol 2>/dev/null; then 
     set -x
     mkfs.ext4 "$device"
@@ -835,28 +825,18 @@ if [[ ! -d /vol/src ]]; then
     set +x
 fi
 EOF
-	    write_file /etc/systemd/system/local-storage.service <<EOF
+)"
+	p_file -x '"$1/tliset-mount-vol.service"' "$(cat <<'EOF'
 [Unit]
 Before=docker.service
-[Install]
-WantedBy=docker.service
 [Service]
 Type=oneshot
-RemainAfterExit=yes
-ExecStart=/etc/local-storage
+ExecStart=/run/tliset/mount-vol
 EOF
-	    if let file_update; then
-		systemctl daemon-reload
-	    fi
-	    if let file_update_count; then
-		systemctl restart local-storage
-	    fi
-	    if ! systemctl -q is-enabled local-storage; then
-		log "enabling local-storage"
-		systemctl enable local-storage
-	    fi
-	fi
+)"
+	multi_user_wants+=(tliset-mount-vol.service)
     fi
+
     dec_log_level
 }
 
@@ -927,7 +907,7 @@ fi
 
 declare -i kind_fedora=0
 declare -i kind_coreos=0
-declare -i with_extra_storage=0
+declare -i with_vol_storage=0
 declare -i with_zram=1
 declare -i with_networkd=0
 declare -i with_dyndns=0
@@ -956,7 +936,7 @@ case "$NAME" in
 	;;
     thip )
 	kind_coreos=1
-	with_extra_storage=1
+	with_vol_storage=1
 	with_zram=1
 	;;
     rserv )
