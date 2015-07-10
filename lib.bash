@@ -14,16 +14,20 @@ dserver_bridge=macvlan0
 mac_drouter_wan=52:54:00:54:6e:dd
 mac_drouter_lan=52:54:00:54:6e:de
 mac_kino=52:54:00:54:6e:ef
-mac_mc=52:54:00:54:6e:f0
+mac_macbook_air=8c:29:37:e8:0e:e2
+mac_tablet=34:23:ba:a4:0f:85
 
 ip_kino=192.168.2.9
 ip_drouter=192.168.2.8
-ip_mc=192.168.2.7
+ip_tablet=192.168.2.20
+ip_macbook_air=192.168.2.21
 
 dserver_port_forwards=(
     "tcp:9092:$ip_kino"
     "tcp:51413:$ip_kino"
     "udp:51413:$ip_kino"
+    "tcp:25565:$ip_macbook_air"
+    "udp:25565:$ip_macbook_air"
 )
 
 ssh_pubkey_igor="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuRT02EgmvQdI96X/qGdUCCSUbTHlvRiHuF0BKpNhch igor@localhost.localdomain$NL"

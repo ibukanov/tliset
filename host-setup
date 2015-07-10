@@ -130,15 +130,16 @@ setup_packages() {
     if ! rpm -q --quiet "${list[@]}" ; then
 	log "Installing missing packages"
 	dnf install -y "${list[@]}"
-	printf 'new-session\n' > /etc/tmux.conf
     fi
 
     if rpm -q --quiet transmission-gtk transmission-remote-gtk ; then
 	cmd_log dnf remove -y transmission-gtk transmission-remote-gtk
     fi
 
-    systemctl enable autofs
     fixup_transgui
+
+    printf 'new-session\n' | write_file /etc/tmux.conf
+
     dec_log_level
 }
 
@@ -573,11 +574,10 @@ dhcp-host=$mac_kino,$ip_kino
 address=/kino/$ip_kino
 address=/extra.mir2.org/$ip_kino
 
-dhcp-host=$mac_mc,$ip_mc
-address=/mc/$ip_mc
+dhcp-host=$mac_macbook_air,$ip_macbook_air
 
 # Terentiy's tablet
-dhcp-host=34:23:ba:a4:0f:85,192.168.2.20
+dhcp-host=$mac_tablet,$ip_tablet
 
 #dhcp-option=option:router,192.168.2.1
 EOF
@@ -653,10 +653,9 @@ Accept=true
 Requires=tliset-transmission.socket
 
 [Service]
-ExecStart=/usr/bin/ssh -W127.0.0.1:9091 \\
-  -o StrictHostKeyChecking=no -o UserKnownHostsFile=$autofs_ssh_known_hosts \\
-  kino-files
 StandardInput=socket
+ExecStart=/usr/bin/ssh -W127.0.0.1:9091 \\
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=$autofs_ssh_known_hosts kino
 "
     if let with_networkd; then
 	pl ''
@@ -691,16 +690,100 @@ EOF
     fi
 }
 
+setup_ssh_config() {
+    write_file "/etc/ssh/ssh_config" <<EOF
+Host kino
+  HostKeyAlias kino
+  AddressFamily inet
+  CheckHostIP no
+  Port $kino_ssh_port
+  HostName rserv.mir2.org
+  User user
+  Ciphers aes128-gcm@openssh.com
+  MACs umac-128@openssh.com
+
+Host dserver
+  HostKeyAlias dserver
+  HostName dserver.mir2.org
+  AddressFamily inet
+  CheckHostIP no
+  Ciphers aes128-gcm@openssh.com
+  MACs umac-128@openssh.com
+
+Host hippyru-www
+  HostKeyAlias hippyru-www
+  HostName www.hippyru.net
+  AddressFamily inet
+  CheckHostIP no
+  Port 2022
+  Ciphers aes128-gcm@openssh.com
+
+Host *
+  GSSAPIAuthentication no
+  SendEnv LANG
+EOF
+}
+
 setup_autofs() {
-    local setup_path="$selfdir/autofs-setup"
-    if [[ "$setup_path" -nt /etc/tliset/.installed ]]; then
-	local flags=(-u -i)
-	if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
-	    flags+=(-n -l)
-	fi
-	bash "$setup_path" "${flags[@]}"
-	touch /etc/tliset/.installed
+    
+    local autofs_dirs=(kino)
+    if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
+	autofs_dirs+=(bergenrabbit-photo dserver-lubava hippy.ru lubava.info)
     fi
+
+    pl ''
+    pl "mkdir -p ${autofs_dirs[*]/#//run/autofs/}"
+    multi_user_wants+=(autofs.service)
+
+    local s="" dir host user remote_dir
+    for dir in "${autofs_dirs[@]}"; do
+	case "$dir" in
+	    bergenrabbit-photo )
+		host=hippyru-www
+		user=bergenrabbit.net
+		remote_dir=/www/site/bergenrabbit.net/photo
+		;;
+	    hippy.ru )
+		host=hippyru-www
+		user=hippy.ru
+		remote_dir=/www/site/hippy.ru
+		;;
+	    lubava.info )
+		host=hippyru-www
+		user=lubava.info
+		remote_dir=/www/site/lubava.info
+		;;	
+	    kino )
+		host=kino
+		user=user
+		remote_dir=/data/files
+		;;
+	    dserver-lubava )
+		host=dserver
+		user=lubava
+		remote_dir=/home/lubava
+		;;
+	esac
+	s+="/run/autofs/$dir -fstype=fuse.sshfs"
+	s+=",rw,nodev,nosuid,noatime,allow_other,nonempty"
+	s+=",max_read=65536,reconnect,intr"
+	s+=",workaround=all,transform_symlinks,follow_symlinks"
+	s+=",uid=\$UID,gid=\$GID"
+	s+=",ServerAliveInterval=5,ServerAliveCountMax=2"
+	s+=",StrictHostKeyChecking=no"
+	s+=",UserKnownHostsFile=$autofs_ssh_known_hosts"
+	s+=",ControlPath=none"
+	s+=" $user@$host:$remote_dir$NL"
+    done
+    p_file /run/tliset/automap "$s"
+    pl 'chcon -t etc_t /run/tliset/automap'
+
+    if [[ ! -L /set || "$(readlink /set)" != "/run/autofs" ]]; then
+	cmd_log rm -f /set
+	cmd_log ln -s /run/autofs /set
+    fi
+    write_file /etc/auto.master.d/tliset.autofs "/- file:/run/tliset/automap --timeout=50"
+    write_file "$autofs_ssh_known_hosts" ""
 }
 
 setup_ssh() {
@@ -835,6 +918,11 @@ setup_services() {
     log "Checking services"
     inc_log_level
 
+    if let kind_fedora; then
+	setup_autofs
+	setup_ssh_config
+    fi
+    
     if let kind_fedora; then
 	p_mask_service docker.service
     fi
@@ -1020,7 +1108,6 @@ setup_ssh
 setup_network
 if let kind_fedora; then
     setup_users
-    setup_autofs
 fi
 setup_services
 
