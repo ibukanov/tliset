@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/lib.bash"
 
-valid_host_names=(dserver miranda ultrabook thip rserv)
+valid_host_names=(dserver miranda ultrabook thip rserv r2)
 
 is_valid_host_name() {
     local name="$1" i
@@ -101,6 +101,10 @@ setup_packages() {
 	# Languages
 	hunspell-ru hunspell-nb
     )
+
+    if let with_latex; then
+	list+=(texlive)
+    fi
 
     case "$NAME" in
 	dserver | miranda )
@@ -290,27 +294,26 @@ setup_network() {
     if let with_dyndns; then
 	print_dyndns
     fi
-    if [[ "$NAME" == dserver ]]; then
+    if false && [[ "$NAME" == dserver ]]; then
 	print_dserver_dnsmasq
     fi
     
     case "$NAME" in
-	dserver ) intall_dserver_network ;;
 	miranda ) install_miranda_network ;;
     esac
+
+    if let with_resolved; then
+	if [[ ! -L /etc/resolv.conf || \
+		    "$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
+	    cmd_log ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
+	fi
+    fi
 
     if let with_transmission_redirect; then
 	setup_transmission_redirect
     fi
 
     dec_log_level
-}
-
-use_resolved_nameservices() {
-    if [[ ! -L /etc/resolv.conf || \
-		"$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
-	cmd_log ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
-    fi
 }
 
 # Escape argument using single quotas
@@ -321,23 +324,29 @@ escape_for_shell() {
 
 start_generator_write() {
     multi_user_wants=()
+    sockets_wants=()
     gen_body=""
 }
 
-finish_generator_write() {
-    if [[ -z "$gen_body" ]] && ! let ${#multi_user_wants[@]}; then
-	return
-    fi
+print_wants_list() {
+    local target="$1"
+    shift
+    let $# || return 0
+    pl ''
+    pl 'mkdir -p "$1/$target.d"'
+    local i wants_body="[Unit]$NL"
+    for i in "$@"; do
+	wants_body+="Wants=$i$NL"
+    done
+    p_file '"$1/$target.d/tliset.conf"' "$wants_body"
+    
+}
 
-    if let ${#multi_user_wants[@]}; then
-	pl ''
-	pl 'mkdir -p "$1/multi-user.target.d"'
-	local i wants_body="[Unit]$NL"
-	for i in "${multi_user_wants[@]}"; do
-	    wants_body+="Wants=$i$NL"
-	done
-	p_file '"$1/multi-user.target.d/tliset.conf"' "$wants_body"
-    fi
+finish_generator_write() {
+    [[ -n "$gen_body" ]] || let "${#multi_user_wants[@]} + ${#socket_wants[@]}" || return
+
+    print_wants_list multi-user.target "${multi_user_wants[@]:+$multi_user_wants[@]}"
+    print_wants_list sockets.target "${socket_wants[@]:+$socket_wants[@]}"
 
     local prefix=''
     prefix+=$'#!/bin/sh\n'
@@ -387,11 +396,11 @@ p_mask_service() {
 }
 
 print_network() {
+    if let with_resolved; then
+	multi_user_wants+=(systemd-resolved.service)
+    fi
     if let with_networkd; then
 	multi_user_wants+=(systemd-networkd.service)
-	case "$NAME" in
-	    miranda ) multi_user_wants+=(systemd-resolved.service) ;;
-	esac
 	pl ''
 	pl 'mkdir -p "$1/sockets.target.d"'
 	p_file '"$1/sockets.target.d/tliset.conf"' "\
@@ -422,18 +431,8 @@ Wants=systemd-networkd.socket
 print_dserver_network_files() {
     pl ''
 
-    # disable systemd-resolved as dserver uses dnsmasq
-    p_mask_service systemd-resolved.service
-
     # Generate setup to allow for VMs that are accessible from the
     # lan. Use macvlan, not bridge, for beter efficiency.
-    p_file '"$net_dir/80-wan.network"' "\
-[Match]
-MACAddress=80:ee:73:76:8f:4c
-
-[Network]
-DHCP=ipv4
-"
     p_file '"$net_dir/80-macvlan.netdev"' "\
 [NetDev]
 Name=$dserver_bridge
@@ -444,7 +443,7 @@ Mode=bridge
 
     p_file '"$net_dir/80-lan.network"' "\
 [Match]
-Name=$dserver_eth_lan
+MACAddress=80:ee:73:76:8f:4c
 [Network]
 MACVLAN=$dserver_bridge
 "
@@ -453,14 +452,13 @@ MACVLAN=$dserver_bridge
 [Match]
 Name=$dserver_bridge
 [Network]
-IPMasquerade=yes
-Address=192.168.2.10/24
-#Gateway=192.168.2.1
+DHCP=ipv4
 "
 
     # Print port forwarding initialization service and its scripts
-    pl ''
-    p_file '"$1/tliset-forward-ports.service"' "\
+    if false; then
+	pl ''
+	p_file '"$1/tliset-forward-ports.service"' "\
 [Unit]
 After=network-online.target
 
@@ -471,9 +469,10 @@ ExecStart=/run/tliset/open-ports
 ExecStop=/bin/sh /run/tliset/close-ports
 "
 
-    pl 'mkdir -p "$1/network-online.target.wants"'
-    pl 'ln -s "$1/tliset-forward-ports.service" "$1/network-online.target.wants"'
-    p_file -x '/run/tliset/open-ports' "$(print_dserver_port_forwards)"
+	pl 'mkdir -p "$1/network-online.target.wants"'
+	pl 'ln -s "$1/tliset-forward-ports.service" "$1/network-online.target.wants"'
+	p_file -x '/run/tliset/open-ports' "$(print_dserver_port_forwards)"
+    fi
 }
 
 # Output string for a script that runs iptables to setup port
@@ -618,17 +617,9 @@ UseDomains=true
 "
 }
 
-intall_dserver_network() {
-    write_file /etc/resolv.conf "\
-nameserver 127.0.0.1
-"
-}
-
 install_miranda_network() {
 
-    if [[ -n "$virt" ]]; then
-	use_resolved_nameservices
-    else
+    if [[ -z "$virt" ]]; then
 	# TODO use dnsmasq to integrate with VM names
 	write_file /etc/NetworkManager/conf.d/99-local.conf <<EOF
 [main]
@@ -697,7 +688,7 @@ Host kino
   AddressFamily inet
   CheckHostIP no
   Port $kino_ssh_port
-  HostName rserv.mir2.org
+  HostName media.mir2.org
   User user
   Ciphers aes128-gcm@openssh.com
   MACs umac-128@openssh.com
@@ -737,6 +728,7 @@ setup_autofs() {
 
     local s="" dir host user remote_dir
     for dir in "${autofs_dirs[@]}"; do
+	local extra_opt
 	case "$dir" in
 	    bergenrabbit-photo )
 		host=hippyru-www
@@ -756,7 +748,9 @@ setup_autofs() {
 	    kino )
 		host=kino
 		user=user
-		remote_dir=/data/files
+		remote_dir=/files
+		extra_opt="max_readahead=1048576"
+		#extra_opt="max_readahead=4194304"
 		;;
 	    dserver-lubava )
 		host=dserver
@@ -773,6 +767,7 @@ setup_autofs() {
 	s+=",StrictHostKeyChecking=no"
 	s+=",UserKnownHostsFile=$autofs_ssh_known_hosts"
 	s+=",ControlPath=none"
+	s+="${extra_opt:+,}$extra_opt"
 	s+=" $user@$host:$remote_dir$NL"
     done
     p_file /run/tliset/automap "$s"
@@ -786,8 +781,8 @@ setup_autofs() {
     write_file "$autofs_ssh_known_hosts" ""
 }
 
-setup_ssh() {
-    log "Checking ssh"
+setup_sshd() {
+    log "Checking sshd"
     inc_log_level
     mkdir -p -m 0700 /root/.ssh
     case "$NAME" in
@@ -844,21 +839,30 @@ Subsystem sftp /usr/libexec/openssh/sftp-server
 	root_authorized_keys+="$(< /root/.ssh/id_ed25519.pub)$NL"
     fi
 
+    if let sshd_extra_listen_port; then
+	local re='^ssh_port_t\s\+tcp\s\+%s$'
+	if ! semanage port -l -C | grep -q "$(printf "$re" "$sshd_extra_listen_port")"; then
+	    cmd_log semanage port -a -t ssh_port_t -p tcp "$sshd_extra_listen_port"
+	fi
+    fi
+
     file_update_count=0
     if let kind_fedora; then
+	ports=" -o Port=22"
+	if let sshd_extra_listen_port; then
+	    ports+=" -o Port=$sshd_extra_listen_port"
+	fi
+	
 	pl 'mkdir -p "$1/sshd.service.d/"'
 	p_file '"$1/sshd.service.d/tliset.conf"' "\
 [Service]
-Environment=OPTIONS=-e
+Environment=\"OPTIONS=-e$ports\"
 "
     fi
     write_file /etc/ssh/sshd_config "$sshd_config"
-    
+
     if [[ "$NAME" == dserver ]]; then
-	if ! systemctl -q is-enabled sshd; then
-	    log "enabling sshd"
-	    systemctl enable sshd
-	fi
+	multi_user_wants+=(sshd.service)
     elif [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
 	if systemctl -q is-enabled sshd; then
 	    log "disabling sshd"
@@ -928,16 +932,15 @@ setup_services() {
     fi
 
     if let kind_coreos; then
-	# Ignore system configs
-	if systemctl -q is-enabled system-cloudinit@; then
-	    cmd_log systemctl mask system-cloudinit@
-	fi
+	# Ignore system and user configs
+	p_mask_service system-cloudinit@.servive
+	p_mask_service user-cloudinit@.servive
 
 	# On CoreOS docker is socket-activated by default which breaks
 	# restarting containers on boot unless a docker client runs
 	multi_user_wants+=(docker.service)
     fi
-	
+
     if let with_vol_storage; then
 	p_file -x '/run/tliset/mount-vol' "$(cat <<'EOF'
 #!/bin/sh
@@ -1051,8 +1054,12 @@ declare -i kind_coreos=0
 declare -i with_vol_storage=0
 declare -i with_zram=1
 declare -i with_networkd=0
+declare -i with_resolved=0
 declare -i with_dyndns=0
 declare -i with_transmission_redirect=0
+declare -i with_latex=0
+
+declare -i sshd_extra_listen_port=0
 
 virt="$(systemd-detect-virt -v || true)"
 if [[ "$virt" == none ]]; then
@@ -1064,8 +1071,10 @@ case "$NAME" in
     dserver )
 	kind_fedora=1
 	with_networkd=1
+	with_resolved=1
 	with_dyndns=1
 	with_transmission_redirect=1
+	sshd_extra_listen_port=18022
 	;;
     ultrabook )
 	kind_fedora=1
@@ -1075,17 +1084,20 @@ case "$NAME" in
 	kind_fedora=1
 	if [[ -n "$virt" ]]; then
 	    with_networkd=1
+	    with_resolved=1
 	fi
 	with_transmission_redirect=1
-	
+	with_latex=1
+	sshd_extra_listen_port=19022
 	;;
     thip )
 	kind_coreos=1
 	with_vol_storage=1
 	with_zram=1
 	;;
-    rserv )
+    rserv|r2 )
 	kind_coreos=1
+	with_zram=1
 	;;
 esac
 
@@ -1104,7 +1116,7 @@ fi
 if let with_zram; then
     setup_zram
 fi
-setup_ssh
+setup_sshd
 setup_network
 if let kind_fedora; then
     setup_users

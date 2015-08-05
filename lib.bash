@@ -11,8 +11,6 @@ dserver_eth_lan=enp4s0
 
 dserver_bridge=macvlan0
 
-mac_drouter_wan=52:54:00:54:6e:dd
-mac_drouter_lan=52:54:00:54:6e:de
 mac_kino=52:54:00:54:6e:ef
 mac_macbook_air=8c:29:37:e8:0e:e2
 mac_tablet=34:23:ba:a4:0f:85
