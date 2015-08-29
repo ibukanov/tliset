@@ -28,8 +28,8 @@ dserver_port_forwards=(
     "udp:25565:$ip_macbook_air"
 )
 
-ssh_pubkey_igor="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuRT02EgmvQdI96X/qGdUCCSUbTHlvRiHuF0BKpNhch igor@localhost.localdomain$NL"
-ssh_pubkey_lubava="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKGV+r2T/Mf9QrEsupuxwWMv2UtLYgD3rjBQG/W5Dfxo lubava@localhost.localdomain$NL"
+ssh_pubkey_igor="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIORdPk9iwgviB9X5zKK07thkGb9021ugvYSdF38kvjSQ igor@miranda$NL"
+ssh_pubkey_lubava=""
 
 kino_ssh_port=9092
 autofs_ssh_known_hosts="/var/local/sshfs_known_hosts"
@@ -222,6 +222,6 @@ run_remotely() {
     # for password or secreets. So just emebedd the archive into the
     # command as base64 and ensure that ssh allocates tty.
     local data="$(tar -C "$selfdir" --exclude .git --exclude README.md --exclude LICENSE -czf - . | base64 -w0)"
-    ssh ${SSH_ARGS-} -t "$remote" "rm -rf /tmp/tliset && mkdir /tmp/tliset && printf %s $data | base64 -d | tar -C /tmp/tliset -xzf - && /tmp/tliset/$(basename "$0") $*"
+    ssh ${SSH_ARGS-} -t "root@$remote" "rm -rf /tmp/tliset && mkdir /tmp/tliset && printf %s $data | base64 -d | tar -C /tmp/tliset -xzf - && /tmp/tliset/$(basename "$0") $*"
     exit
 }

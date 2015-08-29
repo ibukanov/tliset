@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/lib.bash"
 
-valid_host_names=(dserver miranda ultrabook thip rserv r2)
+valid_host_names=(dserver miranda ultrabook untrusted thip r2)
 
 is_valid_host_name() {
     local name="$1" i
@@ -28,82 +28,95 @@ fixup_transgui() {
     fi
 }
 
-setup_packages() {
+setup_fedora_packages() {
     log "Checking packages"
     inc_log_level
 
-    local fedora_release=$(rpm -E %fedora)
-    local rpmfusion_kinds=(
-	free
-	nonfree
-    )
-    local i rpmfusion_repos=()
-    for i in "${rpmfusion_kinds[@]}"; do rpmfusion_repos+=("rpmfusion-$i-release"); done
-
-    if ! rpm -q --quiet "${rpmfusion_repos[@]}" ; then
-	log "Installing rpmfusion"
-	local urls=()
+    if let with_common_fedora_packages; then
+	local fedora_release=$(rpm -E %fedora)
+	local rpmfusion_kinds=(
+	    free
+	    nonfree
+	)
+	local i rpmfusion_repos=()
 	for i in "${rpmfusion_kinds[@]}"; do
-	    urls+=("http://download1.rpmfusion.org/$i/fedora/rpmfusion-$i-release-$fedora_release.noarch.rpm")
+	    rpmfusion_repos+=("rpmfusion-$i-release")
 	done
-	dnf install -y --nogpgcheck "${urls[@]}" || true
+
+	if ! rpm -q --quiet "${rpmfusion_repos[@]}" ; then
+	    log "Installing rpmfusion"
+	    local urls=()
+	    for i in "${rpmfusion_kinds[@]}"; do
+		urls+=("http://download1.rpmfusion.org/$i/fedora/rpmfusion-$i-release-$fedora_release.noarch.rpm")
+	    done
+	    dnf install -y --nogpgcheck "${urls[@]}" || true
+	fi
     fi
-    local list=(
-	tmux xfce4-terminal
-	git fuse-sshfs unison240 lsyncd
-	quilt mercurial subversion
-	livecd-tools
-	autoconf automake gcc-c++ kernel-devel
-	emacs
-	tigervnc
-	strace
+    local list=()
+    if let with_common_fedora_packages; then
+	list+=(
+	    tmux xfce4-terminal
+	    git fuse-sshfs unison240 lsyncd
+	    quilt mercurial subversion
+	    livecd-tools
+	    autoconf automake gcc-c++ kernel-devel
+	    emacs
+	    tigervnc
+	    strace
+	    
+	    # filesystems
+	    autofs udftools inotify-tools fdupes fslint
+	    
+	    # Archives
+	    unrar libunrar
+	    
+	    # encryption and backup
+	    apg duplicity perl-Digest-Bcrypt python-gdata
+	    
+	    # hardware management
+	    rfkill lm_sensors
+	    
+	    # Recovery tools
+	    ddrescue foremost scalpel testdisk
+	    
+	    # GUI
+	    gnome-tweak-tool
+	    dconf-editor
+	    gnome-terminal-nautilus
+	    gnome-shell-extension-alternate-tab
+	    
+	    # Graphs
+	    graphviz graphviz-doc
+	    
+	    # PDF tools
+	    pdfmerge poppler-utils
+	    
+	    # Media
+	    kdenlive
+	    vlc gimp inkscape gthumb
+	    scribus
+	    #openssl-devel
+	    evince evince-djvu pdf2djvu
+	    linux-libertine-biolinum-fonts linux-libertine-fonts
+	    gstreamer1-libav
+	    gstreamer1-plugins-bad-free
+	    gstreamer1-plugins-bad-free-extras
+	    gstreamer1-plugins-bad-freeworld
+	    gstreamer1-plugins-good-extras
+	    gstreamer1-plugins-ugly
+	    
+	    # Languages
+	    hunspell-ru hunspell-nb
+	)
+	
+    fi
 
-	# filesystems
-	autofs udftools inotify-tools fdupes fslint
+    let with_latex && list+=(texlive)
+    let with_transgui && list+=(transgui)
+    
 
-	# Archives
-	unrar libunrar
-
-	# encryption and backup
-	apg duplicity perl-Digest-Bcrypt python-gdata
-
-	# hardware management
-	rfkill lm_sensors
-
-	# Recovery tools
-	ddrescue foremost scalpel testdisk
-
-	# GUI
-	gnome-tweak-tool
-	dconf-editor
-	nautilus-open-terminal
-	gnome-shell-extension-alternate-tab
-
-	# Graphs
-	graphviz graphviz-doc
-
-	# PDF tools
-	pdfmerge poppler-utils
-
-	# Media
-	kdenlive
-	vlc gimp inkscape gthumb
-	scribus transgui openssl-devel
-	evince evince-djvu pdf2djvu
-	linux-libertine-biolinum-fonts linux-libertine-fonts
-	gstreamer1-libav
-	gstreamer1-plugins-bad-free
-	gstreamer1-plugins-bad-free-extras
-	gstreamer1-plugins-bad-freeworld
-	gstreamer1-plugins-good-extras
-	gstreamer1-plugins-ugly
-
-	# Languages
-	hunspell-ru hunspell-nb
-    )
-
-    if let with_latex; then
-	list+=(texlive)
+    if [[ -n "$virt" ]]; then
+	list+=(gcc kernel-devel)
     fi
 
     case "$NAME" in
@@ -127,6 +140,10 @@ setup_packages() {
 	list+=(dnsmasq)
     fi
 
+    if [[ "$NAME" == miranda ]]; then
+	list+=(tinyproxy)
+    fi
+
     for i in "${list[@]}"; do
 	rpm -q --quiet "$i" || echo "Missed: $i"
     done
@@ -136,11 +153,14 @@ setup_packages() {
 	dnf install -y "${list[@]}"
     fi
 
-    if rpm -q --quiet transmission-gtk transmission-remote-gtk ; then
-	cmd_log dnf remove -y transmission-gtk transmission-remote-gtk
+    if let with_transgui; then
+	local status=0
+	rpm -q --quiet transmission-gtk transmission-remote-gtk || status=$?
+	if let 'status < 2'; then
+	    cmd_log dnf remove -y transmission-gtk transmission-remote-gtk
+	fi
+	fixup_transgui
     fi
-
-    fixup_transgui
 
     printf 'new-session\n' | write_file /etc/tmux.conf
 
@@ -333,20 +353,20 @@ print_wants_list() {
     shift
     let $# || return 0
     pl ''
-    pl 'mkdir -p "$1/$target.d"'
+    pl 'mkdir -p "$1/'"$target.d"'"'
     local i wants_body="[Unit]$NL"
     for i in "$@"; do
 	wants_body+="Wants=$i$NL"
     done
-    p_file '"$1/$target.d/tliset.conf"' "$wants_body"
+    p_file '"$1/'"$target"'.d/tliset.conf"' "$wants_body"
     
 }
 
 finish_generator_write() {
     [[ -n "$gen_body" ]] || let "${#multi_user_wants[@]} + ${#socket_wants[@]}" || return
 
-    print_wants_list multi-user.target "${multi_user_wants[@]:+$multi_user_wants[@]}"
-    print_wants_list sockets.target "${socket_wants[@]:+$socket_wants[@]}"
+    print_wants_list multi-user.target "${multi_user_wants[@]:+${multi_user_wants[@]}}"
+    print_wants_list sockets.target "${socket_wants[@]:+${socket_wants[@]}}"
 
     local prefix=''
     prefix+=$'#!/bin/sh\n'
@@ -785,32 +805,12 @@ setup_sshd() {
     log "Checking sshd"
     inc_log_level
     mkdir -p -m 0700 /root/.ssh
-    case "$NAME" in
-	miranda | ultrabook )
-	    local mainuser=igor
-	    if [[ "$NAME" == ultrabook ]]; then
-		mainuser=lubava
-	    fi
-	    local key_type
-	    for key_type in ed25519 rsa; do
-		local subpath=".ssh/id_$key_type"
-		if [[ ! -f "/root/$subpath" && -e "/home/$mainuser/$subpath" ]]; then
-		    log "Linking administrator ssh $key_type as the key for the root user"
-		    rm -f "/root/$subpath" "/root/$subpath.pub"
-		    ln -s "/home/$mainuser/$subpath" "/root/$subpath"
-		    ln -s -f "/home/$mainuser/$subpath.pub" "/root/$subpath.pub"
-		fi
-	    done
-	    ;;
-	* )
-	    if let kind_fedora; then
-		if [[ ! -f /root/.ssh/id_ed25519 ]]; then
-		    log "Generating ssh key for the root user"
-		    ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
-		fi
-	    fi
-	    ;;
-    esac
+    if let kind_fedora; then
+	if [[ ! -f /root/.ssh/id_ed25519 ]]; then
+	    log "Generating ssh key for the root user"
+	    ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
+	fi
+    fi
 
     # Based on https://stribika.github.io/2015/01/04/secure-secure-shell.htlm
     local sshd_config="
@@ -922,8 +922,9 @@ setup_services() {
     log "Checking services"
     inc_log_level
 
+    let with_set_mounts && setup_autofs
+
     if let kind_fedora; then
-	setup_autofs
 	setup_ssh_config
     fi
     
@@ -1058,6 +1059,9 @@ declare -i with_resolved=0
 declare -i with_dyndns=0
 declare -i with_transmission_redirect=0
 declare -i with_latex=0
+declare -i with_transgui=0
+declare -i with_set_mounts=0
+declare -i with_common_fedora_packages=0
 
 declare -i sshd_extra_listen_port=0
 
@@ -1075,10 +1079,14 @@ case "$NAME" in
 	with_dyndns=1
 	with_transmission_redirect=1
 	sshd_extra_listen_port=18022
+	with_set_mounts=1
 	;;
     ultrabook )
 	kind_fedora=1
+	with_common_fedora_packages=1
+	with_transgui=1
 	with_transmission_redirect=1
+	with_set_mounts=1
 	;;
     miranda )
 	kind_fedora=1
@@ -1086,9 +1094,17 @@ case "$NAME" in
 	    with_networkd=1
 	    with_resolved=1
 	fi
-	with_transmission_redirect=1
+	with_common_fedora_packages=1
 	with_latex=1
 	sshd_extra_listen_port=19022
+	with_set_mounts=1
+	;;
+    untrusted )
+	kind_fedora=1
+	with_networkd=1
+	with_resolved=1
+	with_transmission_redirect=1
+	with_transgui=1
 	;;
     thip )
 	kind_coreos=1
@@ -1110,7 +1126,7 @@ start_generator_write
     
 if let kind_fedora; then
     setup_fstab
-    setup_packages
+    setup_fedora_packages
     setup_grub
 fi
 if let with_zram; then
