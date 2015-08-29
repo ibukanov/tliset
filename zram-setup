@@ -43,11 +43,11 @@ if [[ 0 = "$num_cpus" ]]; then
     num_cpus=1
 fi
 
-echo $num_cpus > /sys/block/zram0/max_comp_streams
-echo "${SWAP_SIZE}" > /sys/block/zram0/disksize
+device=/dev/zram0
+zramctl "$device" --size "$SWAP_SIZE" -t "$num_cpus"
 
-/usr/sbin/mkswap /dev/zram0
-/usr/sbin/swapon -p 100 /dev/zram0
+/usr/sbin/mkswap "$device"
+/usr/sbin/swapon -p 100 "$device"
 EOF
 )"
     
@@ -57,7 +57,8 @@ EOF
 set -e -u
 
 if grep -q '^/dev/zram0\s' /proc/swaps; then
-    /usr/sbin/swapoff "/dev/zram0"
+    /usr/sbin/swapoff /dev/zram0
+    zramctl --reset /dev/zram0
 fi
 EOF
 )"
