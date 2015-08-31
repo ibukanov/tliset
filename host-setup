@@ -839,7 +839,7 @@ Subsystem sftp /usr/libexec/openssh/sftp-server
 	root_authorized_keys+="$(< /root/.ssh/id_ed25519.pub)$NL"
     fi
 
-    if let sshd_extra_listen_port; then
+    if let sshd_extra_listen_port && let kind_fedora; then
 	local re='^ssh_port_t\s\+tcp\s\+%s$'
 	if ! semanage port -l -C | grep -q "$(printf "$re" "$sshd_extra_listen_port")"; then
 	    cmd_log semanage port -a -t ssh_port_t -p tcp "$sshd_extra_listen_port"
@@ -858,6 +858,14 @@ Subsystem sftp /usr/libexec/openssh/sftp-server
 [Service]
 Environment=\"OPTIONS=-e$ports\"
 "
+    elif let kind_coreos; then
+	if let sshd_extra_listen_port; then
+	    pl 'mkdir -p "$1/sshd.socket.d/"'
+	    p_file '"$1/sshd.socket.d/tliset.conf"' "\
+[Socket]
+ListenStream=$sshd_extra_listen_port
+"
+	fi
     fi
     write_file /etc/ssh/sshd_config "$sshd_config"
 
@@ -1111,9 +1119,16 @@ case "$NAME" in
 	with_vol_storage=1
 	with_zram=1
 	;;
-    rserv|r2 )
+    rserv )
 	kind_coreos=1
 	with_zram=1
+	;;
+    r2 )
+	kind_coreos=1
+	with_zram=1
+
+	# This is to run ssh through http proxy
+	sshd_extra_listen_port=443
 	;;
 esac
 
