@@ -93,6 +93,7 @@ setup_fedora_packages() {
 	    
 	    # Media
 	    kdenlive
+	    ffmpeg
 	    vlc gimp inkscape gthumb
 	    scribus
 	    #openssl-devel
@@ -204,21 +205,22 @@ setup_fstab() {
 	mkdir -p /area/backup
 	mkdir -p /area/kino
     fi
-    if [[ "$NAME" == miranda ]]; then
+    if [[ -n "$downloads_user" ]]; then
 	if [[ ! -d /downloads ]]; then
 	    log "creating /downloads"
 	    mkdir /downloads.tmp
 	    chmod 770 /downloads.tmp
-	    chown igor:igor /downloads.tmp
+	    chown "$downloads_user:$downloads_user" /downloads.tmp
 	    mv /downloads.tmp /downloads
 	fi
 	if [[ -n "$virt" ]] && lsmod | grep -q '^vboxsf\>' ; then
+	    local user_escaped=$(printf %q "$downloads_user")
 	    # Mount shared folders
-	    p_file -x '/run/tliset/mount-downloads' "$(cat <<'EOF'
+	    p_file -x '/run/tliset/mount-downloads' "$(cat <<EOF
 #!/bin/bash
-mount_options="uid=$(id -u igor),gid=$(id -g igor),nosuid,nodev"
+mount_options="uid=\$(id -u $user_escaped),gid=\$(id -g $user_escaped),nosuid,nodev"
 for ((i=0; i<10; i+=1)); do
-    /sbin/mount.vboxsf -o "$mount_options" Downloads /downloads && exit 0
+    /sbin/mount.vboxsf -o "\$mount_options" Downloads /downloads && exit 0
     sleep 5
 done
 echo "failed to mount /downloads" 1>&2
@@ -327,6 +329,11 @@ setup_network() {
 		    "$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
 	    cmd_log ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
 	fi
+
+	# Switch system resolver to use systemd-resolved.
+	if grep -q '^hosts:.*\<dns\>' /etc/nsswitch.conf; then
+	    sed -i -e 's/^\(hosts:.*\)\<dns\>/\1resolve/' /etc/nsswitch.conf
+	fi
     fi
 
     if let with_transmission_redirect; then
@@ -416,10 +423,7 @@ p_mask_service() {
 }
 
 print_network() {
-    if let with_resolved; then
-	multi_user_wants+=(systemd-resolved.service)
-    fi
-    if let with_networkd; then
+    if let with_networkd && let kind_fedora; then
 	multi_user_wants+=(systemd-networkd.service)
 	pl ''
 	pl 'mkdir -p "$1/sockets.target.d"'
@@ -434,17 +438,27 @@ Wants=systemd-networkd.socket
 	p_mask_service firewalld.service
 	p_mask_service dbus-org.fedoraproject.FirewallD1.service
 
-	# Make sure that system-suplied dnsmasq is masked
+	# Make sure that system-supplied dnsmasq is masked
 	p_mask_service dnsmasq.service
+    fi
+    if let with_resolved && let kind_fedora; then
+	multi_user_wants+=(systemd-resolved.service)
+    fi
 
+    if let with_networkd; then
 	pl ''
 	pl 'net_dir="$1/../network"'
 	pl 'mkdir -p "$net_dir"'
 
 	case "$NAME" in
 	    dserver ) print_dserver_network_files ;;
-	    miranda ) print_miranda_network_files ;;
+	    * )
+		if let kind_fedora; then
+		    print_fedora_networkd_files
+		fi
+		;;
 	esac
+	print_virtualbox_network
     fi
 }
 
@@ -626,7 +640,7 @@ ExecStart=/usr/sbin/dnsmasq -k --conf-file=/dev/null$s
 "
 }
 
-print_miranda_network_files() {
+print_fedora_networkd_files() {
     p_file '"$net_dir/zz-default.network"' "\
 [Network]
 DHCP=v4
@@ -634,6 +648,20 @@ DHCP=v4
 [DHCP]
 UseMTU=true
 UseDomains=true
+"
+}
+
+print_virtualbox_network() {
+    let with_virtualbox_net || return 0
+   
+    p_file '"$net_dir/99-virt-eth1.network"' "\
+[Match]
+Name=eth1
+Virtualization=vm
+
+[Network]
+LinkLocalAddressing=yes
+LLMNR=yes
 "
 }
 
@@ -652,26 +680,32 @@ EOF
 }
 
 setup_transmission_redirect() {
-    pl ''
-    p_file '"$1/tliset-transmission.socket"' "\
+    local ports=($kino_transmission_port) port
+    if [[ "$NAME" == untrusted ]]; then
+	ports+=(9090)
+    fi
+    for port in "${ports[@]}"; do
+	pl ''
+	p_file "\"\$1/tliset-transmission-$port.socket\"" "\
 [Socket]
-ListenStream=127.0.0.1:$kino_ssh_port
 Accept=true
+ListenStream=127.0.0.1:$port
 "
-    pl ''
-    p_file '"$1/tliset-transmission@.service"' "\
+	pl ''
+	p_file "\"\$1/tliset-transmission-$port@.service\"" "\
 [Unit]
-Requires=tliset-transmission.socket
+Requires=tliset-transmission-$port.socket
 
 [Service]
 StandardInput=socket
-ExecStart=/usr/bin/ssh -W127.0.0.1:9091 \\
+ExecStart=/usr/bin/ssh -W127.0.0.1:$port \\
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=$autofs_ssh_known_hosts kino
 "
+    done
     if let with_networkd; then
-	pl ''
-	pl 'mkdir -p "$1/network-online.target.wants"'
-	pl 'ln -s "$1/tliset-transmission.socket" "$1/network-online.target.wants"'
+	for port in "${ports[@]}"; do
+	    multi_user_wants+=("tliset-transmission-$port.socket")
+	done
     else
 	multi_user_wants+=(NetworkManager-dispatcher)
 	pl ''
@@ -689,25 +723,46 @@ EOF
 ! grep -q '^nameserver[[:space:]]\+192\.168\.2\.[0-9]\+$' /etc/resolv.conf
 EOF
 )"
-	
+
+	socket_units=""
+	for port in "${ports[@]}"; do
+	    socket_units+=" tliset-transmission-$port.socket"
+	done
 	write_file -m 755 /etc/NetworkManager/dispatcher.d/90-online-monitor <<EOF
 #!/bin/bash
 if /run/tliset/is-online; then
-    systemctl start tliset-transmission.socket
+    systemctl start$socket_units
 else
-    systemctl stop tliset-transmission.socket
+    systemctl stop$socket_units
 fi
 EOF
     fi
 }
 
 setup_ssh_config() {
+    local extra=''
+    if [[ "$NAME" == miranda || "$NAME" == untrusted ]]; then
+	extra+="
+Host thip
+  HostKeyAlias thip
+  CheckHostIP no
+  User core
+
+Host t-transdock
+  HostKeyAlias t-transdock
+  HostName thip
+  User user
+  Port $transdock_ssh_port
+  Ciphers aes128-gcm@openssh.com
+"
+    fi
+    
     write_file "/etc/ssh/ssh_config" <<EOF
 Host kino
   HostKeyAlias kino
   AddressFamily inet
   CheckHostIP no
-  Port $kino_ssh_port
+  Port 9092
   HostName media.mir2.org
   User user
   Ciphers aes128-gcm@openssh.com
@@ -728,7 +783,7 @@ Host hippyru-www
   CheckHostIP no
   Port 2022
   Ciphers aes128-gcm@openssh.com
-
+$extra
 Host *
   GSSAPIAuthentication no
   SendEnv LANG
@@ -739,7 +794,7 @@ setup_autofs() {
     
     local autofs_dirs=(kino)
     if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
-	autofs_dirs+=(bergenrabbit-photo dserver-lubava hippy.ru lubava.info)
+	autofs_dirs+=(bergenrabbit dserver-lubava hippy.ru lubava.info)
     fi
 
     pl ''
@@ -748,12 +803,12 @@ setup_autofs() {
 
     local s="" dir host user remote_dir
     for dir in "${autofs_dirs[@]}"; do
-	local extra_opt
+	local extra_opt=""
 	case "$dir" in
-	    bergenrabbit-photo )
+	    bergenrabbit )
 		host=hippyru-www
 		user=bergenrabbit.net
-		remote_dir=/www/site/bergenrabbit.net/photo
+		remote_dir=/www/site/bergenrabbit.net
 		;;
 	    hippy.ru )
 		host=hippyru-www
@@ -813,7 +868,7 @@ setup_sshd() {
     fi
 
     # Based on https://stribika.github.io/2015/01/04/secure-secure-shell.htlm
-    local sshd_config="
+    local sshd_config="\
 UsePrivilegeSeparation sandbox
 
 KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
@@ -825,13 +880,18 @@ UseDNS no
 ClientAliveInterval 180
 
 AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+Subsystem sftp /usr/libexec/openssh/sftp-server
+
 PasswordAuthentication no
 ChallengeResponseAuthentication no
+"
+    if let kind_fedora; then
+	sshd_config+="\
 GSSAPIAuthentication no
 UsePAM yes
-
-Subsystem sftp /usr/libexec/openssh/sftp-server
 "
+    fi
+    
     local root_authorized_keys="$ssh_pubkey_igor"
 
     if [[ "$NAME" == dserver ]]; then
@@ -869,9 +929,12 @@ ListenStream=$sshd_extra_listen_port
     fi
     write_file /etc/ssh/sshd_config "$sshd_config"
 
-    if [[ "$NAME" == dserver ]]; then
-	multi_user_wants+=(sshd.service)
-    elif [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
+    if let with_enabled_sshd; then
+	# On coreos this is enabled by default 
+	if let kind_fedora; then
+	    multi_user_wants+=(sshd.service)
+	fi
+    else
 	if systemctl -q is-enabled sshd; then
 	    log "disabling sshd"
 	    systemctl disable sshd
@@ -977,6 +1040,10 @@ if [[ ! -d /vol/src ]]; then
         { rmdir "$tmp"; exit 1; }
     set +x
 fi
+if [[ ! -d /vol/docker ]]; then
+    mkdir -m 755 /vol/docker 
+fi
+mount --bind /vol/docker /var/lib/docker
 EOF
 )"
 	p_file -x '"$1/tliset-mount-vol.service"' "$(cat <<'EOF'
@@ -1071,13 +1138,17 @@ declare -i with_transgui=0
 declare -i with_set_mounts=0
 declare -i with_common_fedora_packages=0
 
+declare -i with_enabled_sshd=1
 declare -i sshd_extra_listen_port=0
+
+declare -i with_virtualbox_net=0
+
+downloads_user=""
 
 virt="$(systemd-detect-virt -v || true)"
 if [[ "$virt" == none ]]; then
     virt=""
 fi
-
 
 case "$NAME" in
     dserver )
@@ -1095,6 +1166,7 @@ case "$NAME" in
 	with_transgui=1
 	with_transmission_redirect=1
 	with_set_mounts=1
+	with_enabled_sshd=0
 	;;
     miranda )
 	kind_fedora=1
@@ -1102,22 +1174,30 @@ case "$NAME" in
 	    with_networkd=1
 	    with_resolved=1
 	fi
+	with_virtualbox_net=1
 	with_common_fedora_packages=1
 	with_latex=1
+	with_enabled_sshd=0
 	sshd_extra_listen_port=19022
 	with_set_mounts=1
+	downloads_user=igor
 	;;
     untrusted )
 	kind_fedora=1
+	with_common_fedora_packages=1
 	with_networkd=1
 	with_resolved=1
+	with_virtualbox_net=1
+	with_set_mounts=1
 	with_transmission_redirect=1
 	with_transgui=1
+	downloads_user=user
 	;;
     thip )
 	kind_coreos=1
 	with_vol_storage=1
 	with_zram=1
+	with_virtualbox_net=1
 	;;
     rserv )
 	kind_coreos=1
@@ -1126,17 +1206,27 @@ case "$NAME" in
     r2 )
 	kind_coreos=1
 	with_zram=1
-
-	# This is to run ssh through http proxy
-	sshd_extra_listen_port=443
 	;;
 esac
+
+if let kind_coreos && ! let with_enabled_sshd; then
+    err "On CoreOS sshd must always be enabled"
+fi
+
+if let kind_coreos; then
+    with_networkd=1
+    with_resolved=1
+fi
 
 #if let kind_coreos; then
 #    [[ ! -d /media/configdrive && ! -d /media/configvirtfs ]] || \
 #	err "Cannot configure CoreOS that under cloudconfig control"
 #fi
     
+if [[ -z "$virt" ]] && let with_virtualbox_net; then
+    with_virtualbox_net=0
+fi
+
 start_generator_write
     
 if let kind_fedora; then
@@ -1155,3 +1245,4 @@ fi
 setup_services
 
 finish_generator_write
+log "Done."

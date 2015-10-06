@@ -31,7 +31,8 @@ dserver_port_forwards=(
 ssh_pubkey_igor="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIORdPk9iwgviB9X5zKK07thkGb9021ugvYSdF38kvjSQ igor@miranda$NL"
 ssh_pubkey_lubava=""
 
-kino_ssh_port=9092
+kino_transmission_port=9091
+transdock_ssh_port=9092
 autofs_ssh_known_hosts="/var/local/sshfs_known_hosts"
 
 
