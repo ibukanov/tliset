@@ -446,10 +446,17 @@ Wants=systemd-networkd.socket
     fi
 
     if let with_networkd; then
+	if [[ -n "$virt" ]] && let kind_fedora; then
+	    # Disable predictable interface names under VM.
+	    pl ''
+	    pl 'mkdir -p /run/udev/rules.d'
+	    pl 'ln -s /dev/null /run/udev/rules.d/80-net-setup-link.rules'
+	fi
+
 	pl ''
 	pl 'net_dir="$1/../network"'
 	pl 'mkdir -p "$net_dir"'
-
+	
 	case "$NAME" in
 	    dserver ) print_dserver_network_files ;;
 	    * )
