@@ -456,6 +456,7 @@ Wants=systemd-networkd.socket
 	pl ''
 	pl 'net_dir="$1/../network"'
 	pl 'mkdir -p "$net_dir"'
+	pl 'chcon -t etc_t "$net_dir"'
 	
 	case "$NAME" in
 	    dserver ) print_dserver_network_files ;;
