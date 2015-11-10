@@ -154,11 +154,19 @@ setup_fedora_packages() {
 	dnf install -y "${list[@]}"
     fi
 
+    local remove_list=()
+
     if let with_transgui; then
+	remove_list+=(transmission-gtk transmission-remote-gtk)
+    fi
+    if let with_networkd && let kind_fedora; then
+	remove_list+=(network-manager-applet)
+    fi
+    if let ${#remove_list[@]}; then
 	local status=0
-	rpm -q --quiet transmission-gtk transmission-remote-gtk || status=$?
-	if let 'status < 2'; then
-	    cmd_log dnf remove -y transmission-gtk transmission-remote-gtk
+	rpm -q --quiet "${remove_list[@]}" || status=$?
+	if let "status < ${#remove_list[@]}"; then
+	    cmd_log dnf remove -y "${remove_list[@]}"
 	fi
 	fixup_transgui
     fi
