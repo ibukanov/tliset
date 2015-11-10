@@ -243,10 +243,17 @@ setup_grub() {
     local -A config
     log "Checking grub"
 
+    local net_kernel_options=""
+    if [[ -n "$virt" ]] && let kind_fedora; then
+	# Disable predictable interface names under VM as they
+	# complicates autoconfig.
+	net_kernel_options=" net.ifnames=0"
+    fi
+
     config=(
 	[GRUB_DEFAULT]=saved
 	[GRUB_TIMEOUT]=1
-	[GRUB_CMDLINE_LINUX]="rhgb quiet LANG=en_US.UTF-8"
+	[GRUB_CMDLINE_LINUX]="rhgb quiet LANG=en_US.UTF-8$net_kernel_options"
     )
 
     if [[ "$NAME" == dserver ]]; then
@@ -446,13 +453,6 @@ Wants=systemd-networkd.socket
     fi
 
     if let with_networkd; then
-	if [[ -n "$virt" ]] && let kind_fedora; then
-	    # Disable predictable interface names under VM.
-	    pl ''
-	    pl 'mkdir -p /run/udev/rules.d'
-	    pl 'ln -s /dev/null /run/udev/rules.d/80-net-setup-link.rules'
-	fi
-
 	pl ''
 	pl 'net_dir="$1/../network"'
 	pl 'mkdir -p "$net_dir"'
