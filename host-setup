@@ -221,11 +221,15 @@ setup_fstab() {
 	    chown "$downloads_user:$downloads_user" /downloads.tmp
 	    mv /downloads.tmp /downloads
 	fi
-	if [[ -n "$virt" ]] && lsmod | grep -q '^vboxsf\>' ; then
+	if [[ -n "$virt" ]] ; then
 	    local user_escaped=$(printf %q "$downloads_user")
 	    # Mount shared folders
 	    p_file -x '/run/tliset/mount-downloads' "$(cat <<EOF
 #!/bin/bash
+if ! lsmod | grep -q '^vboxsf\>'; then
+    echo "failed to locate the vbox filesystem kernel module" 1>&2
+    exit 0    
+fi
 mount_options="uid=\$(id -u $user_escaped),gid=\$(id -g $user_escaped),nosuid,nodev"
 for ((i=0; i<10; i+=1)); do
     /sbin/mount.vboxsf -o "\$mount_options" Downloads /downloads && exit 0
