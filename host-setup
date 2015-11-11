@@ -63,34 +63,34 @@ setup_fedora_packages() {
 	    emacs
 	    tigervnc
 	    strace
-	    
+
 	    # filesystems
 	    autofs udftools inotify-tools fdupes fslint
-	    
+
 	    # Archives
 	    unrar libunrar
-	    
+
 	    # encryption and backup
 	    apg duplicity perl-Digest-Bcrypt python-gdata
-	    
+
 	    # hardware management
 	    rfkill lm_sensors
-	    
+
 	    # Recovery tools
 	    ddrescue foremost scalpel testdisk
-	    
+
 	    # GUI
 	    gnome-tweak-tool
 	    dconf-editor
 	    gnome-terminal-nautilus
 	    gnome-shell-extension-alternate-tab
-	    
+
 	    # Graphs
 	    graphviz graphviz-doc
-	    
+
 	    # PDF tools
 	    pdfmerge poppler-utils
-	    
+
 	    # Media
 	    kdenlive
 	    ffmpeg
@@ -105,16 +105,16 @@ setup_fedora_packages() {
 	    gstreamer1-plugins-bad-freeworld
 	    gstreamer1-plugins-good-extras
 	    gstreamer1-plugins-ugly
-	    
+
 	    # Languages
 	    hunspell-ru hunspell-nb
 	)
-	
+
     fi
 
     let with_latex && list+=(texlive)
     let with_transgui && list+=(transgui)
-    
+
 
     if [[ -n "$virt" ]]; then
 	list+=(gcc kernel-devel)
@@ -213,38 +213,30 @@ setup_fstab() {
 	mkdir -p /area/backup
 	mkdir -p /area/kino
     fi
+
     if [[ -n "$downloads_user" ]]; then
-	if [[ ! -d /downloads ]]; then
-	    log "creating /downloads"
-	    mkdir /downloads.tmp
-	    chmod 770 /downloads.tmp
-	    chown "$downloads_user:$downloads_user" /downloads.tmp
-	    mv /downloads.tmp /downloads
+	local dirname=downloads
+	local dir="/$dirname"
+	local unitname="$dirname"
+	if [[ ! -d "$dir" ]]; then
+	    # TODO find out why systemd does not create the dir
+	    # automatically.
+	    log "creating $dir"
+	    mkdir -m 0755 "$dir"
 	fi
 	if [[ -n "$virt" ]] ; then
-	    local user_escaped=$(printf %q "$downloads_user")
-	    # Mount shared folders
-	    p_file -x '/run/tliset/mount-downloads' "$(cat <<EOF
-#!/bin/bash
-if ! lsmod | grep -q '^vboxsf\>'; then
-    echo "failed to locate the vbox filesystem kernel module" 1>&2
-    exit 0    
-fi
-mount_options="uid=\$(id -u $user_escaped),gid=\$(id -g $user_escaped),nosuid,nodev"
-for ((i=0; i<10; i+=1)); do
-    /sbin/mount.vboxsf -o "\$mount_options" Downloads /downloads && exit 0
-    sleep 5
-done
-echo "failed to mount /downloads" 1>&2
-exit 0
-EOF
-)"
-	    p_file '"$1/tliset-mount-downloads.service"' "\
-[Service]
-Type=oneshot
-ExecStart=/run/tliset/mount-downloads
+	    p_file "\$1/$unitname.mount" "\
+[Mount]
+Where=$dir
+Type=vboxsf
+What=Downloads
+Options=uid=$downloads_user,gid=$downloads_user,nosuid,nodev
 "
-            multi_user_wants+=(tliset-mount-downloads.service)
+	    p_file "\$1/$unitname.automount" "\
+[Automount]
+Where=$dir
+"
+            multi_user_wants+=("$unitname.automount")
 	fi
     fi
     dec_log_level
@@ -338,7 +330,7 @@ setup_network() {
     if false && [[ "$NAME" == dserver ]]; then
 	print_dserver_dnsmasq
     fi
-    
+
     case "$NAME" in
 	miranda ) install_miranda_network ;;
     esac
@@ -385,7 +377,7 @@ print_wants_list() {
 	wants_body+="Wants=$i$NL"
     done
     p_file '"$1/'"$target"'.d/tliset.conf"' "$wants_body"
-    
+
 }
 
 finish_generator_write() {
@@ -408,7 +400,7 @@ set -x
     fi
     prefix+=$'set -u\n'
     prefix+=$'mkdir -p /run/tliset\n'
-    
+
     write_file -m 755 /etc/systemd/system-generators/tliset "$prefix$gen_body"
     if let file_update; then
 	cmd_log systemctl daemon-reload
@@ -469,7 +461,7 @@ Wants=systemd-networkd.socket
 	pl 'net_dir="$1/../network"'
 	pl 'mkdir -p "$net_dir"'
 	pl 'chcon -t etc_t "$net_dir"'
-	
+
 	case "$NAME" in
 	    dserver ) print_dserver_network_files ;;
 	    * )
@@ -558,7 +550,7 @@ print_dserver_port_forwards() {
     open_text+="chmod 755 /run/tliset/close-ports$NL"
     printf %s "$open_text"
 }
- 
+
 print_dyndns() {
     if [[ ! -s /etc/duckdns.key ]]; then
 	[[ -t 1 ]] || err "cannot ask for /etc/duckdns.key value as input is not tty"
@@ -568,7 +560,7 @@ print_dyndns() {
     fi
     local key="$(< /etc/duckdns.key)"
     local url="https://www.duckdns.org/update?domains=dsrv&token=$key&ip="
-    
+
     multi_user_wants+=(tliset-dyndns.timer)
     pl ''
     p_file '"$1/tliset-dyndns.timer"' "\
@@ -649,7 +641,7 @@ EOF
     done
 
     multi_user_wants+=(tliset-dnsmasq.service)
-    
+
     pl ''
     p_file '"$1/tliset-dnsmasq.service"' "\
 [Unit]
@@ -673,7 +665,7 @@ UseDomains=true
 
 print_virtualbox_network() {
     let with_virtualbox_net || return 0
-   
+
     p_file '"$net_dir/99-virt-eth1.network"' "\
 [Match]
 Name=eth1
@@ -776,7 +768,7 @@ Host t-transdock
   Ciphers aes128-gcm@openssh.com
 "
     fi
-    
+
     write_file "/etc/ssh/ssh_config" <<EOF
 Host kino
   HostKeyAlias kino
@@ -811,7 +803,7 @@ EOF
 }
 
 setup_autofs() {
-    
+
     local autofs_dirs=(kino)
     if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
 	autofs_dirs+=(bergenrabbit dserver-lubava hippy.ru lubava.info)
@@ -839,7 +831,7 @@ setup_autofs() {
 		host=hippyru-www
 		user=lubava.info
 		remote_dir=/www/site/lubava.info
-		;;	
+		;;
 	    kino )
 		host=kino
 		user=user
@@ -911,7 +903,7 @@ GSSAPIAuthentication no
 UsePAM yes
 "
     fi
-    
+
     local root_authorized_keys="$ssh_pubkey_igor"
 
     if [[ "$NAME" == dserver ]]; then
@@ -932,7 +924,7 @@ UsePAM yes
 	if let sshd_extra_listen_port; then
 	    ports+=" -o Port=$sshd_extra_listen_port"
 	fi
-	
+
 	pl 'mkdir -p "$1/sshd.service.d/"'
 	p_file '"$1/sshd.service.d/tliset.conf"' "\
 [Service]
@@ -950,7 +942,7 @@ ListenStream=$sshd_extra_listen_port
     write_file /etc/ssh/sshd_config "$sshd_config"
 
     if let with_enabled_sshd; then
-	# On coreos this is enabled by default 
+	# On coreos this is enabled by default
 	if let kind_fedora; then
 	    multi_user_wants+=(sshd.service)
 	fi
@@ -960,12 +952,12 @@ ListenStream=$sshd_extra_listen_port
 	    systemctl disable sshd
 	fi
     fi
-    
+
     if let file_update_count && systemctl -q is-active sshd; then
 	log "restarting sshd"
 	systemctl restart sshd
     fi
-    
+
     write_file -m 640 /etc/ssh/authorized_keys/root "$root_authorized_keys"
     if let kind_coreos; then
 	write_file -m 640 -o root:core /etc/ssh/authorized_keys/core "$root_authorized_keys"
@@ -1018,7 +1010,7 @@ setup_services() {
     if let kind_fedora; then
 	setup_ssh_config
     fi
-    
+
     if let kind_fedora; then
 	p_mask_service docker.service
     fi
@@ -1047,7 +1039,7 @@ case "$root_device_prefix" in
 esac
 
 test -b "$device" || { echo "No extra storage" 1>&2; exit 0; }
-if ! grep -q "^$device\>" /proc/mounts && ! mount -t ext4 "$device" /vol 2>/dev/null; then 
+if ! grep -q "^$device\>" /proc/mounts && ! mount -t ext4 "$device" /vol 2>/dev/null; then
     set -x
     mkfs.ext4 "$device"
     mount -t ext4 "$device" /vol
@@ -1061,7 +1053,7 @@ if [[ ! -d /vol/src ]]; then
     set +x
 fi
 if [[ ! -d /vol/docker ]]; then
-    mkdir -m 755 /vol/docker 
+    mkdir -m 755 /vol/docker
 fi
 mount --bind /vol/docker /var/lib/docker
 EOF
@@ -1242,13 +1234,13 @@ fi
 #    [[ ! -d /media/configdrive && ! -d /media/configvirtfs ]] || \
 #	err "Cannot configure CoreOS that under cloudconfig control"
 #fi
-    
+
 if [[ -z "$virt" ]] && let with_virtualbox_net; then
     with_virtualbox_net=0
 fi
 
 start_generator_write
-    
+
 if let kind_fedora; then
     setup_fstab
     setup_fedora_packages
