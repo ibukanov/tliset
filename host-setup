@@ -65,7 +65,7 @@ setup_fedora_packages() {
 	    strace
 
 	    # filesystems
-	    autofs udftools inotify-tools fdupes fslint
+	    udftools inotify-tools fdupes fslint
 
 	    # Archives
 	    unrar libunrar
@@ -109,6 +109,9 @@ setup_fedora_packages() {
 	    # Languages
 	    hunspell-ru hunspell-nb
 	)
+	if [[ "$(rpm -E %fedora)" == 22 ]]; then
+	    list+=(autofs)
+	fi
 
     fi
 
@@ -804,68 +807,107 @@ EOF
 
 setup_autofs() {
 
+    local -i use_autofs=0
+    if [[ "$(rpm -E %fedora)" == 22 ]]; then
+	use_autofs=1
+    fi
+
     local autofs_dirs=(kino)
     if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
 	autofs_dirs+=(bergenrabbit dserver-lubava hippy.ru lubava.info)
     fi
 
-    pl ''
-    pl "mkdir -p ${autofs_dirs[*]/#//run/autofs/}"
+    local mount_root=/run/tliset/set
+    pl "mkdir -p ${autofs_dirs[*]/#/$mount_root/}"
     multi_user_wants+=(autofs.service)
 
-    local s="" dir host user remote_dir
+    local s="" dir host remote_user remote_dir
     for dir in "${autofs_dirs[@]}"; do
 	local extra_opt=""
 	case "$dir" in
 	    bergenrabbit )
 		host=hippyru-www
-		user=bergenrabbit.net
+		remote_user=bergenrabbit.net
 		remote_dir=/www/site/bergenrabbit.net
 		;;
 	    hippy.ru )
 		host=hippyru-www
-		user=hippy.ru
+		remote_user=hippy.ru
 		remote_dir=/www/site/hippy.ru
 		;;
 	    lubava.info )
 		host=hippyru-www
-		user=lubava.info
+		remote_user=lubava.info
 		remote_dir=/www/site/lubava.info
 		;;
 	    kino )
 		host=kino
-		user=user
+		remote_user=user
 		remote_dir=/files
 		extra_opt="max_readahead=1048576"
 		#extra_opt="max_readahead=4194304"
 		;;
 	    dserver-lubava )
 		host=dserver
-		user=lubava
+		remote_user=lubava
 		remote_dir=/home/lubava
 		;;
 	esac
-	s+="/run/autofs/$dir -fstype=fuse.sshfs"
-	s+=",rw,nodev,nosuid,noatime,allow_other,nonempty"
-	s+=",max_read=65536,reconnect,intr"
-	s+=",workaround=all,transform_symlinks,follow_symlinks"
-	s+=",uid=\$UID,gid=\$GID"
-	s+=",ServerAliveInterval=5,ServerAliveCountMax=2"
-	s+=",StrictHostKeyChecking=no"
-	s+=",UserKnownHostsFile=$autofs_ssh_known_hosts"
-	s+=",ControlPath=none"
-	s+="${extra_opt:+,}$extra_opt"
-	s+=" $user@$host:$remote_dir$NL"
-    done
-    p_file /run/tliset/automap "$s"
-    pl 'chcon -t etc_t /run/tliset/automap'
 
-    if [[ ! -L /set || "$(readlink /set)" != "/run/autofs" ]]; then
-	cmd_log rm -f /set
-	cmd_log ln -s /run/autofs /set
+	local local_user
+	case "$NAME" in
+	    dserver ) local_user=kino ;;
+	    miranda ) local_user=igor ;;
+	    ultrabook ) local_user=lubava ;;
+	    untrusted ) local_user=user ;;
+	esac
+
+	local opt=""
+	opt+="rw,nodev,nosuid,noatime,allow_other,nonempty"
+	opt+=",max_read=65536,reconnect,intr"
+	opt+=",workaround=all,transform_symlinks,follow_symlinks"
+	opt+=",ServerAliveInterval=5,ServerAliveCountMax=2"
+	opt+=",StrictHostKeyChecking=no"
+	opt+=",UserKnownHostsFile=$autofs_ssh_known_hosts"
+	opt+=",ControlPath=none"
+	opt+=",uid=$(id -u "$local_user"),gid=$(id -g "$local_user")"
+	opt+="${extra_opt:+,}$extra_opt"
+	
+	if let use_autofs; then
+	    s+="/run/autofs/$dir -fstype=fuse.sshfs"
+	    s+="${opt:+,}$opt"
+	    s+=" $remote_user@$host:$remote_dir$NL"
+	else
+	    local mount_dir="$mount_root/$dir"
+	    local unitname="${mount_dir#/}"
+	    unitname="${unitname//\//-}"
+	    p_file "\$1/$unitname.mount" "\
+[Mount]
+Where=$mount_dir
+Type=fuse.sshfs
+What=$remote_user@$host:$remote_dir
+Options=$opt
+"
+	    p_file "\$1/$unitname.automount" "\
+[Automount]
+Where=$mount_dir
+TimeoutIdleSec=30
+"
+            multi_user_wants+=("$unitname.automount")
+	fi
+    done
+    if let use_autofs; then
+	p_file /run/tliset/automap "$s"
+	pl 'chcon -t etc_t /run/tliset/automap'
+
+	write_file /etc/auto.master.d/tliset.autofs "/- file:/run/tliset/automap --timeout=50"
+	write_file "$autofs_ssh_known_hosts" ""
     fi
-    write_file /etc/auto.master.d/tliset.autofs "/- file:/run/tliset/automap --timeout=50"
-    write_file "$autofs_ssh_known_hosts" ""
+
+    if [[ ! -L /set || "$(readlink /set)" != "$mount_root" ]]; then
+	cmd_log rm -f /set
+	cmd_log ln -s "$mount_root" /set
+    fi
 }
 
 setup_sshd() {
