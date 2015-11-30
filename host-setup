@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/lib.bash"
 
-valid_host_names=(dserver miranda ultrabook untrusted thip r2)
+valid_host_names=(dserver miranda ultrabook untrusted hippyru thip r2)
 
 is_valid_host_name() {
     local name="$1" i
@@ -788,6 +788,7 @@ Host dserver
   HostName dserver.mir2.org
   AddressFamily inet
   CheckHostIP no
+  Port 18022
   Ciphers aes128-gcm@openssh.com
   MACs umac-128@openssh.com
 
@@ -805,12 +806,13 @@ Host *
 EOF
 }
 
-setup_autofs() {
+setup_net_mounts() {
 
     local -i use_autofs=0
     if [[ "$(rpm -E %fedora)" == 22 ]]; then
 	use_autofs=1
     fi
+    use_autofs=0
 
     local autofs_dirs=(kino)
     if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
@@ -879,16 +881,15 @@ setup_autofs() {
 	    s+=" $remote_user@$host:$remote_dir$NL"
 	else
 	    local mount_dir="$mount_root/$dir"
-	    local unitname="${mount_dir#/}"
-	    unitname="${unitname//\//-}"
-	    p_file "\$1/$unitname.mount" "\
+	    local unitname="$(systemd-escape -p "$mount_dir")"
+	    p_file "\$1/$(printf %q "$unitname.mount")" "\
 [Mount]
 Where=$mount_dir
 Type=fuse.sshfs
 What=$remote_user@$host:$remote_dir
 Options=$opt
 "
-	    p_file "\$1/$unitname.automount" "\
+	    p_file "\$1/$(printf %q "$unitname.automount")" "\
 [Automount]
 Where=$mount_dir
 TimeoutIdleSec=30
@@ -896,12 +897,12 @@ TimeoutIdleSec=30
             multi_user_wants+=("$unitname.automount")
 	fi
     done
+    write_file "$autofs_ssh_known_hosts" ""
     if let use_autofs; then
 	p_file /run/tliset/automap "$s"
 	pl 'chcon -t etc_t /run/tliset/automap'
 
 	write_file /etc/auto.master.d/tliset.autofs "/- file:/run/tliset/automap --timeout=50"
-	write_file "$autofs_ssh_known_hosts" ""
     fi
 
     if [[ ! -L /set || "$(readlink /set)" != "$mount_root" ]]; then
@@ -1047,7 +1048,7 @@ setup_services() {
     log "Checking services"
     inc_log_level
 
-    let with_set_mounts && setup_autofs
+    let with_net_mounts && setup_net_mounts
 
     if let kind_fedora; then
 	setup_ssh_config
@@ -1189,7 +1190,7 @@ declare -i with_dyndns=0
 declare -i with_transmission_redirect=0
 declare -i with_latex=0
 declare -i with_transgui=0
-declare -i with_set_mounts=0
+declare -i with_net_mounts=0
 declare -i with_common_fedora_packages=0
 
 declare -i with_enabled_sshd=1
@@ -1212,14 +1213,14 @@ case "$NAME" in
 	with_dyndns=1
 	with_transmission_redirect=1
 	sshd_extra_listen_port=18022
-	with_set_mounts=1
+	with_net_mounts=1
 	;;
     ultrabook )
 	kind_fedora=1
 	with_common_fedora_packages=1
 	with_transgui=1
 	with_transmission_redirect=1
-	with_set_mounts=1
+	with_net_mounts=1
 	with_enabled_sshd=0
 	;;
     miranda )
@@ -1233,7 +1234,7 @@ case "$NAME" in
 	with_latex=1
 	with_enabled_sshd=0
 	sshd_extra_listen_port=19022
-	with_set_mounts=1
+	with_net_mounts=1
 	downloads_user=igor
 	;;
     untrusted )
@@ -1242,7 +1243,7 @@ case "$NAME" in
 	with_networkd=1
 	with_resolved=1
 	with_virtualbox_net=1
-	with_set_mounts=1
+	with_net_mounts=1
 	with_transmission_redirect=1
 	with_transgui=1
 	downloads_user=user
@@ -1252,6 +1253,10 @@ case "$NAME" in
 	with_vol_storage=1
 	with_zram=1
 	with_virtualbox_net=1
+	;;
+    hippyru )
+	kind_coreos=1
+	with_zram=1
 	;;
     rserv )
 	kind_coreos=1
