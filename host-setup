@@ -33,7 +33,6 @@ setup_fedora_packages() {
     inc_log_level
 
     if let with_common_fedora_packages; then
-	local fedora_release=$(rpm -E %fedora)
 	local rpmfusion_kinds=(
 	    free
 	    nonfree
@@ -1296,6 +1295,10 @@ fi
 
 if [[ -z "$virt" ]] && let with_virtualbox_net; then
     with_virtualbox_net=0
+fi
+
+if let kind_fedora; then
+    fedora_release=$(rpm -E %fedora)
 fi
 
 start_generator_write
