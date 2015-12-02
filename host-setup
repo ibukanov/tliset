@@ -755,6 +755,8 @@ EOF
 }
 
 setup_ssh_config() {
+    local config_path=/run/tliset/ssh_config
+    local bind_path=/etc/ssh/ssh_config
     local extra=''
     if [[ "$NAME" == miranda || "$NAME" == untrusted ]]; then
 	extra+="
@@ -772,7 +774,7 @@ Host t-transdock
 "
     fi
 
-    write_file "/etc/ssh/ssh_config" <<EOF
+    p_file "$config_path" "\
 Host kino
   HostKeyAlias kino
   AddressFamily inet
@@ -803,7 +805,17 @@ $extra
 Host *
   GSSAPIAuthentication no
   SendEnv LANG
-EOF
+"
+
+    local unitname="$(systemd-escape -p "$bind_path")"
+    p_file "\$1/$(printf %q "$unitname.mount")" "\
+[Mount]
+Where=$bind_path
+Type=none
+Options=bind
+What=$config_path
+"
+    multi_user_wants+=("$unitname.mount")
 }
 
 setup_net_mounts() {
@@ -915,11 +927,9 @@ setup_sshd() {
     log "Checking sshd"
     inc_log_level
     mkdir -p -m 0700 /root/.ssh
-    if let kind_fedora; then
-	if [[ ! -f /root/.ssh/id_ed25519 ]]; then
-	    log "Generating ssh key for the root user"
-	    ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
-	fi
+    if [[ ! -f /root/.ssh/id_ed25519 ]]; then
+	log "Generating ssh key for the root user"
+	ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
     fi
 
     # Based on https://stribika.github.io/2015/01/04/secure-secure-shell.htlm
