@@ -901,10 +901,12 @@ Type=fuse.sshfs
 What=$remote_user@$host:$remote_dir
 Options=$opt
 "
+	    # Using TimeoutIdleSec leads to a hung after network is
+	    # recovered after first successful mount.
 	    p_file "\$1/$(printf %q "$unitname.automount")" "\
 [Automount]
 Where=$mount_dir
-TimeoutIdleSec=30
+#TimeoutIdleSec=30
 "
             multi_user_wants+=("$unitname.automount")
 	fi
