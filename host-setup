@@ -54,8 +54,8 @@ setup_fedora_packages() {
     local list=()
     if let with_common_fedora_packages; then
 	list+=(
-	    tmux xfce4-terminal
-	    git fuse-sshfs unison240 lsyncd
+	    tmux lxterminal
+	    git fuse-sshfs lsyncd
 	    quilt mercurial subversion
 	    livecd-tools
 	    autoconf automake gcc-c++ kernel-devel
@@ -72,17 +72,8 @@ setup_fedora_packages() {
 	    # encryption and backup
 	    apg duplicity perl-Digest-Bcrypt python-gdata
 
-	    # hardware management
-	    rfkill lm_sensors
-
 	    # Recovery tools
 	    ddrescue foremost scalpel testdisk
-
-	    # GUI
-	    gnome-tweak-tool
-	    dconf-editor
-	    gnome-terminal-nautilus
-	    gnome-shell-extension-alternate-tab
 
 	    # Graphs
 	    graphviz graphviz-doc
@@ -95,7 +86,6 @@ setup_fedora_packages() {
 	    ffmpeg
 	    vlc gimp inkscape gthumb
 	    scribus
-	    #openssl-devel
 	    evince evince-djvu pdf2djvu
 	    linux-libertine-biolinum-fonts linux-libertine-fonts
 	    gstreamer1-libav
@@ -108,15 +98,25 @@ setup_fedora_packages() {
 	    # Languages
 	    hunspell-ru hunspell-nb
 	)
-	if [[ "$(rpm -E %fedora)" == 22 ]]; then
-	    list+=(autofs)
-	fi
 
+	if [[ -z "$virt" ]]; then
+	    list+=(
+		# hardware management
+		rfkill lm_sensors
+	    )
+
+	    
+	    list+=(
+		# Assume this is only necessary on real hardware
+		gnome-tweak-tool
+		gnome-terminal-nautilus
+		gnome-shell-extension-alternate-tab
+	    )
+	fi
     fi
 
     let with_latex && list+=(texlive)
     let with_transgui && list+=(transgui)
-
 
     if [[ -n "$virt" ]]; then
 	list+=(gcc kernel-devel)
@@ -125,26 +125,21 @@ setup_fedora_packages() {
     case "$NAME" in
 	dserver | miranda )
 	    list+=(
-		libvirt-daemon-config-network
-		libvirt-daemon-kvm
-		qemu-kvm
 		virt-manager
 		virt-viewer
 	    )
-	    if [[ "$fedora_release" -ge 22 ]]; then
-		list+=(docker)
-	    else
-		list+=(docker-io)
+	    if [[ -z "$virt" ]]; then
+		list+=(
+		    libvirt-daemon-config-network
+		    libvirt-daemon-kvm
+		    qemu-kvm
+		)
 	    fi
 	    ;;
     esac
 
-    if [[ "$NAME" == dserver || "$NAME" == miranda ]]; then
-	list+=(dnsmasq)
-    fi
-
     if [[ "$NAME" == miranda ]]; then
-	list+=(tinyproxy)
+	list+=(tinyproxy firefox)
     fi
 
     for i in "${list[@]}"; do
@@ -819,12 +814,6 @@ What=$config_path
 
 setup_net_mounts() {
 
-    local -i use_autofs=0
-    if [[ "$(rpm -E %fedora)" == 22 ]]; then
-	use_autofs=1
-    fi
-    use_autofs=0
-
     local autofs_dirs=(kino)
     if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
 	autofs_dirs+=(bergenrabbit dserver-lubava hippy.ru lubava.info)
@@ -886,37 +875,25 @@ setup_net_mounts() {
 	opt+=",uid=$(id -u "$local_user"),gid=$(id -g "$local_user")"
 	opt+="${extra_opt:+,}$extra_opt"
 	
-	if let use_autofs; then
-	    s+="/run/autofs/$dir -fstype=fuse.sshfs"
-	    s+="${opt:+,}$opt"
-	    s+=" $remote_user@$host:$remote_dir$NL"
-	else
-	    local mount_dir="$mount_root/$dir"
-	    local unitname="$(systemd-escape -p "$mount_dir")"
-	    p_file "\$1/$(printf %q "$unitname.mount")" "\
+	local mount_dir="$mount_root/$dir"
+	local unitname="$(systemd-escape -p "$mount_dir")"
+	p_file "\$1/$(printf %q "$unitname.mount")" "\
 [Mount]
 Where=$mount_dir
 Type=fuse.sshfs
 What=$remote_user@$host:$remote_dir
 Options=$opt
 "
-	    # Using TimeoutIdleSec leads to a hung after network is
-	    # recovered after first successful mount.
-	    p_file "\$1/$(printf %q "$unitname.automount")" "\
+	# Using TimeoutIdleSec leads to a hung after network is
+	# recovered after first successful mount.
+	p_file "\$1/$(printf %q "$unitname.automount")" "\
 [Automount]
 Where=$mount_dir
 #TimeoutIdleSec=30
 "
-            multi_user_wants+=("$unitname.automount")
-	fi
+        multi_user_wants+=("$unitname.automount")
     done
     write_file "$autofs_ssh_known_hosts" ""
-    if let use_autofs; then
-	p_file /run/tliset/automap "$s"
-	pl 'chcon -t etc_t /run/tliset/automap'
-
-	write_file /etc/auto.master.d/tliset.autofs "/- file:/run/tliset/automap --timeout=50"
-    fi
 
     if [[ ! -L /set || "$(readlink /set)" != "$mount_root" ]]; then
 	cmd_log rm -f /set
@@ -958,6 +935,8 @@ UsePAM yes
 "
     fi
 
+    write_file /etc/ssh/sshd_config "$sshd_config"
+
     local root_authorized_keys="$ssh_pubkey_igor"
 
     if [[ "$NAME" == dserver ]]; then
@@ -993,7 +972,6 @@ ListenStream=$sshd_extra_listen_port
 "
 	fi
     fi
-    write_file /etc/ssh/sshd_config "$sshd_config"
 
     if let with_enabled_sshd; then
 	# On coreos this is enabled by default
