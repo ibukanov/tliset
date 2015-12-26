@@ -454,8 +454,19 @@ Wants=systemd-networkd.socket
 	# Make sure that system-supplied dnsmasq is masked
 	p_mask_service dnsmasq.service
     fi
-    if let with_resolved && let kind_fedora; then
+    if let with_resolved; then
 	multi_user_wants+=(systemd-resolved.service)
+
+	# CoreOS has empty fallback DNS, set that to Google as on fedora
+	if let kind_coreos; then
+	    pl ''
+	    pl 'resolve_dir="$1/../resolved.conf.d"'
+	    pl 'mkdir -p "$resolve_dir"'
+	    p_file '"$resolve_dir/tliset.conf"' "\
+[Resolve]
+FallbackDNS=8.8.8.8 8.8.4.4 2001:4860:4860::8888 2001:4860:4860::8844
+"
+	fi
     fi
 
     if let with_networkd; then
@@ -464,15 +475,13 @@ Wants=systemd-networkd.socket
 	pl 'mkdir -p "$net_dir"'
 	pl 'chcon -t etc_t "$net_dir"'
 
-	case "$NAME" in
-	    dserver ) print_dserver_network_files ;;
-	    * )
-		if let kind_fedora; then
-		    print_fedora_networkd_files
-		fi
-		;;
-	esac
-	print_virtualbox_network
+	if [[ "$NAME" == dserver ]]; then
+	    print_dserver_network_files
+	elif [[ "$virt" == oracle ]]; then
+	    print_virtualbox_network
+	elif let kind_fedora; then
+	    print_fedora_networkd_files
+	fi
     fi
 }
 
@@ -666,16 +675,34 @@ UseDomains=true
 }
 
 print_virtualbox_network() {
-    let with_virtualbox_net || return 0
-
-    p_file '"$net_dir/99-virt-eth1.network"' "\
+    p_file '"$net_dir/99-local-net.network"' "\
 [Match]
 Name=eth1
-Virtualization=vm
+Virtualization=oracle
+Driver=virtio-pci
 
 [Network]
 LinkLocalAddressing=yes
 LLMNR=yes
+"
+
+    p_file '"$net_dir/9a-default.network"' "\
+[Match]
+Virtualization=oracle
+Driver=virtio-pci
+
+[Network]
+DHCP=v4
+LLMNR=no
+
+[DHCP]
+UseMTU=yes
+"
+
+    p_file '"$net_dir/9b-default.network"' "\
+[Network]
+DHCP=yes
+LLMNR=no
 "
 }
 
@@ -1190,8 +1217,6 @@ declare -i with_common_fedora_packages=0
 declare -i with_enabled_sshd=1
 declare -i sshd_extra_listen_port=0
 
-declare -i with_virtualbox_net=0
-
 downloads_user=""
 
 virt="$(systemd-detect-virt -v || true)"
@@ -1223,7 +1248,6 @@ case "$NAME" in
 	    with_networkd=1
 	    with_resolved=1
 	fi
-	with_virtualbox_net=1
 	with_common_fedora_packages=1
 	with_latex=1
 	with_enabled_sshd=0
@@ -1236,7 +1260,6 @@ case "$NAME" in
 	with_common_fedora_packages=1
 	with_networkd=1
 	with_resolved=1
-	with_virtualbox_net=1
 	with_net_mounts=1
 	with_transmission_redirect=1
 	with_transgui=1
@@ -1246,7 +1269,6 @@ case "$NAME" in
 	kind_coreos=1
 	with_vol_storage=1
 	with_zram=1
-	with_virtualbox_net=1
 	;;
     hippyru )
 	kind_coreos=1
@@ -1275,10 +1297,6 @@ fi
 #    [[ ! -d /media/configdrive && ! -d /media/configvirtfs ]] || \
 #	err "Cannot configure CoreOS that under cloudconfig control"
 #fi
-
-if [[ -z "$virt" ]] && let with_virtualbox_net; then
-    with_virtualbox_net=0
-fi
 
 if let kind_fedora; then
     fedora_release=$(rpm -E %fedora)
