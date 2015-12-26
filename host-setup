@@ -679,7 +679,7 @@ print_virtualbox_network() {
 [Match]
 Name=eth1
 Virtualization=oracle
-Driver=virtio-pci
+Driver=virtio_net
 
 [Network]
 LinkLocalAddressing=yes
@@ -689,7 +689,7 @@ LLMNR=yes
     p_file '"$net_dir/9a-default.network"' "\
 [Match]
 Virtualization=oracle
-Driver=virtio-pci
+Driver=virtio_net
 
 [Network]
 DHCP=v4
