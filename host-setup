@@ -853,7 +853,6 @@ setup_net_mounts() {
 
     local mount_root=/run/tliset/set
     pl "mkdir -p ${autofs_dirs[*]/#/$mount_root/}"
-    multi_user_wants+=(autofs.service)
 
     local s="" dir host remote_user remote_dir
     for dir in "${autofs_dirs[@]}"; do
@@ -862,17 +861,17 @@ setup_net_mounts() {
 	    bergenrabbit )
 		host=hippyru-www
 		remote_user=bergenrabbit.net
-		remote_dir=/www/site/bergenrabbit.net
+		remote_dir=/root
 		;;
 	    hippy.ru )
 		host=hippyru-www
 		remote_user=hippy.ru
-		remote_dir=/www/site/hippy.ru
+		remote_dir=/root
 		;;
 	    lubava.info )
 		host=hippyru-www
 		remote_user=lubava.info
-		remote_dir=/www/site/lubava.info
+		remote_dir=/root
 		;;
 	    kino )
 		host=kino
