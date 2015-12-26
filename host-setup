@@ -54,7 +54,7 @@ setup_fedora_packages() {
     local list=()
     if let with_common_fedora_packages; then
 	list+=(
-	    tmux lxterminal
+	    tmux xfce4-terminal
 	    git fuse-sshfs lsyncd
 	    quilt mercurial subversion
 	    livecd-tools
@@ -62,6 +62,7 @@ setup_fedora_packages() {
 	    emacs
 	    tigervnc
 	    strace
+	    policycoreutils-python-utils
 
 	    # filesystems
 	    udftools inotify-tools fdupes fslint
@@ -158,6 +159,10 @@ setup_fedora_packages() {
     fi
     if let with_networkd && let kind_fedora; then
 	remove_list+=(network-manager-applet)
+    fi
+    if [[ "$NAME" == miranda ]]; then
+	# No need to keep midori browser
+	remove_list+=(midori)
     fi
     if let ${#remove_list[@]}; then
 	local status=0
