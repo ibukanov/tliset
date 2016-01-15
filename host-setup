@@ -4,6 +4,96 @@ source "$(dirname "$0")/lib.bash"
 
 valid_host_names=(dserver miranda ultrabook untrusted hippyru thip r2)
 
+declare -i kind_fedora=0
+declare -i kind_coreos=0
+declare -i with_vol_storage=0
+declare -i with_zram=1
+declare -i with_networkd=0
+declare -i with_networkd_if_virt=0
+declare -i with_resolved=0
+declare -i with_dyndns=0
+declare -i with_kino_access=0
+declare -i with_latex=0
+declare -i with_transgui=0
+declare -i with_hippyru_www_access=0
+declare -i with_hippyru_backup=0
+declare -i with_common_fedora_packages=0
+
+declare -i with_enabled_sshd=1
+declare -i sshd_extra_listen_port=0
+
+declare single_ssh_user=
+declare downloads_user=
+
+get_host_options() {
+    case "$NAME" in
+	dserver )
+	    kind_fedora=1
+	    with_networkd=1
+	    with_resolved=1
+	    with_dyndns=1
+	    with_kino_access=1
+	    with_hippyru_backup=1
+	    sshd_extra_listen_port=18022
+	    ;;
+	ultrabook )
+	    kind_fedora=1
+	    with_common_fedora_packages=1
+	    with_transgui=1
+	    with_kino_access=1
+	    with_hippyru_www_access=1
+	    with_enabled_sshd=0
+	    ;;
+	miranda )
+	    kind_fedora=1
+	    with_networkd_if_virt=1
+	    with_common_fedora_packages=1
+	    with_latex=1
+	    with_enabled_sshd=0
+	    sshd_extra_listen_port=19022
+	    with_hippyru_www_access=1
+	    with_kino_access=1
+	    downloads_user=igor
+	    ;;
+	untrusted )
+	    kind_fedora=1
+	    with_common_fedora_packages=1
+	    with_networkd=1
+	    with_resolved=1
+	    with_kino_access=1
+	    with_transgui=1
+	    downloads_user=user
+	    single_ssh_user=user
+	    ;;
+	thip )
+	    kind_coreos=1
+	    with_vol_storage=1
+	    with_zram=1
+	    ;;
+	hippyru )
+	    kind_coreos=1
+	    with_zram=1
+	    ;;
+	rserv )
+	    kind_coreos=1
+	    with_zram=1
+	    ;;
+	r2 )
+	    kind_coreos=1
+	    with_zram=1
+	    ;;
+	* )
+	    err "unknown '$NAME'"
+	    ;;
+    esac
+    if let kind_coreos; then
+	with_networkd=1
+	with_resolved=1
+	single_ssh_user=core
+    fi
+}
+    
+
 is_valid_host_name() {
     local name="$1" i
     for i in "${valid_host_names[@]}"; do
@@ -349,8 +439,8 @@ setup_network() {
 	fi
     fi
 
-    if let with_transmission_redirect; then
-	setup_transmission_redirect
+    if let with_kino_access; then
+	setup_kino_port_forward
     fi
 
     dec_log_level
@@ -720,7 +810,8 @@ EOF
     fi
 }
 
-setup_transmission_redirect() {
+setup_kino_port_forward() {
+    ensure_root_ssh_key kino
     local ports=($kino_transmission_port) port
     if [[ "$NAME" == untrusted ]]; then
 	ports+=(9090)
@@ -739,7 +830,7 @@ Requires=tliset-transmission-$port.socket
 
 [Service]
 StandardInput=socket
-ExecStart=/usr/bin/ssh -W127.0.0.1:$port \\
+ExecStart=/usr/bin/ssh -i $ssh_key_file -W127.0.0.1:$port \\
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=$autofs_ssh_known_hosts kino
 "
     done
@@ -801,6 +892,8 @@ Host t-transdock
     fi
 
     p_file "$config_path" "\
+UseRoaming no
+
 Host kino
   HostKeyAlias kino
   AddressFamily inet
@@ -844,14 +937,32 @@ What=$config_path
     multi_user_wants+=("$unitname.mount")
 }
 
+ssh_key_file=
+
+ensure_root_ssh_key() {
+    local prefix=$1
+    local file=/root/.ssh/$prefix-ed25519
+    if [[ ! -s "$file" ]]; then
+	cmd_log mkdir -p -m 0700 /root/.ssh
+	cmd_log ssh-keygen -t ed25519 -N '' -f "$file"
+    fi
+    ssh_key_file="$file"
+}
+
 setup_net_mounts() {
 
-    local autofs_dirs=(kino)
-    if [[ "$NAME" == miranda || "$NAME" == ultrabook ]]; then
-	autofs_dirs+=(bergenrabbit dserver-lubava hippy.ru lubava.info)
+    local autofs_dirs=()
+    if let with_kino_access; then
+	autofs_dirs+=(kino)
+    fi
+    if let with_hippyru_www_access; then
+	autofs_dirs+=(bergenrabbit hippy.ru lubava.info)
     fi
 
+    let ${#autofs_dirs[@]} || return 0
+
     local mount_root=/run/tliset/set
+
     pl "mkdir -p ${autofs_dirs[*]/#/$mount_root/}"
 
     local s="" dir host remote_user remote_dir
@@ -860,18 +971,18 @@ setup_net_mounts() {
 	case "$dir" in
 	    bergenrabbit )
 		host=hippyru-www
-		remote_user=bergenrabbit.net
-		remote_dir=/root
+		remote_user=bergenrabbit
+		remote_dir=/
 		;;
 	    hippy.ru )
 		host=hippyru-www
 		remote_user=hippy.ru
-		remote_dir=/root
+		remote_dir=/
 		;;
 	    lubava.info )
 		host=hippyru-www
 		remote_user=lubava.info
-		remote_dir=/root
+		remote_dir=/
 		;;
 	    kino )
 		host=kino
@@ -879,11 +990,6 @@ setup_net_mounts() {
 		remote_dir=/files
 		extra_opt="max_readahead=1048576"
 		#extra_opt="max_readahead=4194304"
-		;;
-	    dserver-lubava )
-		host=dserver
-		remote_user=lubava
-		remote_dir=/home/lubava
 		;;
 	esac
 
@@ -895,6 +1001,8 @@ setup_net_mounts() {
 	    untrusted ) local_user=user ;;
 	esac
 
+	ensure_root_ssh_key "$host"
+
 	local opt=""
 	opt+="rw,nodev,nosuid,noatime,allow_other,nonempty"
 	opt+=",max_read=65536,reconnect,intr"
@@ -903,6 +1011,7 @@ setup_net_mounts() {
 	opt+=",StrictHostKeyChecking=no"
 	opt+=",UserKnownHostsFile=$autofs_ssh_known_hosts"
 	opt+=",ControlPath=none"
+	opt+=",IdentityFile=$ssh_key_file"
 	opt+=",uid=$(id -u "$local_user"),gid=$(id -g "$local_user")"
 	opt+="${extra_opt:+,}$extra_opt"
 	
@@ -932,14 +1041,89 @@ Where=$mount_dir
     fi
 }
 
+setup_hippyru_backup() {
+    [[ $with_hippyru_backup -ne 0 || $NAME == thip ]] || return 0
+
+    ensure_root_ssh_key hippyru-www-backup
+
+    if [[ $NAME == thip ]]; then
+	return 0
+    fi
+
+    p_file '$1/tliset-hippyru-backup.timer' "\
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+Persistent=true
+OnCalendar=13:00:02
+"
+    p_file '$1/tliset-hippyru-backup.service' "\
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/run/tliset/hippyru-backup
+StandardError=journal
+StandardOutput=journal
+Type=oneshot
+"
+    multi_user_wants+=("tliset-hippyru-backup.timer")
+
+    # Script source with condition code
+    local s='#!/usr/bin/bash
+set -e -u -o pipefail
+ssh_cmd=(
+    ssh -l backup -p 2022 -i ~/.ssh/hippyru-www-backup-ed25519 
+    -o Ciphers=aes128-gcm@openssh.com 
+)
+rsync_args=(-a --no-D --partial --info=NAME --delete --rsh="${ssh_cmd[*]}")
+
+dir=/area/backup/hippyru
+old_www=$dir/old-www
+mkdir -p "$old_www"
+too_old_backup="$old_www/$(date --date="-20 days" +%Y-%m-%d)"
+rm -rf "$too_old_backup"
+backup="$old_www/$(date +%Y-%m-%d)"
+'
+    # On fedora change SELinux context for rsync so it is treated as
+    # a binary. As an update can reset it, do it each time before running
+    # rsync
+    if let kind_fedora; then
+	s+='
+se_context=$(stat -c %C /usr/bin/rsync)
+if [[ $se_context =~ ^[^:]*:[^:]*:([^:]*):[^:]*$ ]]; then
+    if [[ ${BASH_REMATCH[1]} != bin_t ]]; then
+        echo "Changing SE context for /usr/bin/rsync from ${BASH_REMATCH[1]} to bin_t" 1>&2
+        chcon -t bin_t /usr/bin/rsync 
+    fi
+fi
+'
+    fi
+    s+='
+echo "Starting backup" 1>&2
+bad=0
+rsync "${rsync_args[@]}" \
+    rsync://hippyru.net/src/ "$dir/hippyru-dock/" 1>&2 || bad=1
+
+rsync "${rsync_args[@]}" --backup --backup-dir="$backup" \
+    rsync://hippyru.net/www/ "$dir/www/" 1>&2 || bad=1
+
+exit "$bad"
+'
+
+    p_file -x '/run/tliset/hippyru-backup' "$s"
+
+    if let kind_fedora; then
+	setsebool rsync_client 1
+    fi
+}
+
 setup_sshd() {
     log "Checking sshd"
     inc_log_level
-    mkdir -p -m 0700 /root/.ssh
-    if [[ ! -f /root/.ssh/id_ed25519 ]]; then
-	log "Generating ssh key for the root user"
-	ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
-    fi
 
     # Based on https://stribika.github.io/2015/01/04/secure-secure-shell.htlm
     local sshd_config="\
@@ -953,27 +1137,38 @@ MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-ripemd160-
 UseDNS no
 ClientAliveInterval 180
 
-AuthorizedKeysFile /etc/ssh/authorized_keys/%u
-Subsystem sftp /usr/libexec/openssh/sftp-server
+Subsystem sftp internal-sftp
 
+PubkeyAuthentication yes
 PasswordAuthentication no
 ChallengeResponseAuthentication no
 "
     if let kind_fedora; then
-	sshd_config+="\
-GSSAPIAuthentication no
-UsePAM yes
-"
+	sshd_config+="GSSAPIAuthentication no$NL"
+	sshd_config+="UsePAM yes$NL"
+	if [[ -z "$single_ssh_user" ]]; then
+	    sshd_config+="AuthorizedKeysFile /etc/ssh/authorized_keys/%u$NL"
+	    local f=/etc/ssh/authorized_keys/root
+	    if [[ ! -e "$f" ]]; then
+		touch "$f"
+		chmod 640 "$f"
+	    fi
+	fi
     fi
 
+    if [[ -n $single_ssh_user ]]; then
+	sshd_config+="AllowUsers $single_ssh_user$NL"
+	eval "local f=~$single_ssh_user/.ssh/authorized_keys"
+	if [[ ! -s $f ]]; then
+	    touch "$f"
+	    chmod 600 "$f"
+	    chown "$single_ssh_user:$single_ssh_user" "$f"
+	    err "$f does not exist or empty." \
+		"Add a public key there for $NAME access and try again."
+	fi
+    fi
+    
     write_file /etc/ssh/sshd_config "$sshd_config"
-
-    local root_authorized_keys="$ssh_pubkey_igor"
-
-    if [[ "$NAME" == dserver ]]; then
-	# Allow root to ssh to self for debugging
-	root_authorized_keys+="$(< /root/.ssh/id_ed25519.pub)$NL"
-    fi
 
     if let sshd_extra_listen_port && let kind_fedora; then
 	local re='^ssh_port_t\s\+tcp\s\+%s$'
@@ -1021,18 +1216,6 @@ ListenStream=$sshd_extra_listen_port
 	systemctl restart sshd
     fi
 
-    write_file -m 640 /etc/ssh/authorized_keys/root "$root_authorized_keys"
-    if let kind_coreos; then
-	write_file -m 640 -o root:core /etc/ssh/authorized_keys/core "$root_authorized_keys"
-	remove_file /home/core/.ssh/authorized_keys.d/coreos-cloudinit
-	remove_file /home/core/.ssh/authorized_keys
-    fi
-    if [[ "$NAME" == dserver ]]; then
-	# Also allow the admin to login directly as user so sshfs from
-	# the admin account to the user dir works.
-	write_file -m 640 -o root:lubava /etc/ssh/authorized_keys/lubava \
-		   "$root_authorized_keys$ssh_pubkey_lubava"
-    fi
     dec_log_level
 }
 
@@ -1068,7 +1251,9 @@ setup_services() {
     log "Checking services"
     inc_log_level
 
-    let with_net_mounts && setup_net_mounts
+    setup_net_mounts
+
+    setup_hippyru_backup
 
     if let kind_fedora; then
 	setup_ssh_config
@@ -1154,15 +1339,14 @@ while getopts :hn:r: opt; do
 	    is_valid_host_name "$remote" || \
 		usage_err "The value of -n argument '$remote' is not a known host name."
 	    ;;
-	\? ) usage_err "option -$OPTARG requires an argument" ;;
-	* ) usage_err "unknown -$OPTARG option" ;;
+	* ) getopts_err "$opt" "${OPTARG-}";;
     esac
 done
 
 #[[ $# -eq $(($OPTIND - 1)) ]] || usage_err "Unexpected extra arguments: $@"
 let OPTIND==1+$# || usage_err "Unexpected extra arguments: $@"
 
-[[ -z "$NAME" || -z "$remote" ]] || usage_err "Only one of -n, -r can be given"
+[[ -z "$remote" || -z "$NAME" ]] || usage_err "Only one of -n, -r can be given"
 
 if [[ -n "$show_usage" ]]; then
     echo "Usage: $0 [OPTION]..."
@@ -1177,119 +1361,53 @@ if [[ -n "$show_usage" ]]; then
 fi
 
 if [[ -n "$remote" ]]; then
-    run_remotely "$remote" -n "$remote"
+    NAME=$remote
+elif [[ -z "$NAME" ]]; then
+    IFS='' read NAME < /etc/hostname
+    if ! is_valid_host_name "$NAME"; then
+	err "The content of /etc/hostname is '$NAME' is not a supported name." \
+	    "Use -n option to set the hostname explicitly."
+    fi
+fi
+
+get_host_options
+
+if [[ -n "$remote" ]]; then
+    cmd=(run_remotely)
+    if [[ -n "$single_ssh_user" ]]; then
+	# Use sudo
+	cmd+=(-s "$single_ssh_user@$remote")
+    else
+	cmd+=("root@$remote")
+    fi
+    "${cmd[@]}" -n "$remote"
 fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
     exec sudo "$0" "$@"
 fi
 
-if [[ -z "$NAME" ]]; then
-    IFS='' read NAME < /etc/hostname
-    if ! is_valid_host_name "$NAME"; then
-	err "The content of /etc/hostname is '$NAME' is not a supported name." \
-	    "Use -n option to set the hostname explicitly."
+if [[ -f /etc/hostname ]]; then
+    IFS='' read current_hostname < /etc/hostname
+    if is_valid_host_name "$current_hostname" && [ "$NAME" != "$current_hostname" ]; then
+	err "Already setup as $current_hostname. To force put localhost into /etc/hostname"
     fi
 else
-    if [[ -f /etc/hostname ]]; then
-	IFS='' read current_hostname < /etc/hostname
-	if is_valid_host_name "$current_hostname" && [ "$NAME" != "$current_hostname" ]; then
-	    err "Already setup as $current_hostname. To force put localhost into /etc/hostname"
-	fi
-    fi
     echo "$NAME" > /etc/hostname
 fi
-
-declare -i kind_fedora=0
-declare -i kind_coreos=0
-declare -i with_vol_storage=0
-declare -i with_zram=1
-declare -i with_networkd=0
-declare -i with_resolved=0
-declare -i with_dyndns=0
-declare -i with_transmission_redirect=0
-declare -i with_latex=0
-declare -i with_transgui=0
-declare -i with_net_mounts=0
-declare -i with_common_fedora_packages=0
-
-declare -i with_enabled_sshd=1
-declare -i sshd_extra_listen_port=0
-
-downloads_user=""
 
 virt="$(systemd-detect-virt -v || true)"
 if [[ "$virt" == none ]]; then
     virt=""
 fi
 
-case "$NAME" in
-    dserver )
-	kind_fedora=1
-	with_networkd=1
-	with_resolved=1
-	with_dyndns=1
-	with_transmission_redirect=1
-	sshd_extra_listen_port=18022
-	with_net_mounts=1
-	;;
-    ultrabook )
-	kind_fedora=1
-	with_common_fedora_packages=1
-	with_transgui=1
-	with_transmission_redirect=1
-	with_net_mounts=1
-	with_enabled_sshd=0
-	;;
-    miranda )
-	kind_fedora=1
-	if [[ -n "$virt" ]]; then
-	    with_networkd=1
-	    with_resolved=1
-	fi
-	with_common_fedora_packages=1
-	with_latex=1
-	with_enabled_sshd=0
-	sshd_extra_listen_port=19022
-	with_net_mounts=1
-	downloads_user=igor
-	;;
-    untrusted )
-	kind_fedora=1
-	with_common_fedora_packages=1
-	with_networkd=1
-	with_resolved=1
-	with_net_mounts=1
-	with_transmission_redirect=1
-	with_transgui=1
-	downloads_user=user
-	;;
-    thip )
-	kind_coreos=1
-	with_vol_storage=1
-	with_zram=1
-	;;
-    hippyru )
-	kind_coreos=1
-	with_zram=1
-	;;
-    rserv )
-	kind_coreos=1
-	with_zram=1
-	;;
-    r2 )
-	kind_coreos=1
-	with_zram=1
-	;;
-esac
+if let with_networkd_if_virt && [[ -n "$virt" ]]; then
+    with_networkd=1
+    with_resolved=1
+fi
 
 if let kind_coreos && ! let with_enabled_sshd; then
     err "On CoreOS sshd must always be enabled"
-fi
-
-if let kind_coreos; then
-    with_networkd=1
-    with_resolved=1
 fi
 
 #if let kind_coreos; then

@@ -57,6 +57,20 @@ usage_err() {
     exit 1
 }
 
+getopts_err() {
+    local name=$1 optarg=$2 msg
+    case "$name" in
+	: ) msg="$-optarg requires an argument" ;;
+	\? ) msg="unknown option -$optarg" ;;
+	* ) msg="-$name is listed in getopts arguments but not processed" ;;
+    esac
+    if let "${#FUNCNAME[@]} <= 2"; then
+	usage_err "$msg"
+    else
+	err "${FUNCNAME[1]} - $msg"
+    fi
+}
+
 log_indent_level=0
 
 log() {
@@ -216,13 +230,33 @@ remove_file() {
 }
 
 run_remotely() {
-    local host="$1"
+    local OPTIND opt remote_sudo=0
+    while getopts :s opt; do
+	case "$opt" in
+	    s ) remote_sudo=1;;
+	    * ) getopts_err "$opt" "${OPTARG-}";;
+	esac
+    done
+    shift $(($OPTIND - 1))
+
+    local user_host="$1"
     shift
 
     # I need to send the directory and allow to use terminal to ask
     # for password or secreets. So just emebedd the archive into the
     # command as base64 and ensure that ssh allocates tty.
-    local data="$(tar -C "$selfdir" --exclude .git --exclude README.md --exclude LICENSE -czf - . | base64 -w0)"
-    ssh ${SSH_ARGS-} -t "root@$remote" "rm -rf /tmp/tliset && mkdir /tmp/tliset && printf %s $data | base64 -d | tar -C /tmp/tliset -xzf - && /tmp/tliset/$(basename "$0") $*"
+    local data=$(tar -C "$selfdir" --exclude .git --exclude README.md --exclude LICENSE -cf - . | gzip -9 | base64 -w0)
+
+    local i cmd=$(printf %q "/tmp/tliset/$(basename "$0")")
+    for i in "$@"; do
+	cmd+=" $(printf %q "$i")"
+    done
+
+    local remote_cmd="rm -rf /tmp/tliset && mkdir /tmp/tliset && printf %s $data | base64 -d | tar -C /tmp/tliset -xzf - && $cmd"
+
+    if let remote_sudo; then
+	remote_cmd="sudo /bin/bash -c $(printf %q "$remote_cmd")"
+    fi
+    ssh ${SSH_ARGS-} -t "$user_host" "$remote_cmd"
     exit
 }
