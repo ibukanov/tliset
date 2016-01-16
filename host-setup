@@ -16,11 +16,12 @@ declare -i with_kino_access=0
 declare -i with_latex=0
 declare -i with_transgui=0
 declare -i with_hippyru_www_access=0
-declare -i with_hippyru_backup=0
 declare -i with_common_fedora_packages=0
 
 declare -i with_enabled_sshd=1
 declare -i sshd_extra_listen_port=0
+
+declare hippyru_backup_time=
 
 declare single_ssh_user=
 declare downloads_user=
@@ -33,7 +34,7 @@ get_host_options() {
 	    with_resolved=1
 	    with_dyndns=1
 	    with_kino_access=1
-	    with_hippyru_backup=1
+	    hippyru_backup_time=13:00:02
 	    sshd_extra_listen_port=18022
 	    ;;
 	ultrabook )
@@ -81,6 +82,7 @@ get_host_options() {
 	r2 )
 	    kind_coreos=1
 	    with_zram=1
+	    hippyru_backup_time=03:00:02
 	    ;;
 	* )
 	    err "unknown '$NAME'"
@@ -1042,7 +1044,7 @@ Where=$mount_dir
 }
 
 setup_hippyru_backup() {
-    [[ $with_hippyru_backup -ne 0 || $NAME == thip ]] || return 0
+    [[ $hippyru_backup_time || $NAME == thip ]] || return 0
 
     ensure_root_ssh_key hippyru-www-backup
 
@@ -1050,6 +1052,9 @@ setup_hippyru_backup() {
 	return 0
     fi
 
+    [[ $hippyru_backup_time =~ ^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$ ]] || \
+	err "Invalid backup time spec in hippyru_backup_time - '$hippyru_backup_time'"
+    
     p_file '$1/tliset-hippyru-backup.timer' "\
 [Unit]
 After=network-online.target
@@ -1057,7 +1062,7 @@ Wants=network-online.target
 
 [Timer]
 Persistent=true
-OnCalendar=13:00:02
+OnCalendar=$hippyru_backup_time
 "
     p_file '$1/tliset-hippyru-backup.service' "\
 [Unit]
