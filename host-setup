@@ -1087,11 +1087,11 @@ ssh_cmd=(
 rsync_args=(-a --no-D --partial --info=NAME --delete --rsh="${ssh_cmd[*]}")
 
 dir=/area/backup/hippyru
-old_www=$dir/old-www
-mkdir -p "$old_www"
-too_old_backup="$old_www/$(date --date="-20 days" +%Y-%m-%d)"
+old_adata=$dir/old-adata
+mkdir -p "$old_adata"
+too_old_backup="$old_adata/$(date --date="-20 days" +%Y-%m-%d)"
 rm -rf "$too_old_backup"
-backup="$old_www/$(date +%Y-%m-%d)"
+backup="$old_adata/$(date +%Y-%m-%d)"
 '
     # On fedora change SELinux context for rsync so it is treated as
     # a binary. As an update can reset it, do it each time before running
@@ -1114,7 +1114,7 @@ rsync "${rsync_args[@]}" \
     rsync://hippyru.net/src/ "$dir/hippyru-dock/" 1>&2 || bad=1
 
 rsync "${rsync_args[@]}" --backup --backup-dir="$backup" \
-    rsync://hippyru.net/www/ "$dir/www/" 1>&2 || bad=1
+    rsync://hippyru.net/adata/ "$dir/adata/" 1>&2 || bad=1
 
 exit "$bad"
 '
