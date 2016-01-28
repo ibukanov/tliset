@@ -833,7 +833,7 @@ Requires=tliset-transmission-$port.socket
 [Service]
 StandardInput=socket
 ExecStart=/usr/bin/ssh -i $ssh_key_file -W127.0.0.1:$port \\
-  -o StrictHostKeyChecking=no -o UserKnownHostsFile=$autofs_ssh_known_hosts kino
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$autofs_ssh_known_hosts kino
 "
     done
     if let with_networkd; then
@@ -968,6 +968,7 @@ setup_net_mounts() {
     pl "mkdir -p ${autofs_dirs[*]/#/$mount_root/}"
 
     local s="" dir host remote_user remote_dir
+    local -A host_set=()
     for dir in "${autofs_dirs[@]}"; do
 	local extra_opt=""
 	case "$dir" in
@@ -995,6 +996,8 @@ setup_net_mounts() {
 		;;
 	esac
 
+	host_set[$host]=1
+
 	local local_user
 	case "$NAME" in
 	    dserver ) local_user=kino ;;
@@ -1010,7 +1013,7 @@ setup_net_mounts() {
 	opt+=",max_read=65536,reconnect,intr"
 	opt+=",workaround=all,transform_symlinks,follow_symlinks"
 	opt+=",ServerAliveInterval=5,ServerAliveCountMax=2"
-	opt+=",StrictHostKeyChecking=no"
+	opt+=",StrictHostKeyChecking=yes"
 	opt+=",UserKnownHostsFile=$autofs_ssh_known_hosts"
 	opt+=",ControlPath=none"
 	opt+=",IdentityFile=$ssh_key_file"
@@ -1035,7 +1038,15 @@ Where=$mount_dir
 "
         multi_user_wants+=("$unitname.automount")
     done
-    write_file "$autofs_ssh_known_hosts" ""
+
+    local known_hosts=""
+    [[ -z ${host_set[hippyru-www]-} ]] || \
+	known_hosts+="hippyru-www ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIeBgbo19/jj/VDoX3nOybsmrbN95lIBeQYQv+FAOs/z$NL"
+    [[ -z ${host_set[kino]-} ]] || \
+	known_hosts+="kino ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILTrJnFcAg4qiYW8o8E0ieXc+hhnxc7ozAXlUAz1JHT6$NL"
+    
+    pl ''
+    p_file -x "$autofs_ssh_known_hosts" "$known_hosts"
 
     if [[ ! -L /set || "$(readlink /set)" != "$mount_root" ]]; then
 	cmd_log rm -f /set
@@ -1084,10 +1095,10 @@ ssh_cmd=(
     ssh -l backup -p 2022 -i ~/.ssh/hippyru-www-backup-ed25519 
     -o Ciphers=aes128-gcm@openssh.com 
 )
-rsync_args=(-a --no-D --partial --info=NAME --delete --rsh="${ssh_cmd[*]}")
+rsync_args=(-rlpt --partial --info=NAME --delete --rsh="${ssh_cmd[*]}")
 
 dir=/area/backup/hippyru
-old_adata=$dir/old-adata
+old_adata="$dir/old-adata"
 mkdir -p "$old_adata"
 too_old_backup="$old_adata/$(date --date="-20 days" +%Y-%m-%d)"
 rm -rf "$too_old_backup"
@@ -1095,7 +1106,7 @@ backup="$old_adata/$(date +%Y-%m-%d)"
 '
     # On fedora change SELinux context for rsync so it is treated as
     # a binary. As an update can reset it, do it each time before running
-    # rsync
+    # rsync.
     if let kind_fedora; then
 	s+='
 se_context=$(stat -c %C /usr/bin/rsync)
@@ -1109,14 +1120,8 @@ fi
     fi
     s+='
 echo "Starting backup" 1>&2
-bad=0
-rsync "${rsync_args[@]}" \
-    rsync://hippyru.net/src/ "$dir/hippyru-dock/" 1>&2 || bad=1
-
 rsync "${rsync_args[@]}" --backup --backup-dir="$backup" \
-    rsync://hippyru.net/adata/ "$dir/adata/" 1>&2 || bad=1
-
-exit "$bad"
+    rsync://hippyru.net/adata/ "$dir/adata/"
 '
 
     p_file -x '/run/tliset/hippyru-backup' "$s"

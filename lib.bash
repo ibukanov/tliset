@@ -33,8 +33,7 @@ ssh_pubkey_lubava=""
 
 kino_transmission_port=9091
 transdock_ssh_port=9092
-autofs_ssh_known_hosts="/var/local/sshfs_known_hosts"
-
+autofs_ssh_known_hosts="/run/tliset/sshfs_known_hosts"
 
 tmp_files=()
 
