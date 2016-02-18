@@ -30,11 +30,7 @@ get_host_options() {
     case "$NAME" in
 	dserver )
 	    kind_fedora=1
-	    with_networkd=1
-	    with_resolved=1
-	    with_dyndns=1
 	    with_kino_access=1
-	    hippyru_backup_time=13:00:02
 	    sshd_extra_listen_port=18022
 	    ;;
 	ultrabook )
@@ -72,10 +68,6 @@ get_host_options() {
 	    with_zram=1
 	    ;;
 	hippyru )
-	    kind_coreos=1
-	    with_zram=1
-	    ;;
-	rserv )
 	    kind_coreos=1
 	    with_zram=1
 	    ;;
@@ -549,16 +541,14 @@ Wants=systemd-networkd.socket
     if let with_resolved; then
 	multi_user_wants+=(systemd-resolved.service)
 
-	# CoreOS has empty fallback DNS, set that to Google as on fedora
-	if let kind_coreos; then
-	    pl ''
-	    pl 'resolve_dir="$1/../resolved.conf.d"'
-	    pl 'mkdir -p "$resolve_dir"'
-	    p_file '"$resolve_dir/tliset.conf"' "\
+	# Trust Google to do DNS if no other DNS servers are known
+	pl ''
+	pl 'resolve_dir="$1/../resolved.conf.d"'
+	pl 'mkdir -p "$resolve_dir"'
+	p_file '"$resolve_dir/tliset.conf"' "\
 [Resolve]
 FallbackDNS=8.8.8.8 8.8.4.4 2001:4860:4860::8888 2001:4860:4860::8844
 "
-	fi
     fi
 
     if let with_networkd; then
@@ -567,13 +557,31 @@ FallbackDNS=8.8.8.8 8.8.4.4 2001:4860:4860::8888 2001:4860:4860::8844
 	pl 'mkdir -p "$net_dir"'
 	pl 'chcon -t etc_t "$net_dir"'
 
-	if [[ "$NAME" == dserver ]]; then
+	if [[ $NAME == dserver ]]; then
 	    print_dserver_network_files
-	elif [[ "$virt" == oracle ]]; then
+	elif let with_virtual_box_network; then
 	    print_virtualbox_network
 	elif let kind_fedora; then
 	    print_fedora_networkd_files
 	fi
+	case "$NAME" in
+	    hippyru )
+		p_file '"$net_dir/89-eth0.network"' "\
+[Match]
+Name=eth0
+
+[Network]
+DHCP=yes
+LLMNR=no
+
+# Extra IP
+Address=84.22.110.72/24
+
+[DHCP]
+UseMTU=yes
+UseDNS=yes
+"
+	esac
     fi
 }
 
@@ -789,6 +797,7 @@ LLMNR=no
 
 [DHCP]
 UseMTU=yes
+UseDNS=no
 "
 
     p_file '"$net_dir/9b-default.network"' "\
@@ -1091,14 +1100,23 @@ Type=oneshot
     # Script source with condition code
     local s='#!/usr/bin/bash
 set -e -u -o pipefail
+
+backup_top=/area/backup/hippyru
+
 ssh_cmd=(
     ssh -l backup -p 2022 -i ~/.ssh/hippyru-www-backup-ed25519 
     -o Ciphers=aes128-gcm@openssh.com 
 )
-rsync_args=(-rlpt --partial --info=NAME --delete --rsh="${ssh_cmd[*]}")
 
-dir=/area/backup/hippyru
-old_adata="$dir/old-adata"
+rsync_args=(
+    -rlpt
+    --no-owner --no-group --omit-dir-times --omit-link-times
+    --partial-dir="$backup_top/rsync-partial" --delete-after
+    --info=NAME
+    --rsh="${ssh_cmd[*]}"
+)
+
+old_adata="$backup_top/old-adata"
 mkdir -p "$old_adata"
 too_old_backup="$old_adata/$(date --date="-20 days" +%Y-%m-%d)"
 rm -rf "$too_old_backup"
@@ -1121,7 +1139,7 @@ fi
     s+='
 echo "Starting backup" 1>&2
 rsync "${rsync_args[@]}" --backup --backup-dir="$backup" \
-    rsync://hippyru.net/adata/ "$dir/adata/"
+    rsync://hippyru.net/adata/ "$backup_top/adata/"
 '
 
     p_file -x '/run/tliset/hippyru-backup' "$s"
@@ -1411,6 +1429,15 @@ if [[ "$virt" == none ]]; then
     virt=""
 fi
 
+if [[ "$virt" == oracle ]]; then
+    readonly with_virtual_box_network="1"
+else
+    readonly with_virtual_box_network="0"
+fi
+
+
+
+
 if let with_networkd_if_virt && [[ -n "$virt" ]]; then
     with_networkd=1
     with_resolved=1
@@ -1426,7 +1453,7 @@ fi
 #fi
 
 if let kind_fedora; then
-    fedora_release=$(rpm -E %fedora)
+    fedora_release="$(rpm -E %fedora)"
 fi
 
 start_generator_write
