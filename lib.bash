@@ -31,9 +31,10 @@ dserver_port_forwards=(
 ssh_pubkey_igor="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIORdPk9iwgviB9X5zKK07thkGb9021ugvYSdF38kvjSQ igor@miranda$NL"
 ssh_pubkey_lubava=""
 
-kino_transmission_port=9091
-transdock_ssh_port=9092
-autofs_ssh_known_hosts="/run/tliset/sshfs_known_hosts"
+readonly autofs_ssh_known_hosts="/run/tliset/sshfs_known_hosts"
+
+readonly ssh_kino_wrap="/run/tliset/ssh_kino_wrap"
+readonly kino_password_file="/var/lib/tliset/kino_password"
 
 tmp_files=()
 

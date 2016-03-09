@@ -142,7 +142,7 @@ setup_fedora_packages() {
     if let with_common_fedora_packages; then
 	list+=(
 	    tmux xfce4-terminal
-	    git fuse-sshfs lsyncd
+	    git fuse-sshfs sshpass lsyncd
 	    quilt mercurial subversion
 	    livecd-tools
 	    autoconf automake gcc-c++ kernel-devel
@@ -434,17 +434,20 @@ setup_network() {
 	fi
     fi
 
-    if let with_kino_access; then
-	setup_kino_port_forward
-    fi
-
     dec_log_level
 }
 
-# Escape argument using single quotas
+# Escape argument using single quotas with with each single quote in
+# arg replaced by '"'"'
 escape_for_shell() {
-    local replacement="'\\''"
-    printf %s "'${1//\'/$replacement}'"
+    local arg="$1" escaped= before_quote
+    while : ; do
+	before_quote="${arg%%\'*}"
+	[[ $arg != "$before_quote" ]] || break
+	escaped="$escaped$before_quote'\"'\"'"
+	arg="${arg#*\'}"
+    done
+    printf %s "'$escaped$arg'"
 }
 
 start_generator_write() {
@@ -822,67 +825,6 @@ EOF
     fi
 }
 
-setup_kino_port_forward() {
-    ensure_root_ssh_key kino
-    local ports=($kino_transmission_port) port
-    if [[ "$NAME" == untrusted ]]; then
-	ports+=(9090)
-    fi
-    for port in "${ports[@]}"; do
-	pl ''
-	p_file "\"\$1/tliset-transmission-$port.socket\"" "\
-[Socket]
-Accept=true
-ListenStream=127.0.0.1:$port
-"
-	pl ''
-	p_file "\"\$1/tliset-transmission-$port@.service\"" "\
-[Unit]
-Requires=tliset-transmission-$port.socket
-
-[Service]
-StandardInput=socket
-ExecStart=/usr/bin/ssh -i $ssh_key_file -W127.0.0.1:$port \\
-  -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$autofs_ssh_known_hosts kino
-"
-    done
-    if let with_networkd; then
-	for port in "${ports[@]}"; do
-	    multi_user_wants+=("tliset-transmission-$port.socket")
-	done
-    else
-	multi_user_wants+=(NetworkManager-dispatcher)
-	pl ''
-	p_file -x "/run/tliset/is-online" "$(cat <<'EOF'
-#!/bin/sh
-case "$(nmcli -f STATE -t g)" in
-    connected | "connected (site only)" ) exit 0 ;;
-esac
-exit 1
-EOF
-)"
-	pl ''
-	p_file -x "/run/tliset/is-outside-home-net" "$(cat <<'EOF'
-#!/bin/sh
-! grep -q '^nameserver[[:space:]]\+192\.168\.2\.[0-9]\+$' /etc/resolv.conf
-EOF
-)"
-
-	socket_units=""
-	for port in "${ports[@]}"; do
-	    socket_units+=" tliset-transmission-$port.socket"
-	done
-	write_file -m 755 /etc/NetworkManager/dispatcher.d/90-online-monitor <<EOF
-#!/bin/bash
-if /run/tliset/is-online; then
-    systemctl start$socket_units
-else
-    systemctl stop$socket_units
-fi
-EOF
-    fi
-}
-
 setup_ssh_config() {
     local config_path=/run/tliset/ssh_config
     local bind_path=/etc/ssh/ssh_config
@@ -945,14 +887,33 @@ ensure_root_ssh_key() {
     ssh_key_file="$file"
 }
 
+setup_kino_password() {
+    if ! [[ -f $kino_password_file ]]; then
+	(umask 077 && printf '' > "$kino_password_file")
+    fi
+    if ! [[ -s $kino_password_file ]]; then
+	local password
+	read -p "Enter password for kino access (it will be echoed): " -r password
+	[[ $password ]] || err "password cannot be empty"
+	printf '%s\n' "$password" > $kino_password_file 
+    fi
+    p_file -x "$(escape_for_shell "$ssh_kino_wrap")" "\
+#/bin/sh
+exec sshpass -f $(escape_for_shell "$kino_password_file") ssh \"\$@\"
+"
+}
+
 setup_net_mounts() {
 
-    local autofs_dirs=()
+    local -a autofs_dirs=()
+    local use_ssh_key_file=
     if let with_kino_access; then
 	autofs_dirs+=(kino)
+	setup_kino_password
     fi
     if let with_hippyru_www_access; then
 	autofs_dirs+=(bergenrabbit hippy.ru lubava.info)
+	use_ssh_key_file=1
     fi
 
     let ${#autofs_dirs[@]} || return 0
@@ -985,8 +946,8 @@ setup_net_mounts() {
 		host=kino
 		remote_user=user
 		remote_dir=/files
-		extra_opt="max_readahead=1048576"
-		#extra_opt="max_readahead=4194304"
+		extra_opt="ssh_command=$ssh_kino_wrap"
+		extra_opt+=",max_readahead=1048576"
 		;;
 	esac
 
@@ -994,13 +955,10 @@ setup_net_mounts() {
 
 	local local_user
 	case "$NAME" in
-	    dserver ) local_user=kino ;;
 	    miranda ) local_user=igor ;;
 	    ultrabook ) local_user=lubava ;;
 	    untrusted ) local_user=user ;;
 	esac
-
-	ensure_root_ssh_key "$host"
 
 	local opt=""
 	opt+="rw,nodev,nosuid,noatime,allow_other,nonempty"
@@ -1010,7 +968,10 @@ setup_net_mounts() {
 	opt+=",StrictHostKeyChecking=yes"
 	opt+=",UserKnownHostsFile=$autofs_ssh_known_hosts"
 	opt+=",ControlPath=none"
-	opt+=",IdentityFile=$ssh_key_file"
+	if [[ $use_ssh_key_file ]]; then
+	    ensure_root_ssh_key "$host"
+	    opt+=",IdentityFile=$ssh_key_file"
+	fi
 	opt+=",uid=$(id -u "$local_user"),gid=$(id -g "$local_user")"
 	opt+="${extra_opt:+,}$extra_opt"
 	
@@ -1439,6 +1400,10 @@ if let kind_fedora; then
 fi
 
 start_generator_write
+
+if [[ ! -d /var/lib/tliset ]]; then
+    mkdir -p -m 755 /var/lib/tliset
+fi
 
 if let kind_fedora; then
     setup_fstab
