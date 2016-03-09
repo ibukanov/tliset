@@ -26,13 +26,16 @@ declare hippyru_backup_time=
 declare single_ssh_user=
 declare downloads_user=
 
+declare -a virt_net_ids=()
+
+# Replace lables/uids with real devices in fstab/grub for security
+# when allowing untrusted VM to access the whole disk.
+declare -i with_disabled_disk_uuid=0
+
+declare -i with_dnsmasq=0
+
 get_host_options() {
     case "$NAME" in
-	dserver )
-	    kind_fedora=1
-	    with_kino_access=1
-	    sshd_extra_listen_port=18022
-	    ;;
 	ultrabook )
 	    kind_fedora=1
 	    with_common_fedora_packages=1
@@ -201,14 +204,14 @@ setup_fedora_packages() {
     fi
 
     let with_latex && list+=(texlive)
-    let with_transgui && list+=(transgui)
+    let with_transgui && list+=(transgui openssl-devel)
 
     if [[ -n "$virt" ]]; then
 	list+=(gcc kernel-devel)
     fi
 
     case "$NAME" in
-	dserver | miranda )
+	miranda )
 	    list+=(
 		virt-manager
 		virt-viewer
@@ -262,42 +265,40 @@ setup_fedora_packages() {
     dec_log_level
 }
 
+remove_fstab_uuids() {
+    log "Checking /etc/fstab"
+    local fstab
+    IFS='' read -rd '' fstab < /etc/fstab 
+    local -a ids
+    ids=($(egrep -o '^UUID=[A-Fa-f0-9-]+' <<< "$fstab" | cut -d= -f2 || true))
+    if [[ ${#ids[@]} -ge 1 ]]; then
+	log "replacing UUID with devices for security with untrusted VM"
+	local -a edits=()
+	local id
+	for id in "${ids[@]}"; do
+	    [[ -b "/dev/disk/by-uuid/$id" ]] || err "failed to locate disk for uuid=$id"
+	    local resolved disk
+	    resolved="$(readlink "/dev/disk/by-uuid/$id")"
+	    disk="/dev/$(basename "$resolved")"
+	    [[ -b "$disk" && ! -h "$disk" ]] || \
+		err "/dev/disk/by-uuid/$id does not point to real device file"
+	    edits+=(-e "s|^UUID=$id|$disk|")
+	done
+	fstab="$(printf %s "$fstab" | sed "${edits[@]}")"
+    fi
+    
+    write_file /etc/fstab "$fstab"
+    if let file_update; then
+	log "/etc/fstab was updated"
+    fi
+}
+
 setup_fstab() {
     log "Checking fstab"
     local fstab ids edits id disk
     inc_log_level
-    if [[ "$NAME" == dserver ]]; then
-	log "Checking /etc/fstab"
-	fstab="$(cat /etc/fstab)"
-	# Replace lables/uids with real devices in fstab for security
-	# as an untrusted VM will access the whole disk.
-	ids=($(egrep -o '^UUID=[A-Fa-f0-9-]+' <<< "$fstab" | cut -d= -f2 || true))
-	if [[ ${#ids[@]} -ge 1 ]]; then
-	    log "replacing UUID with devices for security with untrusted VM"
-	    edits=()
-	    for id in "${ids[@]}"; do
-		[[ -b "/dev/disk/by-uuid/$id" ]] || err "failed to locate disk for uuid=$id"
-		disk="/dev/$(basename "$(readlink "/dev/disk/by-uuid/$id")")"
-		[[ -b "$disk" && ! -L "$disk" ]] || \
-		    err "/dev/disk/by-uuid/$id does not point to real device file"
-		edits+=(-e "s|^UUID=$id|$disk|")
-	    done
-	    fstab="$(sed "${edits[@]}" <<< "$fstab")"
-	fi
-
-	fstab="$(sed '/^#custom-start#/,/^#custom-end#/d' <<< "$fstab")"
-	fstab+='
-#custom-start#
-/dev/sda1 /area/backup ext4 noatime,discard
-/dev/sda2 /area/kino ext4 noauto,noatime,discard
-#custom-end#'
-
-	write_file /etc/fstab "$fstab"
-	if let file_update; then
-	    log "/etc/fstab was updated"
-	fi
-	mkdir -p /area/backup
-	mkdir -p /area/kino
+    if let with_disabled_disk_uuid; then
+	remove_fstab_uuids
     fi
 
     if [[ -n "$downloads_user" ]]; then
@@ -346,7 +347,7 @@ setup_grub() {
 	[GRUB_CMDLINE_LINUX]="rhgb quiet LANG=en_US.UTF-8$net_kernel_options"
     )
 
-    if [[ "$NAME" == dserver ]]; then
+    if let with_disabled_disk_uuid; then
 	# Avoid UUID for VM security
 	config+=(
 	    [GRUB_DISABLE_LINUX_UUID]=true
@@ -413,7 +414,7 @@ setup_network() {
     if let with_dyndns; then
 	print_dyndns
     fi
-    if false && [[ "$NAME" == dserver ]]; then
+    if let with_dnsmasq; then
 	print_dserver_dnsmasq
     fi
 
@@ -892,13 +893,6 @@ Host thip
   HostKeyAlias thip
   CheckHostIP no
   User core
-
-Host t-transdock
-  HostKeyAlias t-transdock
-  HostName thip
-  User user
-  Port $transdock_ssh_port
-  Ciphers aes128-gcm@openssh.com
 "
     fi
 
@@ -912,15 +906,6 @@ Host kino
   Port 9092
   HostName media.mir2.org
   User user
-  Ciphers aes128-gcm@openssh.com
-  MACs umac-128@openssh.com
-
-Host dserver
-  HostKeyAlias dserver
-  HostName dserver.mir2.org
-  AddressFamily inet
-  CheckHostIP no
-  Port 18022
   Ciphers aes128-gcm@openssh.com
   MACs umac-128@openssh.com
 
@@ -1055,7 +1040,7 @@ Where=$mount_dir
 	known_hosts+="kino ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILTrJnFcAg4qiYW8o8E0ieXc+hhnxc7ozAXlUAz1JHT6$NL"
     
     pl ''
-    p_file -x "$autofs_ssh_known_hosts" "$known_hosts"
+    p_file "$autofs_ssh_known_hosts" "$known_hosts"
 
     if [[ ! -L /set || "$(readlink /set)" != "$mount_root" ]]; then
 	cmd_log rm -f /set
@@ -1260,11 +1245,8 @@ add_user() {
 setup_users() {
     log "Checking users"
     inc_log_level
-    if [[ "$NAME" == dserver || "$NAME" == ultrabook || "$NAME" == miranda ]]; then
+    if [[ "$NAME" == ultrabook || "$NAME" == miranda ]]; then
 	add_user lubava 1978
-    fi
-    if [[ "$NAME" == dserver ]]; then
-	add_user kino 1001
     fi
     if [[ "$NAME" == miranda ]]; then
 	add_user igor 1973
