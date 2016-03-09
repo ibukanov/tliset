@@ -1122,6 +1122,9 @@ ChallengeResponseAuthentication no
     if let kind_fedora; then
 	sshd_config+="GSSAPIAuthentication no$NL"
 	sshd_config+="UsePAM yes$NL"
+	if [[ $NAME == ultrabook ]]; then
+	    sshd_config+="X11Forwarding yes$NL"
+	fi
 	if [[ -z "$single_ssh_user" ]]; then
 	    sshd_config+="AuthorizedKeysFile /etc/ssh/authorized_keys/%u$NL"
 	    local f=/etc/ssh/authorized_keys/root
