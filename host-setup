@@ -1377,6 +1377,13 @@ if [[ "$virt" == none ]]; then
     virt=""
 fi
 
+if [[ "$virt" == kvm ]]; then
+    # systemd detects incorrectly
+    if lspci | grep -q VirtualBox; then
+	virt=oracle
+    fi
+fi
+
 if [[ "$virt" == oracle ]]; then
     readonly with_virtual_box_network="1"
 else
