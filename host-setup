@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/lib.bash"
 
-valid_host_names=(dserver miranda ultrabook untrusted hippyru thip r2)
+valid_host_names=(miranda ultrabook untrusted hippyru thip r2 boulder)
 
 declare -i kind_fedora=0
 declare -i kind_coreos=0
@@ -54,6 +54,7 @@ get_host_options() {
 	    with_hippyru_www_access=1
 	    with_kino_access=1
 	    downloads_user=igor
+	    virt_net_ids=(10)
 	    ;;
 	untrusted )
 	    kind_fedora=1
@@ -64,11 +65,18 @@ get_host_options() {
 	    with_transgui=1
 	    downloads_user=user
 	    single_ssh_user=user
+	    virt_net_ids=(11)
 	    ;;
 	thip )
 	    kind_coreos=1
 	    with_vol_storage=1
 	    with_zram=1
+	    virt_net_ids=(12 13)
+	    ;;
+	boulder )
+	    kind_coreos=1
+	    with_zram=1
+	    virt_net_ids=(14)
 	    ;;
 	hippyru )
 	    kind_coreos=1
@@ -779,35 +787,29 @@ UseDomains=true
 }
 
 print_virtualbox_network() {
-    p_file '"$net_dir/99-local-net.network"' "\
+    [[ ${#virt_net_ids[@]} -ne 0 ]] || \
+	err "virt_net_ids must be non-empty array under virtual box"
+    local addresses=""
+    for i in "${virt_net_ids[@]}"; do
+	addresses+="${addresses:+$NL}Address=192.168.95.$i/24"
+    done
+
+    p_file '"$net_dir/99-link-local.network"' "\
 [Match]
 Name=eth1
-Virtualization=oracle
-Driver=virtio_net
 
 [Network]
-LinkLocalAddressing=yes
+$addresses
 LLMNR=yes
 "
-
     p_file '"$net_dir/9a-default.network"' "\
-[Match]
-Virtualization=oracle
-Driver=virtio_net
-
 [Network]
-DHCP=v4
+DHCP=yes
 LLMNR=no
 
 [DHCP]
 UseMTU=yes
 UseDNS=no
-"
-
-    p_file '"$net_dir/9b-default.network"' "\
-[Network]
-DHCP=yes
-LLMNR=no
 "
 }
 
