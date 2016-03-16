@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/lib.bash"
 
-valid_host_names=(miranda ultrabook untrusted hippyru thip r2 boulder)
+valid_host_names=(miranda ultrabook untrusted berli hippyru thip r2)
 
 declare -i kind_fedora=0
 declare -i kind_coreos=0
@@ -71,14 +71,9 @@ get_host_options() {
 	    kind_coreos=1
 	    with_vol_storage=1
 	    with_zram=1
-	    virt_net_ids=(12 13)
+	    virt_net_ids=(12 13 14 15 16)
 	    ;;
-	boulder )
-	    kind_coreos=1
-	    with_zram=1
-	    virt_net_ids=(14)
-	    ;;
-	hippyru )
+	berli | hippyru )
 	    kind_coreos=1
 	    with_zram=1
 	    ;;
@@ -577,7 +572,7 @@ FallbackDNS=8.8.8.8 8.8.4.4 2001:4860:4860::8888 2001:4860:4860::8844
 	    print_fedora_networkd_files
 	fi
 	case "$NAME" in
-	    hippyru )
+	    berli )
 		p_file '"$net_dir/89-eth0.network"' "\
 [Match]
 Name=eth0
@@ -827,58 +822,6 @@ EOF
     fi
 }
 
-setup_ssh_config() {
-    local config_path=/run/tliset/ssh_config
-    local bind_path=/etc/ssh/ssh_config
-    local extra=''
-    if [[ "$NAME" == miranda || "$NAME" == untrusted ]]; then
-	extra+="
-Host thip
-  HostKeyAlias thip
-  CheckHostIP no
-  User core
-"
-    fi
-
-    p_file "$config_path" "\
-UseRoaming no
-
-Host kino
-  HostKeyAlias kino
-  AddressFamily inet
-  CheckHostIP no
-  Port 9092
-  HostName media.mir2.org
-  User user
-  Ciphers aes128-gcm@openssh.com
-  MACs umac-128@openssh.com
-
-Host hippyru-www
-  HostKeyAlias hippyru-www
-  HostName www.hippyru.net
-  AddressFamily inet
-  CheckHostIP no
-  Port 2022
-  Ciphers aes128-gcm@openssh.com
-$extra
-Host *
-  GSSAPIAuthentication no
-  SendEnv LANG
-"
-
-    local unitname="$(systemd-escape -p "$bind_path")"
-    p_file "\$1/$(printf %q "$unitname.mount")" "\
-[Mount]
-Where=$bind_path
-Type=none
-Options=bind
-What=$config_path
-"
-    multi_user_wants+=("$unitname.mount")
-}
-
-ssh_key_file=
-
 ensure_root_ssh_key() {
     local prefix=$1
     local file=/root/.ssh/$prefix-ed25519
@@ -908,14 +851,12 @@ exec sshpass -f $(escape_for_shell "$kino_password_file") ssh \"\$@\"
 setup_net_mounts() {
 
     local -a autofs_dirs=()
-    local use_ssh_key_file=
     if let with_kino_access; then
 	autofs_dirs+=(kino)
 	setup_kino_password
     fi
     if let with_hippyru_www_access; then
-	autofs_dirs+=(bergenrabbit hippy.ru lubava.info)
-	use_ssh_key_file=1
+	autofs_dirs+=(bergenrabbit hippyru lubava.info)
     fi
 
     let ${#autofs_dirs[@]} || return 0
@@ -924,28 +865,45 @@ setup_net_mounts() {
 
     pl "mkdir -p ${autofs_dirs[*]/#/$mount_root/}"
 
-    local s="" dir host remote_user remote_dir
+    local s="" dir host host_key_alias host_pubkey port keyfile remote_user remote_dir
     local -A host_set=()
+    local known_hosts=""
     for dir in "${autofs_dirs[@]}"; do
 	local extra_opt=""
 	case "$dir" in
 	    bergenrabbit )
-		host=hippyru-www
+		host=bergenrabbit.net
+		port=2022
+		host_key_alias=bergenrabbit-www
+		host_pubkey="$hippyru_www_pubkey"
+		keyfile=hippyru-www
 		remote_user=bergenrabbit
 		remote_dir=/
 		;;
-	    hippy.ru )
-		host=hippyru-www
-		remote_user=hippy.ru
+	    hippyru )
+		host=hippyru.net
+		port=2022
+		host_key_alias=hippyru-www
+		host_pubkey="$hippyru_www_pubkey"
+		keyfile=hippyru-www
+		remote_user=hippyru
 		remote_dir=/
 		;;
 	    lubava.info )
-		host=hippyru-www
+		host=lubava.info
+		port=2022
+		host_key_alias=lubava.info-www
+		host_pubkey="$hippyru_www_pubkey"
+		keyfile=hippyru-www
 		remote_user=lubava.info
 		remote_dir=/
 		;;
 	    kino )
-		host=kino
+		host=media.mir2.org
+		port=9092
+		host_key_alias=kino
+		host_pubkey="$media_pubkey"
+		keyfile=
 		remote_user=user
 		remote_dir=/files
 		extra_opt="ssh_command=$ssh_kino_wrap"
@@ -953,6 +911,8 @@ setup_net_mounts() {
 		;;
 	esac
 
+	known_hosts+="$host_key_alias $host_pubkey$NL"
+	
 	host_set[$host]=1
 
 	local local_user
@@ -967,16 +927,22 @@ setup_net_mounts() {
 	opt+=",max_read=65536,reconnect,intr"
 	opt+=",workaround=all,transform_symlinks,follow_symlinks"
 	opt+=",ServerAliveInterval=5,ServerAliveCountMax=2"
+	opt+=",CheckHostIP=no"
+	opt+=",Port=$port"
+	opt+=",Ciphers=aes128-gcm@openssh.com"
+	opt+=",MACs=umac-128@openssh.com"
 	opt+=",StrictHostKeyChecking=yes"
+	opt+=",HostKeyAlias=$host_key_alias"
 	opt+=",UserKnownHostsFile=$autofs_ssh_known_hosts"
 	opt+=",ControlPath=none"
-	if [[ $use_ssh_key_file ]]; then
-	    ensure_root_ssh_key "$host"
+	if [[ $keyfile ]]; then
+	    local ssh_key_file=
+	    ensure_root_ssh_key "$keyfile"
 	    opt+=",IdentityFile=$ssh_key_file"
 	fi
 	opt+=",uid=$(id -u "$local_user"),gid=$(id -g "$local_user")"
 	opt+="${extra_opt:+,}$extra_opt"
-	
+
 	local mount_dir="$mount_root/$dir"
 	local unitname="$(systemd-escape -p "$mount_dir")"
 	p_file "\$1/$(printf %q "$unitname.mount")" "\
@@ -996,16 +962,10 @@ Where=$mount_dir
         multi_user_wants+=("$unitname.automount")
     done
 
-    local known_hosts=""
-    [[ -z ${host_set[hippyru-www]-} ]] || \
-	known_hosts+="hippyru-www ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIeBgbo19/jj/VDoX3nOybsmrbN95lIBeQYQv+FAOs/z$NL"
-    [[ -z ${host_set[kino]-} ]] || \
-	known_hosts+="kino ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILTrJnFcAg4qiYW8o8E0ieXc+hhnxc7ozAXlUAz1JHT6$NL"
-    
     pl ''
     p_file "$autofs_ssh_known_hosts" "$known_hosts"
 
-    if [[ ! -L /set || "$(readlink /set)" != "$mount_root" ]]; then
+    if [[ ! -h /set || "$(readlink /set)" != "$mount_root" ]]; then
 	cmd_log rm -f /set
 	cmd_log ln -s "$mount_root" /set
     fi
@@ -1014,6 +974,7 @@ Where=$mount_dir
 setup_hippyru_backup() {
     [[ $hippyru_backup_time || $NAME == thip ]] || return 0
 
+    local ssh_key_file=
     ensure_root_ssh_key hippyru-www-backup
 
     if [[ $NAME == thip ]]; then
@@ -1048,27 +1009,6 @@ Type=oneshot
     # Script source with condition code
     local s='#!/usr/bin/bash
 set -e -u -o pipefail
-
-backup_top=/area/backup/hippyru
-
-ssh_cmd=(
-    ssh -l backup -p 2022 -i ~/.ssh/hippyru-www-backup-ed25519 
-    -o Ciphers=aes128-gcm@openssh.com 
-)
-
-rsync_args=(
-    -rlpt
-    --no-owner --no-group --omit-dir-times --omit-link-times
-    --partial-dir="$backup_top/rsync-partial" --delete-after
-    --info=NAME
-    --rsh="${ssh_cmd[*]}"
-)
-
-old_adata="$backup_top/old-adata"
-mkdir -p "$old_adata"
-too_old_backup="$old_adata/$(date --date="-20 days" +%Y-%m-%d)"
-rm -rf "$too_old_backup"
-backup="$old_adata/$(date +%Y-%m-%d)"
 '
     # On fedora change SELinux context for rsync so it is treated as
     # a binary. As an update can reset it, do it each time before running
@@ -1085,9 +1025,62 @@ fi
 '
     fi
     s+='
-echo "Starting backup" 1>&2
-rsync "${rsync_args[@]}" --backup --backup-dir="$backup" \
-    rsync://hippyru.net/adata/ "$backup_top/adata/"
+
+readonly backup_root="/area/backup"
+
+backup_from_host() {
+    local pod_name="$1" host_name="$2"
+    local data="$backup_root/$pod_name"
+    local old="$backup_root/old/$pod_name"
+    local partial="$backup_root/rsync-partial/$pod_name"
+    local dir
+    for dir in "$data" "$old" "$partial"; do
+        if [[ ! -d "$dir" ]]; then
+            mkdir -p "$dir"
+        fi
+    done
+    
+    local -a ssh_cmd=(
+        ssh -l backup -p 2022 -i ~/.ssh/hippyru-www-backup-ed25519 
+        -o Ciphers=aes128-gcm@openssh.com
+        -o StrictHostKeyChecking=no
+    )
+
+    local -a rsync_args=(
+        -rlpt
+        --no-owner --no-group --omit-dir-times --omit-link-times
+        --partial-dir="$partial" --delete-after
+        --info=NAME
+        --rsh="${ssh_cmd[*]}"
+    )
+
+    if [[ $pod_name == berli ]]; then
+        rsync_args+=(--exclude=/hippyru/)
+    fi
+
+    local too_old_backup="$old/$(date --date="-20 days" +%Y-%m-%d)"
+    rm -rf "$too_old_backup"
+    local backup="$old/$(date +%Y-%m-%d)"
+    echo "Backing up $pod_name" >&2
+    rsync "${rsync_args[@]}" --backup --backup-dir="$backup" \
+        "rsync://$host_name/adata/" "$data/adata/"
+}
+
+echo "Backing up hippyru-dock source"
+src_top="$backup_root/src"
+if [[ ! -d $src_top ]]; then
+    mkdir "$src_top"
+fi
+
+src_dir="$src_top/hippyru-dock"
+if [[ ! -d $src_dir ]]; then
+    git clone https://github.com/ibukanov/hippyru-dock "$src_dir"
+else
+    (cd "$src_dir" && git pull)
+fi
+
+backup_from_host hippyru hippyru.net
+backup_from_host berli bergenrabbit.net
 '
 
     p_file -x '/run/tliset/hippyru-backup' "$s"
@@ -1230,10 +1223,6 @@ setup_services() {
     setup_net_mounts
 
     setup_hippyru_backup
-
-    if let kind_fedora; then
-	setup_ssh_config
-    fi
 
     if let kind_fedora; then
 	p_mask_service docker.service

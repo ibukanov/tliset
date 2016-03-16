@@ -28,8 +28,8 @@ dserver_port_forwards=(
     "udp:25565:$ip_macbook_air"
 )
 
-ssh_pubkey_igor="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIORdPk9iwgviB9X5zKK07thkGb9021ugvYSdF38kvjSQ igor@miranda$NL"
-ssh_pubkey_lubava=""
+hippyru_www_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIeBgbo19/jj/VDoX3nOybsmrbN95lIBeQYQv+FAOs/z"
+media_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILTrJnFcAg4qiYW8o8E0ieXc+hhnxc7ozAXlUAz1JHT6"
 
 readonly autofs_ssh_known_hosts="/run/tliset/sshfs_known_hosts"
 
