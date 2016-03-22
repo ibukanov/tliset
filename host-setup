@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/lib.bash"
 
-valid_host_names=(miranda ultrabook untrusted berli hippyru thip r2)
+valid_host_names=(miranda ultrabook untrusted bergenrabbit hippyru lubavainfo thip r2)
 
 declare -i kind_fedora=0
 declare -i kind_coreos=0
@@ -73,7 +73,7 @@ get_host_options() {
 	    with_zram=1
 	    virt_net_ids=(12 13 14 15 16)
 	    ;;
-	berli | hippyru )
+	bergenrabbit | hippyru | lubavainfo )
 	    kind_coreos=1
 	    with_zram=1
 	    ;;
@@ -218,6 +218,7 @@ setup_fedora_packages() {
 	    list+=(
 		virt-manager
 		virt-viewer
+		docker
 	    )
 	    if [[ -z "$virt" ]]; then
 		list+=(
@@ -562,7 +563,10 @@ FallbackDNS=8.8.8.8 8.8.4.4 2001:4860:4860::8888 2001:4860:4860::8844
 	pl ''
 	pl 'net_dir="$1/../network"'
 	pl 'mkdir -p "$net_dir"'
-	pl 'chcon -t etc_t "$net_dir"'
+
+	if let kind_fedora; then
+	    pl 'chcon -t etc_t "$net_dir"'
+	fi
 
 	if [[ $NAME == dserver ]]; then
 	    print_dserver_network_files
@@ -571,24 +575,10 @@ FallbackDNS=8.8.8.8 8.8.4.4 2001:4860:4860::8888 2001:4860:4860::8844
 	elif let kind_fedora; then
 	    print_fedora_networkd_files
 	fi
-	case "$NAME" in
-	    berli )
-		p_file '"$net_dir/89-eth0.network"' "\
-[Match]
-Name=eth0
 
-[Network]
-DHCP=yes
-LLMNR=no
-
-# Extra IP
-Address=84.22.110.72/24
-
-[DHCP]
-UseMTU=yes
-UseDNS=yes
-"
-	esac
+	if [[ $NAME == r2 ]]; then
+	    print_r2_default_net
+	fi
     fi
 }
 
@@ -773,7 +763,21 @@ ExecStart=/usr/sbin/dnsmasq -k --conf-file=/dev/null$s
 print_fedora_networkd_files() {
     p_file '"$net_dir/zz-default.network"' "\
 [Network]
-DHCP=v4
+DHCP=ipv4
+
+[DHCP]
+UseMTU=true
+UseDomains=true
+"
+}
+
+print_r2_default_net() {
+    p_file '"$net_dir/zz-default.network"' "\
+[Network]
+DHCP=ipv4
+
+Address=2001:41d0:e:696::1/64
+Gateway=2001:41d0:e:6ff:ff:ff:ff:ff
 
 [DHCP]
 UseMTU=true
@@ -856,7 +860,7 @@ setup_net_mounts() {
 	setup_kino_password
     fi
     if let with_hippyru_www_access; then
-	autofs_dirs+=(bergenrabbit hippyru lubava.info)
+	autofs_dirs+=(bergenrabbit hippyru lubavainfo)
     fi
 
     let ${#autofs_dirs[@]} || return 0
@@ -889,13 +893,13 @@ setup_net_mounts() {
 		remote_user=hippyru
 		remote_dir=/
 		;;
-	    lubava.info )
+	    lubavainfo )
 		host=lubava.info
 		port=2022
-		host_key_alias=lubava.info-www
+		host_key_alias=lubavainfo-www
 		host_pubkey="$hippyru_www_pubkey"
 		keyfile=hippyru-www
-		remote_user=lubava.info
+		remote_user=lubavainfo
 		remote_dir=/
 		;;
 	    kino )
@@ -1009,6 +1013,10 @@ Type=oneshot
     # Script source with condition code
     local s='#!/usr/bin/bash
 set -e -u -o pipefail
+
+# Number of days to keep old backups in the changed dir
+max_keep_changed_days=60 
+
 '
     # On fedora change SELinux context for rsync so it is treated as
     # a binary. As an update can reset it, do it each time before running
@@ -1028,13 +1036,15 @@ fi
 
 readonly backup_root="/area/backup"
 
+remove_list=()
+
 backup_from_host() {
     local pod_name="$1" host_name="$2"
     local data="$backup_root/$pod_name"
-    local old="$backup_root/old/$pod_name"
+    local changes="$backup_root/changes/$pod_name"
     local partial="$backup_root/rsync-partial/$pod_name"
     local dir
-    for dir in "$data" "$old" "$partial"; do
+    for dir in "$data" "$changes" "$partial"; do
         if [[ ! -d "$dir" ]]; then
             mkdir -p "$dir"
         fi
@@ -1054,16 +1064,25 @@ backup_from_host() {
         --rsh="${ssh_cmd[*]}"
     )
 
-    if [[ $pod_name == berli ]]; then
-        rsync_args+=(--exclude=/hippyru/)
-    fi
-
-    local too_old_backup="$old/$(date --date="-20 days" +%Y-%m-%d)"
+    local too_old_backup="$changes/$(date --date="-20 days" +%Y-%m-%d)"
     rm -rf "$too_old_backup"
-    local backup="$old/$(date +%Y-%m-%d)"
+    local changed_files
+    changed_files="$changes/$(date +%Y-%m-%d)"
     echo "Backing up $pod_name" >&2
-    rsync "${rsync_args[@]}" --backup --backup-dir="$backup" \
-        "rsync://$host_name/adata/" "$data/adata/"
+    local ok=1
+    rsync "${rsync_args[@]}" --backup --backup-dir="$changed_files" \
+        "rsync://$host_name/adata/" "$data/adata/" || ok=
+    if [[ $ok ]]; then
+	local i cur_time
+	cur_time="$(date +%s)"
+	for i in "$changes"/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]; do
+	    dir_time="$(date --date="${i##*/}" +%s)"
+	    if test "$((cur_time-dir_time))" -gt "$((max_keep_changed_days*86400))"; then
+		remove_list+=("$i")
+	    fi
+	done
+    fi
+    
 }
 
 echo "Backing up hippyru-dock source"
@@ -1080,7 +1099,15 @@ else
 fi
 
 backup_from_host hippyru hippyru.net
-backup_from_host berli bergenrabbit.net
+backup_from_host bergenrabbit bergenrabbit.net
+backup_from_host lubavainfo lubava.info
+
+if [[ ${#remove_list[@]} -ne 0 ]]; then
+    printf -v s "\\n\\t%s" "${remove_list[@]}"
+    echo "removing older changes created more than $max_keep_changed_days days ago:$s"
+    rm -rf "${remove_list[@]}"
+fi
+
 '
 
     p_file -x '/run/tliset/hippyru-backup' "$s"
@@ -1378,9 +1405,6 @@ if [[ "$virt" == oracle ]]; then
 else
     readonly with_virtual_box_network="0"
 fi
-
-
-
 
 if let with_networkd_if_virt && [[ -n "$virt" ]]; then
     with_networkd=1
