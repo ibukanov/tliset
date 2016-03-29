@@ -788,9 +788,10 @@ UseDomains=true
 print_virtualbox_network() {
     [[ ${#virt_net_ids[@]} -ne 0 ]] || \
 	err "virt_net_ids must be non-empty array under virtual box"
-    local addresses=""
+    local -a addresses=()
     for i in "${virt_net_ids[@]}"; do
-	addresses+="${addresses:+$NL}Address=192.168.95.$i/24"
+	addresses+=("Address=192.168.95.$i/24")
+	addresses+=("Address=fda9:eefb:0a88:883f::$(printf %x "$i")/64")
     done
 
     p_file '"$net_dir/99-link-local.network"' "\
@@ -798,7 +799,7 @@ print_virtualbox_network() {
 Name=eth1
 
 [Network]
-$addresses
+$(printf '%s\n' "${addresses[@]}")
 LLMNR=yes
 "
     p_file '"$net_dir/9a-default.network"' "\
