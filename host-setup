@@ -425,6 +425,35 @@ setup_grub() {
     fi
 }
 
+setup_sudo() {
+    let kind_fedora || return 0
+    [[ $virt ]] || return 0
+
+    local -a lines new_lines=()
+    mapfile -t lines < /etc/sudoers
+    local sudo_with_password_re='^%wheel[[:space:]]+ALL=\(ALL\)[[:space:]]+ALL$'
+    local sudo_without_password="%wheel ALL=(ALL) NOPASSWD: ALL"
+    local i should_patch=0 already_patched=0
+    for ((i=0; i<${#lines[@]}; i+=1)); do
+	local line="${lines[$i]}"
+	if [[ $line =~ $sudo_with_password_re ]]; then
+	    lines[$i]="$sudo_without_password"
+	    should_patch=1
+	elif [[ $line == "$sudo_without_password" ]]; then
+	    already_patched=1
+	fi
+    done
+    if let should_patch==0; then
+	let already_patched || err "/etc/sudoers contains neither unpatched no patched lines"
+	return 0
+    fi
+    let already_patched==0 || err "/etc/sudoers contains both unpatched and patched lines"
+    
+    local new_text
+    printf -v new_text '%s\n' "${lines[@]}"
+    write_file -m 660 /etc/sudoers "$new_text"
+}
+
 setup_network() {
     log "Checking network"
     inc_log_level
@@ -1606,6 +1635,7 @@ if let kind_fedora; then
     setup_fedora_packages
 fi
 setup_grub
+setup_sudo
 if let with_zram; then
     setup_zram
 fi
