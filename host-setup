@@ -26,13 +26,13 @@ declare hippyru_backup_time=
 declare single_ssh_user=
 declare downloads_user=
 
-declare -a virt_net_ids=()
-
 # Replace lables/uids with real devices in fstab/grub for security
 # when allowing untrusted VM to access the whole disk.
 declare -i with_disabled_disk_uuid=0
 
 declare -i with_dnsmasq=0
+
+readonly virt_net_ipv4_prefix="192.168.95"
 
 get_host_options() {
     case "$NAME" in
@@ -54,7 +54,6 @@ get_host_options() {
 	    with_hippyru_www_access=1
 	    with_kino_access=1
 	    downloads_user=igor
-	    virt_net_ids=(10)
 	    ;;
 	untrusted )
 	    kind_fedora=1
@@ -65,13 +64,11 @@ get_host_options() {
 	    with_transgui=1
 	    downloads_user=user
 	    single_ssh_user=user
-	    virt_net_ids=(11)
 	    ;;
 	thip )
 	    kind_coreos=1
 	    with_vol_storage=1
 	    with_zram=1
-	    virt_net_ids=(12 13 14 15 16)
 	    ;;
 	bergenrabbit | hippyru | lubavainfo )
 	    kind_coreos=1
@@ -92,7 +89,30 @@ get_host_options() {
 	single_ssh_user=core
     fi
 }
-    
+
+# Array of (host-name space-separated-list-of-net-ids) where the ids
+# are used to construct ip addresses assigned to virtual net
+# interface.
+readonly -a virt_net_host_info=(
+    miranda 10
+    untrusted 11
+    thip "12 13 14 15 16"
+)
+
+# Add to virt_net_ids array net ids cooresponding to the host 
+add_virt_net_ids() {
+    local i
+    for ((i=0; i<${#virt_net_host_info[@]}; i+=2)); do
+	local host="${virt_net_host_info[$((i+0))]}"
+	local ids="${virt_net_host_info[$((i+1))]}"
+	if [[ $host == $NAME ]]; then
+	    virt_net_ids+=($ids)
+	    return 0
+	fi
+    done
+    err "$NAME is not on the $virt_net_host_info list"
+}
+
 
 is_valid_host_name() {
     local name="$1" i
@@ -400,31 +420,56 @@ setup_grub() {
 }
 
 setup_network() {
-    local -A hosts
     log "Checking network"
     inc_log_level
 
-    hosts=(
-#	[kino]=$ip_kino
-    )
+    # Array of (hostname ip)
+    local -a hosts=()
+    if let with_virtual_box_network; then
+	local i
+	for ((i=0; i<${#virt_net_host_info[@]}; i+=2)); do
+	    local host="${virt_net_host_info[$((i+0))]}"
+	    local ids="${virt_net_host_info[$((i+1))]}"
+	    if [[ $host != "$NAME" ]]; then
+		hosts+=("$host" "$virt_net_ipv4_prefix.${ids%% *}")
+	    fi
+	done
+    fi
 
     if [[ ${#hosts[@]} -ne 0 ]]; then
-	local hosts_text="" key edits
-	for key in "${!hosts[@]}"; do
-	    hosts_text+="$(printf '\n%s %s' "${hosts[$key]}" "$key")"
+	local prefix_line="# auto-generated entries, do not edit after this line"
+	local -A ipv4_map=()
+	local i
+	for ((i=0; i<${#hosts[@]}; i+=2)); do
+	    local host="${hosts[$((i+0))]}"
+	    local ipv4="${hosts[$((i+1))]}"
+	    ipv4_map[$ipv4]="$host"
 	done
-
-	# Ensure stable order
-	hosts_text="$(sort <<< "$hosts_text")"
-
-	# delete all lines matching config keys and then append the proper values
-	edits=()
-	for key in "${!hosts[@]}"; do
-	    edits+=(-e "/^[0-9.]\\+\\s\\+$key\$/d")
+	local -a lines new_lines=()
+	mapfile -t lines < /etc/hosts
+	
+	# remove old mappings for the address
+	local line
+	for line in "${lines[@]:+${lines[@]}}"; do
+	    if [[ $line == "$prefix_line" ]]; then
+		continue
+	    fi
+	    if [[ $line =~ ^[[:blank:]]*([^[:blank:]]+)[[:blank:]]+ ]]; then
+		local token="${BASH_REMATCH[1]}"
+		if [[ ${ipv4_map[$token]-} ]]; then
+		    continue
+		fi
+	    fi
+	    new_lines+=("$line")
 	done
-
-	hosts_text="$(sed "${edits[@]}" /etc/hosts)$hosts_text"
-
+	new_lines+=("$prefix_line")
+	for ((i=0; i<${#hosts[@]}; i+=2)); do
+	    local host="${hosts[$((i+0))]}"
+	    local ipv4="${hosts[$((i+1))]}"
+	    new_lines+=("$ipv4 $host")
+	done
+	local hosts_text
+	printf -v hosts_text '%s\n' "${new_lines[@]}"
 	write_file /etc/hosts "$hosts_text"
     fi
 
@@ -447,9 +492,9 @@ setup_network() {
 	fi
 
 	# Switch system resolver to use systemd-resolved.
-	if grep -q '^hosts:.*\<dns\>' /etc/nsswitch.conf; then
-	    sed -i -e 's/^\(hosts:.*\)\<dns\>/\1resolve/' /etc/nsswitch.conf
-	fi
+	#if grep -q '^hosts:.*\<dns\>' /etc/nsswitch.conf; then
+	#    sed -i -e 's/^\(hosts:.*\)\<dns\>/\1resolve/' /etc/nsswitch.conf
+	#fi
     fi
 
     dec_log_level
@@ -803,11 +848,11 @@ UseDomains=true
 }
 
 print_virtualbox_network() {
-    [[ ${#virt_net_ids[@]} -ne 0 ]] || \
-	err "virt_net_ids must be non-empty array under virtual box"
+    local -a virt_net_ids=()
+    add_virt_net_ids
     local -a addresses=()
     for i in "${virt_net_ids[@]}"; do
-	addresses+=("Address=192.168.95.$i/24")
+	addresses+=("Address=$virt_net_ipv4_prefix.$i/24")
 	addresses+=("Address=fda9:eefb:0a88:883f::$(printf %x "$i")/64")
     done
 
@@ -817,7 +862,7 @@ Name=eth1
 
 [Network]
 $(printf '%s\n' "${addresses[@]}")
-LLMNR=yes
+LLMNR=no
 "
     p_file '"$net_dir/9a-default.network"' "\
 [Network]
