@@ -334,8 +334,9 @@ Where=$dir
 }
 
 setup_grub() {
-    local key custom_grub_defaults edits grub_defaults_text grub_config
-    local -A config
+
+    let kind_fedora || return 0
+    
     log "Checking grub"
 
     local net_kernel_options=""
@@ -345,40 +346,53 @@ setup_grub() {
 	net_kernel_options=" net.ifnames=0"
     fi
 
-    config=(
-	[GRUB_DEFAULT]=saved
-	[GRUB_TIMEOUT]=1
-	[GRUB_CMDLINE_LINUX]="rhgb quiet LANG=en_US.UTF-8$net_kernel_options"
+    local -a config=(
+	GRUB_TIMEOUT 1
+	GRUB_DEFAULT saved
+	GRUB_CMDLINE_LINUX "rhgb quiet LANG=en_US.UTF-8$net_kernel_options"
     )
 
     if let with_disabled_disk_uuid; then
 	# Avoid UUID for VM security
 	config+=(
-	    [GRUB_DISABLE_LINUX_UUID]=true
+	    GRUB_DISABLE_LINUX_UUID true
 	)
     fi
 
-    custom_grub_defaults=""
-    for key in "${!config[@]}"; do
-	custom_grub_defaults+="$(printf '\n%s=%q' "$key" "${config[$key]}")"
+    local -A config_keys=()
+    local i
+    for ((i=0; i<${#config[@]}; i+=2)); do
+	config_keys[${config[$i]}]="$i"
     done
 
-    # Ensure stable order
-    custom_grub_defaults="$(sort <<< "$custom_grub_defaults")"
-
-    # delete all lines matching config keys and then append the proper values
-    edits=()
-    for key in "${!config[@]}"; do
-	edits+=(-e "/^$key/d")
+    # copy to new_lines only lines that do not match keys then append
+    # the proper key=value.
+    local -a lines new_lines=()
+    mapfile -t lines < /etc/default/grub
+    local line
+    for line in "${lines[@]}"; do
+	if [[ $line =~ ^[[:space:]]*([^=]+)= ]]; then
+	    local key="${BASH_REMATCH[1]}"
+	    if [[ ${config_keys[$key]-} ]]; then
+		continue
+	    fi
+	fi
+	new_lines+=("$line")
     done
-
-    grub_defaults_text="$(sed "${edits[@]}" /etc/default/grub)$custom_grub_defaults"
-
+    
+    for ((i=0; i<${#config[@]}; i+=2)); do
+	escape_for_shell "${config[$((i+1))]}"
+	new_lines+=("${config[$i]}=$R")
+    done
+    
+    local new_text
+    printf -v new_text '%s\n' "${new_lines[@]}"
+    
     grub_config=/boot/grub2/grub.cfg
     [[ -f "$grub_config" ]] || grub_config=/boot/efi/EFI/fedora/grub.cfg
     [[ -f "$grub_config" ]] || err "Failed to locate grub.cfg"
 
-    write_file /etc/default/grub "$grub_defaults_text"
+    write_file /etc/default/grub "$new_text"
     if let file_update; then
 	log "updating $grub_config"
 	grub2-mkconfig -o "$grub_config"
@@ -451,7 +465,7 @@ escape_for_shell() {
 	escaped="$escaped$before_quote'\"'\"'"
 	arg="${arg#*\'}"
     done
-    printf %s "'$escaped$arg'"
+    printf -v R %s "'$escaped$arg'"
 }
 
 start_generator_write() {
@@ -517,7 +531,8 @@ p_file() {
     fi
     local path="$1"
     local body="$2"
-    pl "> $path printf %s $(escape_for_shell "$body")"
+    escape_for_shell "$body"
+    pl "> $path printf %s $R"
     if let executable; then
 	pl "chmod 755 $path"
     fi
@@ -654,7 +669,8 @@ print_dserver_port_forwards() {
 	fi
     done
 
-    open_text+="> /run/tliset/close-ports printf %s $(escape_for_shell "$close_text")$NL"
+    escape_for_shell "$close_text"
+    open_text+="> /run/tliset/close-ports printf %s $R$NL"
     open_text+="chmod 755 /run/tliset/close-ports$NL"
     printf %s "$open_text"
 }
@@ -691,8 +707,9 @@ User=nobody
 Type=oneshot
 ExecStart=/run/tliset/dyndns-update
 "
+    escape_for_shell "$url"
     p_file -x '/run/tliset/dyndns-update' '#!/bin/sh
-s="$(/usr/bin/curl -s '"$(escape_for_shell "$url")"')"
+s="$(/usr/bin/curl -s $R)"
 printf "curl output: %s\n" "$s" 1>&2
 test OK = "$s"
 '
@@ -847,9 +864,13 @@ setup_kino_password() {
 	[[ $password ]] || err "password cannot be empty"
 	printf '%s\n' "$password" > $kino_password_file 
     fi
-    p_file -x "$(escape_for_shell "$ssh_kino_wrap")" "\
+    escape_for_shell "$ssh_kino_wrap"
+    local script_path="$R"
+    escape_for_shell "$kino_password_file"
+    local password_file="$R"
+    p_file -x "$script_path" "\
 #/bin/sh
-exec sshpass -f $(escape_for_shell "$kino_password_file") ssh \"\$@\"
+exec sshpass -f $password_file ssh \"\$@\"
 "
 }
 
@@ -1434,8 +1455,8 @@ fi
 if let kind_fedora; then
     setup_fstab
     setup_fedora_packages
-    setup_grub
 fi
+setup_grub
 if let with_zram; then
     setup_zram
 fi
