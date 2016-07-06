@@ -30,6 +30,7 @@ dserver_port_forwards=(
 
 hippyru_www_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIeBgbo19/jj/VDoX3nOybsmrbN95lIBeQYQv+FAOs/z"
 media_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILTrJnFcAg4qiYW8o8E0ieXc+hhnxc7ozAXlUAz1JHT6"
+dzetacon_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBGPGP6D7o3E3cl3gwx8Wa3XTAWOWeNAvcj2ZKY/OhbT"
 
 readonly autofs_ssh_known_hosts="/run/tliset/sshfs_known_hosts"
 
@@ -104,53 +105,85 @@ get_temp() {
     tmp_files+=("$tmp")
 }
 
-# mkdir -p -m mode path does not apply mode to the intermediate
-# directories it creates.
 ensure_dir() {
-    local mode=755 OPTIND opt dir
+    local OPTIND opt dir
+    local mode= group= user=
 
-    while getopts m: opt; do
+    while getopts :g:m:u: opt; do
 	case "$opt" in
+	    g ) user="$OPTARG";;
 	    m ) mode="$OPTARG";;
+	    u ) user="$OPTARG";;
 	    * ) err "bad ensure_dir usage";;
 	esac
     done
     shift $(($OPTIND - 1))
-    [[ $# -ge 1 ]] || err "ensure_dir - missing dir argument"
-    [[ $# -le 2 ]] || err "ensure_dir - too many arguments"
-    dir="$1"
-    if [[ ! -d "$dir" ]]; then
-	ensure_dir -m "$mode" "$(dirname "$dir")"
-	mkdir -m "$mode" "$dir"
+
+    if [[ -z $mode ]]; then
+	mode=0755
     fi
+    if [[ -z $user ]]; then
+	user=root
+    fi
+    if [[ -z $group ]]; then
+	group="$user"
+    fi
+
+    local dir
+    for dir in "$@"; do
+	if [[ ! -d $dir ]]; then
+	    [[ -e $dir || -h $dir ]] && err "$dir exists and is not a directory"
+	    cmd_log mkdir -m "$mode" "$dir"
+	else
+	    [[ -h $dir ]] && err "$dir exists and is a symbilic link, not a directory"
+	fi
+	local -a find_cmd=(
+	    find "$dir"
+	    -maxdepth 0
+	    -perm "$mode"
+	    -user "$user"
+	    -group "$group"
+	    -printf 1
+	)
+	local s
+	s="$("${find_cmd[@]}")"
+	if [[ -z $s ]]; then
+	    cmd_log chmod "$mode" "$dir"
+	    cmd_log chown "$user:$group" "$dir"
+	fi
+    done
 }
 
 file_update=0
 file_update_count=0
 
 write_file() {
-    local owner=root:root mode=644 log_message="updating %s"
-    local -i exec_cmd=0
+    local user= group= mode= log_message="updating %s" exec_cmd=
     local OPTIND opt path body dir
 
     file_update=0
-    while getopts el:m:o: opt; do
+    while getopts :eg:l:m:u: opt; do
 	case "$opt" in
-	    e ) let exec_cmd=1;;
+	    e ) exec_cmd=1;;
+	    g ) group="$OPTARG";;
 	    l ) log_message="$OPTARG";;
 	    m ) mode="$OPTARG";;
-	    o ) owner="$OPTARG";;
+	    u ) user="$OPTARG";;
 	    * ) err "bad write_file usage";;
 	esac
     done
 
     shift $(($OPTIND - 1))
     let "$#>=1" || err "write_file - missing path argument"
-    if let exec_cmd; then
+    if [[ $exec_cmd ]]; then
 	let "$#>=2" || err "write_file - -e option requires command argument"
     else
 	let "$#<=2" || err "write_file - too many arguments"
     fi
+
+    [[ $user ]] || user=root
+    [[ $group ]] || group=root
+    [[ $mode ]] || mode=0644
 
     path="$1"
     shift
@@ -158,7 +191,7 @@ write_file() {
     # Use base64 to support arbitrary binary data
     if let "$#==0"; then
 	body="$(base64 -w0)"
-    elif let exec_cmd; then
+    elif [[ $exec_cmd ]]; then
 	body="$("$@" | base64 -w0)"
     else
 	body="$(printf %s "$1" | base64 -w0)"
@@ -168,7 +201,9 @@ write_file() {
 	if [[ ! -f "$path" || -L "$path" ]]; then
 	    break;
 	fi
-	if [[ "$(stat -c %U:%G:%a "$path")" != "${owner}:${mode}" ]]; then
+	local s
+	s="$(find "$path" -maxdepth 0 -perm "$mode" -user "$user" -group "$group" -printf 1)"
+	if [[ -z $s ]]; then
 	    break;
 	fi
 
@@ -184,13 +219,11 @@ write_file() {
 	log "$(printf "$log_message" "$path")"
     fi
 
-    ensure_dir "$(dirname "$path")"
-
     # Use temporary to ensure atomic operation on filesystem
     get_temp "$path"
     base64 -d <<< "$body" > "$tmp"
     chmod "$mode" "$tmp"
-    chown "$owner" "$tmp"
+    chown "$user:$group" "$tmp"
     mv -f "$tmp" "$path"
 
     file_update=1

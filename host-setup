@@ -731,7 +731,7 @@ print_dyndns() {
 	[[ -t 1 ]] || err "cannot ask for /etc/duckdns.key value as input is not tty"
 	local api_key
 	IFS='' read -p 'Enter API key for www.duckdns.org: ' api_key
-	write_file -m 640 -o root:nobody /etc/duckdns.key "$api_key"
+	write_file -m 640 -u root -g nobody /etc/duckdns.key "$api_key"
     fi
     local key="$(< /etc/duckdns.key)"
     local url="https://www.duckdns.org/update?domains=dsrv&token=$key&ip="
@@ -1398,6 +1398,91 @@ EOF
     dec_log_level
 }
 
+setup_files() {
+    if let kind_coreos; then
+	case $NAME in
+	    bergenrabbit | hippyru | lubavainfo  )
+		ensure_dir /opt /opt/dpodctl "/opt/dpodctl/$NAME"
+		write_file "/opt/dpodctl/$NAME/config.dpod" "\
+ImageName $NAME
+"
+		;;
+	    thip ) setup_thip_files ;;
+	esac
+    fi
+}
+
+setup_thip_files() {
+    if [[ ! -d /vol/src ]]; then
+	log "/vol/src does not exist, rerun after it is mounted"
+    fi
+
+    local dir="/vol/src/build-dpod"
+    ensure_dir "$dir" 
+    local i j=0
+
+    # HostEnv lines for browser-thip with IP addresses of
+    # hippyru-related hosts.
+    local browser_thip_host_config=""
+
+    local -a virt_net_ids=()
+    add_virt_net_ids
+
+    # The order of services must match ip address usage.
+    for i in hippyru bergenrabbit lubavainfo transdock dzetacon browser-thip; do
+	ensure_dir "$dir/$i"
+	if [[ $j -lt ${#virt_net_ids[@]} ]]; then
+	    local ipv4="$virt_net_ipv4_prefix.${virt_net_ids[$j]}"
+	    : $((j+=1))
+	else
+	    local ipv4="$virt_net_ipv4_prefix.${virt_net_ids[0]}"
+	fi
+	local config="" uses_generator=1
+	case $i in
+	    transdock )
+		config+="\
+Include ../../$i/config.dpod
+AddHost boulder-mysql 127.0.0.1
+AddHost boulder-rabbitmq 127.0.0.1
+AddHost boulder 127.0.0.1
+AddHost test.media.mir2.org 127.0.0.1
+HostEnv TLS_HOST test.media.mir2.org
+HostEnv LETSENCRYPT_CA http://boulder:4000/directory
+HostEnv LETSENCRYPT_LICENSE http://boulder:4001/terms/v1
+BindAddress $ipv4
+"
+		;;
+	    browser-thip )
+		uses_generator=
+		config+="\
+IncludeBuildDir ../../hippyru-dock/tools/$i
+BindAddress $ipv4
+"
+		config+="$browset_thip_host_config"
+		;;
+	    dzetacon )
+		config+="\
+Include ../../$i/config.dpod
+"
+		;;
+	    * )
+		browset_thip_host_config+="\
+HostEnv ${i^^}_HOST $ipv4
+"
+		config+="\
+Include ../../hippyru-dock/$i/config.dpod
+BindAddress $ipv4
+"
+		;;
+	esac
+	write_file "$dir/$i/config.dpod" "$config"
+	if [[ $uses_generator ]]; then
+	    ensure_dir -u core -g core "$dir/$i/gen"
+	fi
+    done
+}
+
+
 . "$selfdir/zram-setup"
 
 show_usage=""
@@ -1530,6 +1615,7 @@ if let kind_fedora; then
     setup_users
 fi
 setup_services
+setup_files
 
 finish_generator_write
 log "Done."
