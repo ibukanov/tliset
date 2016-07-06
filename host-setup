@@ -935,6 +935,9 @@ setup_net_mounts() {
     if let with_hippyru_www_access; then
 	autofs_dirs+=(bergenrabbit hippyru lubavainfo)
     fi
+    if [[ $NAME == miranda ]]; then
+	autofs_dirs+=(dzetacon)
+    fi
 
     let ${#autofs_dirs[@]} || return 0
 
@@ -954,7 +957,7 @@ setup_net_mounts() {
 		host_key_alias=bergenrabbit-www
 		host_pubkey="$hippyru_www_pubkey"
 		keyfile=hippyru-www
-		remote_user=bergenrabbit
+		remote_user=user
 		remote_dir=/
 		;;
 	    hippyru )
@@ -963,7 +966,7 @@ setup_net_mounts() {
 		host_key_alias=hippyru-www
 		host_pubkey="$hippyru_www_pubkey"
 		keyfile=hippyru-www
-		remote_user=hippyru
+		remote_user=user
 		remote_dir=/
 		;;
 	    lubavainfo )
@@ -972,7 +975,7 @@ setup_net_mounts() {
 		host_key_alias=lubavainfo-www
 		host_pubkey="$hippyru_www_pubkey"
 		keyfile=hippyru-www
-		remote_user=lubavainfo
+		remote_user=user
 		remote_dir=/
 		;;
 	    kino )
@@ -986,6 +989,16 @@ setup_net_mounts() {
 		extra_opt="ssh_command=$ssh_kino_wrap"
 		extra_opt+=",max_readahead=1048576"
 		;;
+	    dzetacon )
+		host=thip
+		port=3022
+		host_key_alias=dzetacon
+		host_pubkey="$dzetacon_pubkey"
+		keyfile=dzetacon
+		remote_user=user
+		remote_dir=/home/user
+		;;
+	    * ) err "$dir"
 	esac
 
 	known_hosts+="$host_key_alias $host_pubkey$NL"
