@@ -42,7 +42,7 @@ get_host_options() {
 	    with_transgui=1
 	    with_kino_access=1
 	    with_hippyru_www_access=1
-	    with_enabled_sshd=0
+	    #with_enabled_sshd=1
 	    ;;
 	miranda )
 	    kind_fedora=1
@@ -173,6 +173,7 @@ setup_fedora_packages() {
 	    tigervnc
 	    strace
 	    policycoreutils-python-utils
+	    xclip
 
 	    # filesystems
 	    udftools inotify-tools fdupes fslint
@@ -226,7 +227,12 @@ setup_fedora_packages() {
 	fi
     fi
 
-    let with_latex && list+=(texlive)
+    let with_latex && list+=(
+	    texlive
+	    texlive-babel-norsk
+	    texlive-babel-russian
+	    texlive-collection-langcyrillic
+	)
     let with_transgui && list+=(transgui openssl-devel)
 
     if [[ -n "$virt" ]]; then
