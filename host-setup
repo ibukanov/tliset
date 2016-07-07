@@ -11,7 +11,6 @@ declare -i with_vol_storage=0
 declare -i with_zram=1
 declare -i with_networkd=0
 declare -i with_networkd_if_virt=0
-declare -i with_resolved=0
 declare -i with_dyndns=0
 declare -i with_kino_access=0
 declare -i with_latex=0
@@ -60,7 +59,6 @@ get_host_options() {
 	    kind_fedora=1
 	    with_common_fedora_packages=1
 	    with_networkd=1
-	    with_resolved=1
 	    with_kino_access=1
 	    with_transgui=1
 	    downloads_user=user
@@ -86,7 +84,6 @@ get_host_options() {
     esac
     if let kind_coreos; then
 	with_networkd=1
-	with_resolved=1
 	single_ssh_user=core
     fi
 }
@@ -473,7 +470,7 @@ setup_network() {
     fi
 
     if [[ ${#hosts[@]} -ne 0 ]]; then
-	local prefix_line="# auto-generated entries, do not edit after this line"
+	local prefix_line='# auto-generated entries, do not edit after this line'
 	local -A ipv4_map=()
 	local i
 	for ((i=0; i<${#hosts[@]}; i+=2)); do
@@ -483,7 +480,7 @@ setup_network() {
 	done
 	local -a lines new_lines=()
 	mapfile -t lines < /etc/hosts
-	
+
 	# remove old mappings for the address
 	local line
 	for line in "${lines[@]:+${lines[@]}}"; do
@@ -509,6 +506,21 @@ setup_network() {
 	write_file /etc/hosts "$hosts_text"
     fi
 
+    if let with_networkd; then
+	# networkd implies resolved
+	if [[ ! -L /etc/resolv.conf || \
+		    "$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
+	    cmd_log ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
+	fi
+
+	# For now do not switch glib resolver to use systemd-resolved
+	# to avoid differences between static and non-static builds.
+	#
+	#if grep -q '^hosts:.*\<dns\>' /etc/nsswitch.conf; then
+	#    sed -i -e 's/^\(hosts:.*\)\<dns\>/\1resolve/' /etc/nsswitch.conf
+	#fi
+    fi
+
     print_network
     if let with_dyndns; then
 	print_dyndns
@@ -520,18 +532,6 @@ setup_network() {
     case "$NAME" in
 	miranda ) install_miranda_network ;;
     esac
-
-    if let with_resolved; then
-	if [[ ! -L /etc/resolv.conf || \
-		    "$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
-	    cmd_log ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
-	fi
-
-	# Switch system resolver to use systemd-resolved.
-	#if grep -q '^hosts:.*\<dns\>' /etc/nsswitch.conf; then
-	#    sed -i -e 's/^\(hosts:.*\)\<dns\>/\1resolve/' /etc/nsswitch.conf
-	#fi
-    fi
 
     dec_log_level
 }
@@ -624,35 +624,28 @@ p_mask_service() {
 }
 
 print_network() {
-    if let with_networkd && let kind_fedora; then
-	multi_user_wants+=(systemd-networkd.service)
-	pl ''
-	pl 'mkdir -p "$1/sockets.target.d"'
-	p_file '"$1/sockets.target.d/tliset.conf"' "\
+    if let with_networkd; then
+	if let kind_fedora || let kind_ubuntu; then
+	    multi_user_wants+=(systemd-networkd.service systemd-resolved.service)
+	    pl ''
+	    pl 'mkdir -p "$1/sockets.target.d"'
+	    p_file '"$1/sockets.target.d/tliset.conf"' "\
 [Unit]
 Wants=systemd-networkd.socket
 "
-	# Mask all NetworkManager-related services
-	p_mask_service NetworkManager.service
-	p_mask_service NetworkManager-dispatcher.service
-	p_mask_service NetworkManager-wait-online.service
-	p_mask_service firewalld.service
-	p_mask_service dbus-org.fedoraproject.FirewallD1.service
+	    # Mask all NetworkManager-related services
+	    p_mask_service NetworkManager.service
+	    p_mask_service NetworkManager-dispatcher.service
+	    p_mask_service NetworkManager-wait-online.service
+	    p_mask_service firewalld.service
+	    p_mask_service dbus-org.fedoraproject.FirewallD1.service
 
-	# Make sure that system-supplied dnsmasq is masked
-	p_mask_service dnsmasq.service
-    fi
-    if let with_resolved; then
-	multi_user_wants+=(systemd-resolved.service)
-
-	# Trust Google to do DNS if no other DNS servers are known
-	pl ''
-	pl 'resolve_dir="$1/../resolved.conf.d"'
-	pl 'mkdir -p "$resolve_dir"'
-	p_file '"$resolve_dir/tliset.conf"' "\
-[Resolve]
-FallbackDNS=8.8.8.8 8.8.4.4 2001:4860:4860::8888 2001:4860:4860::8844
-"
+	    # Make sure that system-supplied dnsmasq is masked
+	    p_mask_service dnsmasq.service
+	fi
+    else
+	p_mask_service systemd-networkd.service
+	p_mask_service systemd-resolved.service
     fi
 
     if let with_networkd; then
@@ -907,7 +900,7 @@ LLMNR=no
 
 [DHCP]
 UseMTU=yes
-UseDNS=no
+UseDNS=yes
 "
 }
 
@@ -1628,7 +1621,6 @@ fi
 
 if let with_networkd_if_virt && [[ -n "$virt" ]]; then
     with_networkd=1
-    with_resolved=1
 fi
 
 if let kind_coreos && ! let with_enabled_sshd; then
