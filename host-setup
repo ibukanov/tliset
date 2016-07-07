@@ -4,8 +4,9 @@ source "$(dirname "$0")/lib.bash"
 
 valid_host_names=(miranda ultrabook untrusted bergenrabbit hippyru lubavainfo thip r2)
 
-declare -i kind_fedora=0
 declare -i kind_coreos=0
+declare -i kind_fedora=0
+declare -i kind_ubuntu=0
 declare -i with_vol_storage=0
 declare -i with_zram=1
 declare -i with_networkd=0
@@ -1236,9 +1237,34 @@ setup_sshd() {
     log "Checking sshd"
     inc_log_level
 
+    if [[ $single_ssh_user ]]; then
+	eval "local f=~$single_ssh_user/.ssh/authorized_keys"
+	if [[ ! -s $f ]]; then
+	    touch "$f"
+	    chmod 600 "$f"
+	    chown "$single_ssh_user:$single_ssh_user" "$f"
+	    err "$f does not exist or empty." \
+		"Add a public key there for $NAME access and try again."
+	fi
+    else
+	local f=/etc/ssh/authorized_keys/root
+	if [[ ! -e "$f" ]]; then
+	    touch "$f"
+	    chmod 640 "$f"
+	fi
+    fi
+
+    if let sshd_extra_listen_port && let kind_fedora; then
+	local re='^ssh_port_t\s\+tcp\s\+%s$'
+	if ! semanage port -l -C | grep -q "$(printf "$re" "$sshd_extra_listen_port")"; then
+	    cmd_log semanage port -a -t ssh_port_t -p tcp "$sshd_extra_listen_port"
+	fi
+    fi
+
     # Based on https://stribika.github.io/2015/01/04/secure-secure-shell.htlm
     local sshd_config="\
 UsePrivilegeSeparation sandbox
+PidFile none
 
 KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
 HostKey /etc/ssh/ssh_host_ed25519_key
@@ -1254,54 +1280,43 @@ PubkeyAuthentication yes
 PasswordAuthentication no
 ChallengeResponseAuthentication no
 "
-    if let kind_fedora; then
+    if let kind_fedora || let kind_ubuntu; then
 	sshd_config+="GSSAPIAuthentication no$NL"
 	sshd_config+="UsePAM yes$NL"
 	if [[ $NAME == ultrabook ]]; then
 	    sshd_config+="X11Forwarding yes$NL"
 	fi
-	if [[ -z "$single_ssh_user" ]]; then
-	    sshd_config+="AuthorizedKeysFile /etc/ssh/authorized_keys/%u$NL"
-	    local f=/etc/ssh/authorized_keys/root
-	    if [[ ! -e "$f" ]]; then
-		touch "$f"
-		chmod 640 "$f"
-	    fi
-	fi
     fi
 
-    if [[ -n $single_ssh_user ]]; then
+    if [[ $single_ssh_user ]]; then
 	sshd_config+="AllowUsers $single_ssh_user$NL"
-	eval "local f=~$single_ssh_user/.ssh/authorized_keys"
-	if [[ ! -s $f ]]; then
-	    touch "$f"
-	    chmod 600 "$f"
-	    chown "$single_ssh_user:$single_ssh_user" "$f"
-	    err "$f does not exist or empty." \
-		"Add a public key there for $NAME access and try again."
-	fi
-    fi
-    
-    write_file /etc/ssh/sshd_config "$sshd_config"
-
-    if let sshd_extra_listen_port && let kind_fedora; then
-	local re='^ssh_port_t\s\+tcp\s\+%s$'
-	if ! semanage port -l -C | grep -q "$(printf "$re" "$sshd_extra_listen_port")"; then
-	    cmd_log semanage port -a -t ssh_port_t -p tcp "$sshd_extra_listen_port"
-	fi
+    else
+	sshd_config+="AuthorizedKeysFile /etc/ssh/authorized_keys/%u$NL"
     fi
 
-    file_update_count=0
+    local sshd_config_path="/run/tliset/sshd_config"
+    p_file "$sshd_config_path" "$sshd_config"
     if let kind_fedora; then
-	ports=" -o Port=22"
-	if let sshd_extra_listen_port; then
-	    ports+=" -o Port=$sshd_extra_listen_port"
-	fi
+	pl "chcon -t etc_t $sshd_config_path"
+    fi
 
-	pl 'mkdir -p "$1/sshd.service.d/"'
-	p_file '"$1/sshd.service.d/tliset.conf"' "\
+    if let kind_fedora || let kind_ubuntu; then
+	local extra_sshd_options=""
+	if let sshd_extra_listen_port; then
+	    extra_sshd_options+=" -o Port=22 -o Port=$sshd_extra_listen_port"
+	fi
+	if let kind_fedora; then
+	    local service_name=sshd
+	else
+	    local service_name=ssh
+	fi
+	pl "mkdir -p \"\$1/$service_name.service.d/\""
+	p_file "\"\$1/$service_name.service.d/tliset.conf\"" "\
 [Service]
-Environment=\"OPTIONS=-e$ports\"
+Type=simple
+PIDFile=
+ExecStart=
+ExecStart=/usr/sbin/sshd -D -e -f $sshd_config_path$extra_sshd_options
 "
     elif let kind_coreos; then
 	if let sshd_extra_listen_port; then
@@ -1311,6 +1326,11 @@ Environment=\"OPTIONS=-e$ports\"
 ListenStream=$sshd_extra_listen_port
 "
 	fi
+	pl 'mkdir -p "$1/sshd@.service.d/"'
+	p_file '"$1/sshd@.service.d/tliset.conf"' "\
+[Service]
+Environment=\"OPTIONS=-f $sshd_config_path\"
+"
     fi
 
     if let with_enabled_sshd; then
