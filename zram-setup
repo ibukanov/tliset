@@ -29,8 +29,7 @@ EOF
 )"
 
     pl ''
-    p_file -x /run/tliset/zram-enable "$(cat <<'EOF'
-#!/bin/sh
+    p_file /run/tliset/zram-enable.sh "$(cat <<'EOF'
 set -e -u
 
 read ignore memtotal <<eof
@@ -46,18 +45,18 @@ fi
 device=/dev/zram0
 zramctl "$device" --size "$SWAP_SIZE" -t "$num_cpus"
 
-/usr/sbin/mkswap "$device"
-/usr/sbin/swapon -p 100 "$device"
+/sbin/mkswap "$device"
+/sbin/swapon -p 100 "$device"
 EOF
 )"
     
     pl ''
-    p_file -x /run/tliset/zram-disable "$(cat <<'EOF'
+    p_file /run/tliset/zram-disable.sh "$(cat <<'EOF'
 #!/bin/sh
 set -e -u
 
 if grep -q '^/dev/zram0\s' /proc/swaps; then
-    /usr/sbin/swapoff /dev/zram0
+    /sbin/swapoff /dev/zram0
     zramctl --reset /dev/zram0
 fi
 EOF
@@ -73,9 +72,9 @@ WantedBy=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/modprobe zram num_devices=1
-ExecStart=/run/tliset/zram-enable
-ExecStop=/run/tliset/zram-disable
+ExecStart=/sbin/modprobe zram num_devices=1
+ExecStart=/bin/sh /run/tliset/zram-enable.sh
+ExecStop=/bin/sh /run/tliset/zram-disable.sh
 RemainAfterExit=yes
 "
     multi_user_wants+=(tliset-zram.service)
