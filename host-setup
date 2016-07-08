@@ -17,6 +17,7 @@ declare -i with_latex=0
 declare -i with_transgui=0
 declare -i with_hippyru_www_access=0
 declare -i with_common_fedora_packages=0
+declare -i with_common_ubuntu_packages=0
 
 declare -i with_enabled_sshd=1
 declare -i sshd_extra_listen_port=0
@@ -77,8 +78,9 @@ get_host_options() {
 	    ;;
  	nicarnica )
 	    kind_ubuntu=1
-	    with_networkd_if_virt=1
 	    single_ssh_user=user
+	    with_networkd_if_virt=1
+	    with_common_ubuntu_packages=1
 	    ;;
 	* )
 	    err "unknown '$NAME'"
@@ -139,10 +141,19 @@ fixup_transgui() {
     fi
 }
 
-setup_fedora_packages() {
+setup_packages() {
+    let kind_fedora || let kind_ubuntu || return 0
+
     log "Checking packages"
     inc_log_level
+    let kind_fedora && setup_fedora_packages
+    let kind_ubuntu && setup_ubuntu_packages
+    dec_log_level
+    return 0
+}
 
+
+setup_fedora_packages() {
     if let with_common_fedora_packages; then
 	local rpmfusion_kinds=(
 	    free
@@ -292,14 +303,93 @@ setup_fedora_packages() {
     fi
 
     printf 'new-session\n' | write_file /etc/tmux.conf
+}
 
-    dec_log_level
+setup_ubuntu_packages() {
+    local -a install_list=() remove_list=()
+    install_list+=(
+	make make-doc gcc "linux-headers-$(uname -r)"
+	git git-man liberror-perl
+	emacs24 emacs24-el xterm xfonts-base
+	xtightvncviewer
+    )
+
+    if let with_common_ubuntu_packages; then
+	install_list+=(
+	    libreoffice
+	    gvfs-bin
+	)
+    fi
+    
+    if let with_networkd; then
+	remove_list+=(resolvconf)
+    else
+	install_list+=(resolvconf)
+    fi
+
+    local -A package_status_map=()
+
+    local -a apt_action_list=()
+    fill_apt_action_list install "${install_list[@]:+${install_list[@]}}"
+    if [[ ${#apt_action_list[@]} -ne 0 ]]; then
+	log "Installing missing packages"
+	DEBIAN_FRONTEND=noninteractive cmd_log apt-get install -y "${apt_action_list[@]}"
+    fi
+
+    local -a apt_action_list=()
+    fill_apt_action_list uninstall "${remove_list[@]:+${remove_list[@]}}"
+    if [[ ${#apt_action_list[@]} -ne 0 ]]; then
+	log "Purging unnecessary packages"
+	DEBIAN_FRONTEND=noninteractive apt-get purge -y "${apt_action_list[@]}"
+    fi
+}
+
+fill_apt_action_list() {
+    local action="$1"
+    shift
+
+    # Complication: for unknown packages dpkg-query reports an error,
+    # so parse both stdout and stderr.
+    local status_package_re='^#stdout ([^ ]+) ([^ ]+)$'
+    local unknown_package_message_re='^dpkg-query: no packages found matching ([^ ]+)$'
+    local output
+    output="$(dpkg-query -W --showformat '#stdout ${db:Status-Status} ${Package}\n' "$@"  2>&1 || :)"
+    if [[ $output ]]; then
+	local -a lines
+	mapfile -t lines <<< "$output"
+	local line
+	for line in "${lines[@]}"; do
+	    if [[ $line =~ $unknown_package_message_re ]]; then
+		local package="${BASH_REMATCH[1]}"
+		local status="unknown"
+	    elif [[ $line =~ $status_package_re ]]; then
+		local status="${BASH_REMATCH[1]}"
+		local package="${BASH_REMATCH[2]}"
+		package_status_map[$package]="$status"
+	    else
+		err "unexpected dpkg-query output: $line"
+	    fi
+	    if [[ $action == install ]]; then
+		if [[ $status == installed ]]; then
+		    continue
+		fi
+	    elif [[ $action == uninstall ]]; then
+		# purge both installed packages and packages with config-files
+		if [[ $status != installed && $status != config-files ]]; then
+		    continue
+		fi
+	    else
+		err "bad action: $action"
+	    fi
+	    apt_action_list+=("$package")
+	done
+    fi
 }
 
 remove_fstab_uuids() {
     log "Checking /etc/fstab"
     local fstab
-    IFS='' read -rd '' fstab < /etc/fstab 
+    IFS='' read -rd '' fstab < /etc/fstab
     local -a ids
     ids=($(egrep -o '^UUID=[A-Fa-f0-9-]+' <<< "$fstab" | cut -d= -f2 || true))
     if [[ ${#ids[@]} -ge 1 ]]; then
@@ -1665,8 +1755,8 @@ fi
 
 if let kind_fedora; then
     setup_fstab
-    setup_fedora_packages
 fi
+setup_packages
 setup_grub
 setup_sudo
 if let with_zram; then
