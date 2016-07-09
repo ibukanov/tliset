@@ -3,8 +3,8 @@
 setup_zram() {
     log "Checking zram"
 
-    pl ''
-    p_file -x /run/tliset/zram-status "$(cat <<'EOF'
+    p_nl
+    p_file -x top:/run/tliset/zram-status "$(cat <<'EOF'
 #!/bin/sh
 set -e -u
 
@@ -28,8 +28,8 @@ echo "comp_algorithm: $(cat $dir/comp_algorithm)"
 EOF
 )"
 
-    pl ''
-    p_file /run/tliset/zram-enable.sh "$(cat <<'EOF'
+    p_nl
+    p_file top:/run/tliset/zram-enable.sh "$(cat <<'EOF'
 set -e -u
 
 read ignore memtotal <<eof
@@ -50,8 +50,8 @@ zramctl "$device" --size "$SWAP_SIZE" -t "$num_cpus"
 EOF
 )"
     
-    pl ''
-    p_file /run/tliset/zram-disable.sh "$(cat <<'EOF'
+    p_nl
+    p_file top:/run/tliset/zram-disable.sh "$(cat <<'EOF'
 #!/bin/sh
 set -e -u
 
@@ -62,8 +62,8 @@ fi
 EOF
 )"
 
-    pl ''
-    p_file '"$1/tliset-zram.service"' "\
+    p_nl
+    p_file service:tliset-zram.service "\
 [Unit]
 Description=Service enabling RAM compression using zRam
 

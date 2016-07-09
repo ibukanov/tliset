@@ -32,8 +32,6 @@ hippyru_www_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIeBgbo19/jj/VDoX3nOybsm
 media_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILTrJnFcAg4qiYW8o8E0ieXc+hhnxc7ozAXlUAz1JHT6"
 dzetacon_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBGPGP6D7o3E3cl3gwx8Wa3XTAWOWeNAvcj2ZKY/OhbT"
 
-readonly autofs_ssh_known_hosts="/run/tliset/sshfs_known_hosts"
-
 readonly ssh_kino_wrap="/run/tliset/ssh_kino_wrap"
 readonly kino_password_file="/var/lib/tliset/kino_password"
 

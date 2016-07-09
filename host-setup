@@ -429,18 +429,18 @@ setup_fstab() {
 	if [[ ! -d "$dir" ]]; then
 	    # TODO find out why systemd does not create the dir
 	    # automatically.
-	    log "creating $dir"
-	    mkdir -m 0755 "$dir"
+	    cmd_log mkdir -m 0755 "$dir"
 	fi
 	if [[ -n "$virt" ]] ; then
-	    p_file "\$1/$unitname.mount" "\
+	    p_nl
+	    p_file "service:$unitname.mount" "\
 [Mount]
 Where=$dir
 Type=vboxsf
 What=Downloads
 Options=uid=$downloads_user,gid=$downloads_user,nosuid,nodev
 "
-	    p_file "\$1/$unitname.automount" "\
+	    p_file "service:$unitname.automount" "\
 [Automount]
 Where=$dir
 "
@@ -654,46 +654,49 @@ setup_network() {
 # Escape argument using single quotas with with each single quote in
 # arg replaced by '"'"'
 escape_for_shell() {
-    local arg="$1" escaped= before_quote
-    while : ; do
-	before_quote="${arg%%\'*}"
-	[[ $arg != "$before_quote" ]] || break
-	escaped="$escaped$before_quote'\"'\"'"
-	arg="${arg#*\'}"
-    done
-    printf -v R %s "'$escaped$arg'"
+    local arg="$1"
+    if [[ $arg =~ ^[-_./a-zA-Z0-9]+$ ]]; then
+	R="$arg"
+    else
+	local escaped=
+	while : ; do
+	    local before_quote="${arg%%\'*}"
+	    [[ $arg != "$before_quote" ]] || break
+	    escaped="$escaped$before_quote'\"'\"'"
+	    arg="${arg#*\'}"
+	done
+	printf -v R %s "'$escaped$arg'"
+    fi
 }
 
 start_generator_write() {
     multi_user_wants=()
     sockets_wants=()
-    gen_body=""
+    gen_body=()
+    gen_mkdir_list=()
 }
 
 print_wants_list() {
     local target="$1"
     shift
     let $# || return 0
-    pl ''
-    pl 'mkdir -p "$1/'"$target.d"'"'
+    p_nl
+    p_dir "service:$target.d"
     local i wants_body="[Unit]$NL"
     for i in "$@"; do
 	wants_body+="Wants=$i$NL"
     done
-    p_file '"$1/'"$target"'.d/tliset.conf"' "$wants_body"
-
+    p_file "service:$target.d/tliset.conf" "$wants_body"
 }
 
 finish_generator_write() {
-    [[ -n "$gen_body" ]] || let "${#multi_user_wants[@]} + ${#socket_wants[@]}" || return
-
+    p_dir top:/run/tliset
     print_wants_list multi-user.target "${multi_user_wants[@]:+${multi_user_wants[@]}}"
     print_wants_list sockets.target "${socket_wants[@]:+${socket_wants[@]}}"
-
-    local prefix=''
-    prefix+=$'#!/bin/sh\n'
+    
+    local script="#!/bin/sh$NL"
     if true; then
-	prefix+='
+	script+='
 if [[ -z "${TLISET_HAS_LOG-}" ]]; then
     export TLISET_HAS_LOG=1
     exec "$0" "$@" > /run/tliset.log 2>&1
@@ -702,50 +705,110 @@ date '+%Y-%m-%d_%H:%M:%S'
 set -x
 '
     fi
-    prefix+=$'set -u\n'
-    prefix+=$'mkdir -p /run/tliset\n'
+    script+="\
+set -u
+
+mkdir -p ${gen_mkdir_list[*]}
+"
+    if [[ ${#gen_body[@]} -ne 0 ]]; then
+	local gen_body_txt
+	printf -v gen_body_txt '%s\n' "${gen_body[@]}"
+	script+="$gen_body_txt"
+    fi
 
     ensure_dir /etc/systemd/system-generators
-    write_file -m 755 /etc/systemd/system-generators/tliset "$prefix$gen_body"
+    write_file -m 755 /etc/systemd/system-generators/tliset "$script"
     if let file_update; then
 	cmd_log systemctl daemon-reload
     fi
 }
 
-pl() {
-    gen_body+="$1$NL"
+p_add_raw() {
+    gen_body+=("$1")
 }
 
-# The first argument is path already properly quoted to read as single
-# word in a shell. The second argument is text that should be written
-# into the file at that path. Option -x indicattes that file must be
-# executable.
+p_nl() {
+    p_add_raw ''
+}
+
+# The first argument is <kind>:<subpath> where kind specifies
+# directory kind and subpath is a file path. The second argument is
+# text that should be written into the file at that path. Option -x
+# indicattes that file must be executable.
 p_file() {
     local -i executable=0
     if [[ "$1" == "-x" ]]; then
 	shift
 	executable=1
     fi
-    local path="$1"
+    local file_kind_and_path="$1"
     local body="$2"
+    conert_shell_kind_path "$file_kind_and_path"
+    local escaped_path="$R"
     escape_for_shell "$body"
-    pl "> $path printf %s $R"
+    p_add_raw "> $escaped_path printf %s $R"
     if let executable; then
-	pl "chmod 755 $path"
+	p_add_raw "chmod 755 $escaped_path"
     fi
 }
 
+p_dir() {
+    local dir="$1"
+    conert_shell_kind_path "$dir"
+    gen_mkdir_list+=("$R")
+}
+
+p_cmd() {
+    local s="" arg
+    for arg in "$@"; do
+	if [[ $arg == *:* ]]; then
+	    conert_shell_kind_path "$arg"
+	else
+	    escape_for_shell "$arg"
+	fi
+	s+="${s:+ }$R"
+    done
+    p_add_raw "$s"
+}
+
+conert_shell_kind_path() {
+    local file_kind_and_path="$1"
+    local file_kind="${file_kind_and_path%%:*}"
+    [[ $file_kind != $file_kind_and_path ]] || err "the argument must start with <kind>: prefix"
+    local file_path="${file_kind_and_path#*:}"
+    local dir absolute=0
+    case "$file_kind" in
+	service ) dir='"$1"' ;;
+	net ) dir='"$1"/../network' ;;
+	top ) dir="" ; absolute=1 ;;
+	* ) err "Unknown dir_kind $dir_kind" ;;
+    esac
+    if let absolute; then
+	[[ $file_path =~ ^/. ]] || err "$file_kind must come with absolute path: $file_kind_and_path"
+    else
+	if [[ $file_path == '' ]]; then
+	    R="$dir"
+	    return 0
+	fi
+	[[ $file_path =~ ^[^/] ]] || \
+	    err "$file_kind must come with relative path: $file_kind_and_path"
+	dir+="/"
+    fi
+    escape_for_shell "$file_path"
+    R="$dir$R"
+}
+
 p_mask_service() {
-    pl "ln -s /dev/null \"\$1/$1\""
+    p_cmd ln -s /dev/null "service:$1"
 }
 
 print_network() {
     if let with_networkd; then
 	if let kind_fedora || let kind_ubuntu; then
 	    multi_user_wants+=(systemd-networkd.service systemd-resolved.service)
-	    pl ''
-	    pl 'mkdir -p "$1/sockets.target.d"'
-	    p_file '"$1/sockets.target.d/tliset.conf"' "\
+	    p_nl
+	    p_dir service:sockets.target.d
+	    p_file service:sockets.target.d/tliset.conf "\
 [Unit]
 Wants=systemd-networkd.socket
 "
@@ -765,12 +828,11 @@ Wants=systemd-networkd.socket
     fi
 
     if let with_networkd; then
-	pl ''
-	pl 'net_dir="$1/../network"'
-	pl 'mkdir -p "$net_dir"'
+	p_nl
+	p_dir net:
 
 	if let kind_fedora; then
-	    pl 'chcon -t etc_t "$net_dir"'
+	    p_cmd chcon -t etc_t net:
 	fi
 
 	if [[ $NAME == dserver ]]; then
@@ -788,11 +850,11 @@ Wants=systemd-networkd.socket
 }
 
 print_dserver_network_files() {
-    pl ''
+    p_nl
 
     # Generate setup to allow for VMs that are accessible from the
     # lan. Use macvlan, not bridge, for beter efficiency.
-    p_file '"$net_dir/80-macvlan.netdev"' "\
+    p_file net:0-macvlan.netdev "\
 [NetDev]
 Name=$dserver_bridge
 Kind=macvlan
@@ -800,14 +862,14 @@ Kind=macvlan
 Mode=bridge
 "
 
-    p_file '"$net_dir/80-lan.network"' "\
+    p_file net:80-lan.network "\
 [Match]
 MACAddress=80:ee:73:76:8f:4c
 [Network]
 MACVLAN=$dserver_bridge
 "
 
-    p_file '"$net_dir/80-macvlan.network"' "\
+    p_file net:80-macvlan.network "\
 [Match]
 Name=$dserver_bridge
 [Network]
@@ -816,8 +878,8 @@ DHCP=ipv4
 
     # Print port forwarding initialization service and its scripts
     if false; then
-	pl ''
-	p_file '"$1/tliset-forward-ports.service"' "\
+	p_nl
+	p_file service:tliset-forward-ports.service "\
 [Unit]
 After=network-online.target
 
@@ -828,9 +890,9 @@ ExecStart=/run/tliset/open-ports
 ExecStop=/bin/sh /run/tliset/close-ports
 "
 
-	pl 'mkdir -p "$1/network-online.target.wants"'
-	pl 'ln -s "$1/tliset-forward-ports.service" "$1/network-online.target.wants"'
-	p_file -x '/run/tliset/open-ports' "$(print_dserver_port_forwards)"
+	p_dir service:network-online.target.wants
+	p_cmd ln -s service:tliset-forward-ports.service service:network-online.target.wants
+	p_file -x top:/run/tliset/open-ports "$(print_dserver_port_forwards)"
     fi
 }
 
@@ -876,8 +938,8 @@ print_dyndns() {
     local url="https://www.duckdns.org/update?domains=dsrv&token=$key&ip="
 
     multi_user_wants+=(tliset-dyndns.timer)
-    pl ''
-    p_file '"$1/tliset-dyndns.timer"' "\
+    p_nl
+    p_file service:tliset-dyndns.timer "\
 [Unit]
 After=network-online.target
 Wants=network-online.target
@@ -887,7 +949,7 @@ Persistent=true
 # Each 10 minutes
 OnCalendar=*:0/10
 "
-    p_file '"$1/tliset-dyndns.service"' "\
+    p_file service:tliset-dyndns.service "\
 [Unit]
 After=network-online.target
 Wants=network-online.target
@@ -895,10 +957,10 @@ Wants=network-online.target
 [Service]
 User=nobody
 Type=oneshot
-ExecStart=/run/tliset/dyndns-update
+ExecStart=/bin/sh -c /run/tliset/dyndns-update.sh
 "
     escape_for_shell "$url"
-    p_file -x '/run/tliset/dyndns-update' '#!/bin/sh
+    p_file top:/run/tliset/dyndns-update.sh '
 s="$(/usr/bin/curl -s $R)"
 printf "curl output: %s\n" "$s" 1>&2
 test OK = "$s"
@@ -957,8 +1019,8 @@ EOF
 
     multi_user_wants+=(tliset-dnsmasq.service)
 
-    pl ''
-    p_file '"$1/tliset-dnsmasq.service"' "\
+    p_nl
+    p_file service:tliset-dnsmasq.service "\
 [Unit]
 After=network.target
 
@@ -968,7 +1030,7 @@ ExecStart=/usr/sbin/dnsmasq -k --conf-file=/dev/null$s
 }
 
 print_fedora_networkd_files() {
-    p_file '"$net_dir/zz-default.network"' "\
+    p_file net:zz-default.network "\
 [Network]
 DHCP=ipv4
 
@@ -979,7 +1041,7 @@ UseDomains=true
 }
 
 print_r2_default_net() {
-    p_file '"$net_dir/zz-default.network"' "\
+    p_file net:zz-default.network "\
 [Network]
 DHCP=ipv4
 
@@ -1001,7 +1063,7 @@ print_virtualbox_network() {
 	addresses+=("Address=fda9:eefb:0a88:883f::$(printf %x "$i")/64")
     done
 
-    p_file '"$net_dir/99-link-local.network"' "\
+    p_file net:99-link-local.network "\
 [Match]
 Name=eth1
 
@@ -1009,7 +1071,7 @@ Name=eth1
 $(printf '%s\n' "${addresses[@]}")
 LLMNR=no
 "
-    p_file '"$net_dir/9a-default.network"' "\
+    p_file net:9a-default.network "\
 [Network]
 DHCP=yes
 LLMNR=no
@@ -1054,11 +1116,9 @@ setup_kino_password() {
 	[[ $password ]] || err "password cannot be empty"
 	printf '%s\n' "$password" > $kino_password_file
     fi
-    escape_for_shell "$ssh_kino_wrap"
-    local script_path="$R"
     escape_for_shell "$kino_password_file"
     local password_file="$R"
-    p_file -x "$script_path" "\
+    p_file -x "top:$ssh_kino_wrap" "\
 #/bin/sh
 exec sshpass -f $password_file ssh \"\$@\"
 "
@@ -1078,11 +1138,12 @@ setup_net_mounts() {
 	autofs_dirs+=(dzetacon)
     fi
 
-    let ${#autofs_dirs[@]} || return 0
+    [[ ${#autofs_dirs[@]} -ne 0 ]] || return 0
 
+    local autofs_ssh_known_hosts=/run/tliset/sshfs_known_hosts
     local mount_root=/run/tliset/set
 
-    pl "mkdir -p ${autofs_dirs[*]/#/$mount_root/}"
+    p_dir ${autofs_dirs[*]/#/top:$mount_root/}
 
     local s="" dir host host_key_alias host_pubkey port keyfile remote_user remote_dir
     local -A host_set=()
@@ -1174,7 +1235,7 @@ setup_net_mounts() {
 
 	local mount_dir="$mount_root/$dir"
 	local unitname="$(systemd-escape -p "$mount_dir")"
-	p_file "\$1/$(printf %q "$unitname.mount")" "\
+	p_file "service:$unitname.mount" "\
 [Mount]
 Where=$mount_dir
 Type=fuse.sshfs
@@ -1183,7 +1244,7 @@ Options=$opt
 "
 	# Using TimeoutIdleSec leads to a hung after network is
 	# recovered after first successful mount.
-	p_file "\$1/$(printf %q "$unitname.automount")" "\
+	p_file "service:$unitname.automount" "\
 [Automount]
 Where=$mount_dir
 #TimeoutIdleSec=30
@@ -1191,8 +1252,8 @@ Where=$mount_dir
         multi_user_wants+=("$unitname.automount")
     done
 
-    pl ''
-    p_file "$autofs_ssh_known_hosts" "$known_hosts"
+    p_nl
+    p_file "top:$autofs_ssh_known_hosts" "$known_hosts"
 
     if [[ ! -h /set || "$(readlink /set)" != "$mount_root" ]]; then
 	cmd_log rm -f /set
@@ -1213,7 +1274,7 @@ setup_hippyru_backup() {
     [[ $hippyru_backup_time =~ ^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$ ]] || \
 	err "Invalid backup time spec in hippyru_backup_time - '$hippyru_backup_time'"
 
-    p_file '$1/tliset-hippyru-backup.timer' "\
+    p_file service:tliset-hippyru-backup.timer "\
 [Unit]
 After=network-online.target
 Wants=network-online.target
@@ -1222,7 +1283,7 @@ Wants=network-online.target
 Persistent=true
 OnCalendar=$hippyru_backup_time
 "
-    p_file '$1/tliset-hippyru-backup.service' "\
+    p_file service:tliset-hippyru-backup.service "\
 [Unit]
 After=network-online.target
 Wants=network-online.target
@@ -1335,7 +1396,7 @@ fi
 
 '
 
-    p_file -x '/run/tliset/hippyru-backup' "$s"
+    p_file -x top:/run/tliset/hippyru-backup "$s"
 
     if let kind_fedora; then
 	setsebool rsync_client 1
@@ -1404,9 +1465,10 @@ ChallengeResponseAuthentication no
     fi
 
     local sshd_config_path="/run/tliset/sshd_config"
-    p_file "$sshd_config_path" "$sshd_config"
+    p_nl
+    p_file "top:$sshd_config_path" "$sshd_config"
     if let kind_fedora; then
-	pl "chcon -t etc_t $sshd_config_path"
+	p_cmd chcon -t etc_t "top:$sshd_config_path"
     fi
 
     if let kind_fedora || let kind_ubuntu; then
@@ -1419,8 +1481,8 @@ ChallengeResponseAuthentication no
 	else
 	    local service_name=ssh
 	fi
-	pl "mkdir -p \"\$1/$service_name.service.d/\""
-	p_file "\"\$1/$service_name.service.d/tliset.conf\"" "\
+	p_dir "service:$service_name.service.d"
+	p_file "service:$service_name.service.d/tliset.conf" "\
 [Service]
 Type=simple
 PIDFile=
@@ -1429,14 +1491,14 @@ ExecStart=/usr/sbin/sshd -D -e -f $sshd_config_path$extra_sshd_options
 "
     elif let kind_coreos; then
 	if let sshd_extra_listen_port; then
-	    pl 'mkdir -p "$1/sshd.socket.d/"'
-	    p_file '"$1/sshd.socket.d/tliset.conf"' "\
+	    p_dir service:sshd.socket.d
+	    p_file service:sshd.socket.d/tliset.conf "\
 [Socket]
 ListenStream=$sshd_extra_listen_port
 "
 	fi
-	pl 'mkdir -p "$1/sshd@.service.d/"'
-	p_file '"$1/sshd@.service.d/tliset.conf"' "\
+	p_dir service:sshd@.service.d
+	p_file service:sshd@.service.d/tliset.conf "\
 [Service]
 Environment=\"OPTIONS=-f $sshd_config_path\"
 "
@@ -1496,8 +1558,8 @@ setup_services() {
 
     if let kind_coreos; then
 	# Ignore system and user configs
-	p_mask_service system-cloudinit@.servive
-	p_mask_service user-cloudinit@.servive
+	#p_mask_service system-cloudinit@.service
+	#p_mask_service user-cloudinit@.service
 
 	# On CoreOS docker is socket-activated by default which breaks
 	# restarting containers on boot unless a docker client runs
@@ -1505,7 +1567,7 @@ setup_services() {
     fi
 
     if let with_vol_storage; then
-	p_file -x '/run/tliset/mount-vol' "$(cat <<'EOF'
+	p_file -x top:/run/tliset/mount-vol "$(cat <<'EOF'
 #!/bin/sh
 set -e -u
 mkdir -p /vol
@@ -1537,14 +1599,13 @@ fi
 mount --bind /vol/docker /var/lib/docker
 EOF
 )"
-	p_file -x '"$1/tliset-mount-vol.service"' "$(cat <<'EOF'
+	p_file service:tliset-mount-vol.service "\
 [Unit]
 Before=docker.service
 [Service]
 Type=oneshot
 ExecStart=/run/tliset/mount-vol
-EOF
-)"
+"
 	multi_user_wants+=(tliset-mount-vol.service)
     fi
 
