@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/lib.bash"
 
-valid_host_names=(miranda ultrabook untrusted bergenrabbit hippyru lubavainfo thip r2 nicarnica)
+valid_host_names=(miranda ultrabook untrusted bergenrabbit hippyru lubavainfo thip r2 nicarnica titan)
 
 declare -i kind_coreos=0
 declare -i kind_fedora=0
@@ -55,6 +55,13 @@ get_host_options() {
 	    with_hippyru_www_access=1
 	    with_kino_access=1
 	    downloads_user=igor
+	    ;;
+	titan )
+	    kind_fedora=1
+	    with_networkd_if_virt=1
+	    with_common_fedora_packages=1
+	    with_latex=1
+	    with_enabled_sshd=0
 	    ;;
 	untrusted )
 	    kind_fedora=1
