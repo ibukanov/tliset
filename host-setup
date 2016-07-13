@@ -35,6 +35,11 @@ declare -i with_dnsmasq=0
 
 readonly virt_net_ipv4_prefix="192.168.95"
 
+readonly gen_self_dir=/tun/tliset
+readonly gen_scripts="$gen_self_dir"
+readonly gen_config="$gen_self_dir"
+readonly gen_mount="$gen_self_dir/set"
+
 get_host_options() {
     case "$NAME" in
 	ultrabook )
@@ -697,7 +702,7 @@ print_wants_list() {
 }
 
 finish_generator_write() {
-    p_dir top:/run/tliset
+    p_dir scripts:
     print_wants_list multi-user.target "${multi_user_wants[@]:+${multi_user_wants[@]}}"
     print_wants_list sockets.target "${socket_wants[@]:+${socket_wants[@]}}"
     
@@ -787,6 +792,9 @@ conert_shell_kind_path() {
     case "$file_kind" in
 	service ) dir='"$1"' ;;
 	net ) dir='"$1"/../network' ;;
+	config ) dir="$gen_config" ;;
+	mount ) dir="$gen_mount" ;;
+	scripts ) dir="$gen_scripts" ;;
 	top ) dir="" ; absolute=1 ;;
 	* ) err "Unknown dir_kind $dir_kind" ;;
     esac
@@ -893,13 +901,13 @@ After=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=true
-ExecStart=/run/tliset/open-ports
-ExecStop=/bin/sh /run/tliset/close-ports
+ExecStart=/bin/sh $gen_scripts/open-ports.sh
+ExecStop=/bin/sh $gen_scripts/close-ports.sh
 "
 
 	p_dir service:network-online.target.wants
 	p_cmd ln -s service:tliset-forward-ports.service service:network-online.target.wants
-	p_file -x top:/run/tliset/open-ports "$(print_dserver_port_forwards)"
+	p_file scripts:open-ports.sh "$(print_dserver_port_forwards)"
     fi
 }
 
@@ -929,8 +937,7 @@ print_dserver_port_forwards() {
     done
 
     escape_for_shell "$close_text"
-    open_text+="> /run/tliset/close-ports printf %s $R$NL"
-    open_text+="chmod 755 /run/tliset/close-ports$NL"
+    open_text+="> $gen_scripts/close-ports.sh printf %s $R$NL"
     printf %s "$open_text"
 }
 
@@ -964,10 +971,10 @@ Wants=network-online.target
 [Service]
 User=nobody
 Type=oneshot
-ExecStart=/bin/sh -c /run/tliset/dyndns-update.sh
+ExecStart=/bin/sh -c $gen_scripts/dyndns-update.sh
 "
     escape_for_shell "$url"
-    p_file top:/run/tliset/dyndns-update.sh '
+    p_file scripts:dyndns-update.sh '
 s="$(/usr/bin/curl -s $R)"
 printf "curl output: %s\n" "$s" 1>&2
 test OK = "$s"
@@ -1147,10 +1154,7 @@ setup_net_mounts() {
 
     [[ ${#autofs_dirs[@]} -ne 0 ]] || return 0
 
-    local autofs_ssh_known_hosts=/run/tliset/sshfs_known_hosts
-    local mount_root=/run/tliset/set
-
-    p_dir ${autofs_dirs[*]/#/top:$mount_root/}
+    p_dir ${autofs_dirs[*]/#/mount:}
 
     local s="" dir host host_key_alias host_pubkey port keyfile remote_user remote_dir
     local -A host_set=()
@@ -1230,7 +1234,7 @@ setup_net_mounts() {
 	opt+=",MACs=umac-128@openssh.com"
 	opt+=",StrictHostKeyChecking=yes"
 	opt+=",HostKeyAlias=$host_key_alias"
-	opt+=",UserKnownHostsFile=$autofs_ssh_known_hosts"
+	opt+=",UserKnownHostsFile=$gen_config/sshfs_known_hosts"
 	opt+=",ControlPath=none"
 	if [[ $keyfile ]]; then
 	    local ssh_key_file=
@@ -1240,7 +1244,7 @@ setup_net_mounts() {
 	opt+=",uid=$(id -u "$local_user"),gid=$(id -g "$local_user")"
 	opt+="${extra_opt:+,}$extra_opt"
 
-	local mount_dir="$mount_root/$dir"
+	local mount_dir="$gen_mount/$dir"
 	local unitname="$(systemd-escape -p "$mount_dir")"
 	p_file "service:$unitname.mount" "\
 [Mount]
@@ -1260,11 +1264,11 @@ Where=$mount_dir
     done
 
     p_nl
-    p_file "top:$autofs_ssh_known_hosts" "$known_hosts"
+    p_file config:sshfs_known_hosts "$known_hosts"
 
-    if [[ ! -h /set || "$(readlink /set)" != "$mount_root" ]]; then
+    if [[ ! -h /set || "$(readlink /set)" != "$gen_mount" ]]; then
 	cmd_log rm -f /set
-	cmd_log ln -s "$mount_root" /set
+	cmd_log ln -s "$gen_mount" /set
     fi
 }
 
@@ -1296,7 +1300,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/run/tliset/hippyru-backup
+ExecStart=/bin/bash $gen_scripts/hippyru-backup.bash
 StandardError=journal
 StandardOutput=journal
 Type=oneshot
@@ -1403,7 +1407,7 @@ fi
 
 '
 
-    p_file -x top:/run/tliset/hippyru-backup "$s"
+    p_file scripts:hippyru-backup.bash "$s"
 
     if let kind_fedora; then
 	setsebool rsync_client 1
@@ -1473,9 +1477,9 @@ ChallengeResponseAuthentication no
 
     local sshd_config_path="/run/tliset/sshd_config"
     p_nl
-    p_file "top:$sshd_config_path" "$sshd_config"
+    p_file config:sshd_config "$sshd_config"
     if let kind_fedora; then
-	p_cmd chcon -t etc_t "top:$sshd_config_path"
+	p_cmd chcon -t etc_t config:sshd_config
     fi
 
     if let kind_fedora || let kind_ubuntu; then
@@ -1494,7 +1498,7 @@ ChallengeResponseAuthentication no
 Type=simple
 PIDFile=
 ExecStart=
-ExecStart=/usr/sbin/sshd -D -e -f $sshd_config_path$extra_sshd_options
+ExecStart=/usr/sbin/sshd -D -e -f $gen_config/sshd_config$extra_sshd_options
 "
     elif let kind_coreos; then
 	if let sshd_extra_listen_port; then
@@ -1574,7 +1578,7 @@ setup_services() {
     fi
 
     if let with_vol_storage; then
-	p_file -x top:/run/tliset/mount-vol "$(cat <<'EOF'
+	p_file scripts:mount-vol.sh "$(cat <<'EOF'
 #!/bin/sh
 set -e -u
 mkdir -p /vol
@@ -1611,7 +1615,7 @@ EOF
 Before=docker.service
 [Service]
 Type=oneshot
-ExecStart=/run/tliset/mount-vol
+ExecStart=/bin/sh $gen_scripts/mount-vol.sh
 "
 	multi_user_wants+=(tliset-mount-vol.service)
     fi
