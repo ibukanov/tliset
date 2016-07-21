@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/lib.bash"
 
-valid_host_names=(miranda ultrabook untrusted bergenrabbit hippyru lubavainfo thip r2 nicarnica titan)
+valid_host_names=(miranda ultrabook untrusted bergenrabbit hippyru lubavainfo thip r2 nicarnica rhea)
 
 declare -i kind_coreos=0
 declare -i kind_fedora=0
@@ -17,6 +17,7 @@ declare -i with_latex=0
 declare -i with_transgui=0
 declare -i with_hippyru_www_access=0
 declare -i with_common_fedora_packages=0
+declare -i with_include_rpmfusion=1
 declare -i with_common_ubuntu_packages=0
 
 declare -i with_enabled_sshd=1
@@ -61,13 +62,6 @@ get_host_options() {
 	    with_kino_access=1
 	    downloads_user=igor
 	    ;;
-	titan )
-	    kind_fedora=1
-	    with_networkd_if_virt=1
-	    with_common_fedora_packages=1
-	    with_latex=1
-	    with_enabled_sshd=0
-	    ;;
 	untrusted )
 	    kind_fedora=1
 	    with_common_fedora_packages=1
@@ -94,6 +88,11 @@ get_host_options() {
 	    with_networkd_if_virt=1
 	    with_common_ubuntu_packages=1
 	    ;;
+        rhea )
+            kind_ubuntu=1
+            single_ssh_user=igor
+            with_common_ubuntu_packages=1
+            ;;
 	* )
 	    err "unknown '$NAME'"
 	    ;;
@@ -139,6 +138,23 @@ is_valid_host_name() {
     return 1;
 }
 
+setup_etc_hostname() {
+    local current_hostname
+    if [[ -f /etc/hostname ]]; then
+	IFS='' read current_hostname < /etc/hostname
+    fi
+    if [[ -z $current_hostname || \
+	      $current_hostname == localhost || \
+	      $current_hostname == localhost.localdomain ]]; then
+	log "setting /etc/hostname to $NAME"
+	printf '%s\n' "$NAME" > /etc/hostname
+    else
+	[[ "$NAME" == "$current_hostname" ]] || \
+	    err "Already setup as $current_hostname." \
+		"To force either remove /etc/hostname or put localhost there"
+    fi
+}
+
 fixup_transgui() {
     local path=/usr/share/applications/transgui.desktop
     local line='MimeType=application/x-bittorrent;x-scheme-handler/magnet;'
@@ -166,7 +182,7 @@ setup_packages() {
 
 
 setup_fedora_packages() {
-    if let with_common_fedora_packages; then
+    if let with_common_fedora_packages && let with_include_rpmfusion; then
 	local rpmfusion_kinds=(
 	    free
 	    nonfree
@@ -202,9 +218,6 @@ setup_fedora_packages() {
 	    # filesystems
 	    udftools inotify-tools fdupes fslint
 
-	    # Archives
-	    unrar libunrar
-
 	    # encryption and backup
 	    apg duplicity perl-Digest-Bcrypt python-gdata
 
@@ -218,22 +231,32 @@ setup_fedora_packages() {
 	    pdfmerge poppler-utils
 
 	    # Media
-	    kdenlive
-	    ffmpeg
-	    vlc gimp inkscape gthumb
+	    gimp inkscape gthumb
 	    scribus
 	    evince evince-djvu pdf2djvu
 	    linux-libertine-biolinum-fonts linux-libertine-fonts
-	    gstreamer1-libav
-	    gstreamer1-plugins-bad-free
-	    gstreamer1-plugins-bad-free-extras
-	    gstreamer1-plugins-bad-freeworld
 	    gstreamer1-plugins-good-extras
-	    gstreamer1-plugins-ugly
 
 	    # Languages
 	    hunspell-ru hunspell-nb
 	)
+
+	if let with_include_rpmfusion; then
+	    list+=(
+		# Archives
+		unrar libunrar
+
+		# Media
+		vlc
+		kdenlive
+		ffmpeg
+		gstreamer1-libav
+		gstreamer1-plugins-bad-free
+		gstreamer1-plugins-bad-free-extras
+		gstreamer1-plugins-bad-freeworld
+		gstreamer1-plugins-ugly
+	    )
+	fi
 
 	if [[ -z "$virt" ]]; then
 	    list+=(
@@ -320,7 +343,7 @@ setup_fedora_packages() {
 setup_ubuntu_packages() {
     local -a install_list=() remove_list=()
     install_list+=(
-	make make-doc gcc "linux-headers-$(uname -r)"
+	make make-doc gcc g++ "linux-headers-$(uname -r)"
 	git git-man liberror-perl
 	emacs24 emacs24-el xterm xfonts-base
 	xtightvncviewer
@@ -332,7 +355,7 @@ setup_ubuntu_packages() {
 	    gvfs-bin
 	)
     fi
-    
+
     if let with_networkd; then
 	remove_list+=(resolvconf)
     else
@@ -351,7 +374,7 @@ setup_ubuntu_packages() {
     local -a apt_action_list=()
     fill_apt_action_list uninstall "${remove_list[@]:+${remove_list[@]}}"
     if [[ ${#apt_action_list[@]} -ne 0 ]]; then
-	log "Purging unnecessary packages"
+	log "Purging unnecessary packages ${remove_list[*]}"
 	DEBIAN_FRONTEND=noninteractive apt-get purge -y "${apt_action_list[@]}"
     fi
 }
@@ -359,13 +382,14 @@ setup_ubuntu_packages() {
 fill_apt_action_list() {
     local action="$1"
     shift
+    [[ $# -ne 0 ]] || return 0
 
     # Complication: for unknown packages dpkg-query reports an error,
     # so parse both stdout and stderr.
-    local status_package_re='^#stdout ([^ ]+) ([^ ]+)$'
+    local status_package_re='^#stdout ([^ ]+)  ([^ ]+)$'
     local unknown_package_message_re='^dpkg-query: no packages found matching ([^ ]+)$'
     local output
-    output="$(dpkg-query -W --showformat '#stdout ${db:Status-Status} ${Package}\n' "$@"  2>&1 || :)"
+    output="$(dpkg-query -W --showformat '#stdout ${db:Status-Abbrev} ${Package}\n' "$@"  2>&1 || :)"
     if [[ $output ]]; then
 	local -a lines
 	mapfile -t lines <<< "$output"
@@ -377,6 +401,11 @@ fill_apt_action_list() {
 	    elif [[ $line =~ $status_package_re ]]; then
 		local status="${BASH_REMATCH[1]}"
 		local package="${BASH_REMATCH[2]}"
+		case $status in
+		    ii ) status=installed ;;
+		    un ) status=uninstalled ;;
+		    * ) err "unexpected dpkg-query status '$status': $line" ;;
+		esac
 		package_status_map[$package]="$status"
 	    else
 		err "unexpected dpkg-query output: $line"
@@ -546,7 +575,7 @@ setup_grub() {
 
 setup_sudo() {
     let kind_fedora || let kind_ubuntu || return 0
-    [[ $virt ]] || return 0
+    [[ $virt || $single_ssh_user ]] || return 0
 
     if let kind_fedora; then
 	local sudo_with_password_re='^%wheel[[:space:]]+ALL=\(ALL\)[[:space:]]+ALL$'
@@ -702,10 +731,11 @@ print_wants_list() {
 }
 
 finish_generator_write() {
+    let has_systemd || return 0
     p_dir scripts:
     print_wants_list multi-user.target "${multi_user_wants[@]:+${multi_user_wants[@]}}"
     print_wants_list sockets.target "${socket_wants[@]:+${socket_wants[@]}}"
-    
+
     local script="#!/bin/sh$NL"
     if true; then
 	script+='
@@ -1419,17 +1449,17 @@ setup_sshd() {
     inc_log_level
 
     if [[ $single_ssh_user ]]; then
-	eval "local f=~$single_ssh_user/.ssh/authorized_keys"
-	if [[ ! -s $f ]]; then
-	    touch "$f"
-	    chmod 600 "$f"
-	    chown "$single_ssh_user:$single_ssh_user" "$f"
-	    err "$f does not exist or empty." \
-		"Add a public key there for $NAME access and try again."
+        eval "local user_dir=~$single_ssh_user"
+ 	local f="$user_dir/.ssh/authorized_keys"
+	if [[ ! -f $f ]]; then
+            ensure_dir -m 0700 -g "$single_ssh_user" -u "$single_ssh_user" "${f%/*}"
+            write_file -m 0660 -g "$single_ssh_user" -u "$single_ssh_user" "$f" ""
 	fi
     else
+	ensure_dir /etc/ssh/authorized_keys
 	local f=/etc/ssh/authorized_keys/root
 	if [[ ! -e "$f" ]]; then
+            mkdir -p
 	    touch "$f"
 	    chmod 640 "$f"
 	fi
@@ -1775,18 +1805,21 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exec sudo "$0" "$@"
 fi
 
-if [[ -f /etc/hostname ]]; then
-    IFS='' read current_hostname < /etc/hostname
-    if is_valid_host_name "$current_hostname" && [ "$NAME" != "$current_hostname" ]; then
-	err "Already setup as $current_hostname. To force put localhost into /etc/hostname"
-    fi
+setup_etc_hostname
+
+if which systemctl 2> /dev/null 1>&2; then
+    readonly has_systemd=1
 else
-    echo "$NAME" > /etc/hostname
+    readonly has_systemd=0
 fi
 
-virt="$(systemd-detect-virt -v || true)"
-if [[ "$virt" == none ]]; then
+if ! let has_systemd; then
     virt=""
+else
+    virt="$(systemd-detect-virt -v || true)"
+    if [[ "$virt" == none ]]; then
+        virt=""
+    fi
 fi
 
 if [[ "$virt" == kvm ]]; then
