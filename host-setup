@@ -2,7 +2,9 @@
 
 source "$(dirname "$0")/lib.bash"
 
-valid_host_names=(miranda ultrabook untrusted bergenrabbit hippyru lubavainfo thip r2 nicarnica rhea)
+#set -x
+
+valid_host_names=(miranda untrusted bergenrabbit hippyru lubavainfo thip r2 nicarnica)
 
 declare -i kind_coreos=0
 declare -i kind_fedora=0
@@ -12,13 +14,11 @@ declare -i with_zram=1
 declare -i with_networkd=0
 declare -i with_networkd_if_virt=0
 declare -i with_dyndns=0
-declare -i with_kino_access=0
 declare -i with_latex=0
 declare -i with_transgui=0
-declare -i with_hippyru_www_access=0
-declare -i with_common_fedora_packages=0
+declare -i with_common_packages=0
+declare -i with_nicarnica_packages=0
 declare -i with_include_rpmfusion=1
-declare -i with_common_ubuntu_packages=0
 
 declare -i with_enabled_sshd=1
 declare -i sshd_extra_listen_port=0
@@ -36,37 +36,26 @@ declare -i with_dnsmasq=0
 
 readonly virt_net_ipv4_prefix="192.168.95"
 
-readonly gen_self_dir=/tun/tliset
+readonly gen_self_dir="/run/tliset"
 readonly gen_scripts="$gen_self_dir"
 readonly gen_config="$gen_self_dir"
 readonly gen_mount="$gen_self_dir/set"
 
 get_host_options() {
     case "$NAME" in
-	ultrabook )
-	    kind_fedora=1
-	    with_common_fedora_packages=1
-	    with_transgui=1
-	    with_kino_access=1
-	    with_hippyru_www_access=1
-	    #with_enabled_sshd=1
-	    ;;
 	miranda )
-	    kind_fedora=1
+	    kind_ubuntu=1
 	    with_networkd_if_virt=1
-	    with_common_fedora_packages=1
+	    with_common_packages=1
 	    with_latex=1
 	    with_enabled_sshd=0
 	    sshd_extra_listen_port=19022
-	    with_hippyru_www_access=1
-	    with_kino_access=1
-	    downloads_user=igor
+	    downloads_user=user
 	    ;;
 	untrusted )
-	    kind_fedora=1
-	    with_common_fedora_packages=1
+	    kind_ubuntu=1
+	    with_common_packages=1
 	    with_networkd=1
-	    with_kino_access=1
 	    with_transgui=1
 	    downloads_user=user
 	    single_ssh_user=user
@@ -86,13 +75,9 @@ get_host_options() {
 	    kind_ubuntu=1
 	    single_ssh_user=user
 	    with_networkd_if_virt=1
-	    with_common_ubuntu_packages=1
+	    with_common_packages=1
+	    with_nicarnica_packages=1
 	    ;;
-        rhea )
-            kind_ubuntu=1
-            single_ssh_user=igor
-            with_common_ubuntu_packages=1
-            ;;
 	* )
 	    err "unknown '$NAME'"
 	    ;;
@@ -127,7 +112,6 @@ add_virt_net_ids() {
     err "$NAME is not on the $virt_net_host_info list"
 }
 
-
 is_valid_host_name() {
     local name="$1" i
     for i in "${valid_host_names[@]}"; do
@@ -138,20 +122,34 @@ is_valid_host_name() {
     return 1;
 }
 
-setup_etc_hostname() {
-    local current_hostname
-    if [[ -f /etc/hostname ]]; then
-	IFS='' read current_hostname < /etc/hostname
+read_hostname() {
+    if [[ -z ${hostnamectl_available+1} ]]; then
+	declare -g hostnamectl_available="$(type -p hostnamectl)"
     fi
-    if [[ -z $current_hostname || \
-	      $current_hostname == localhost || \
-	      $current_hostname == localhost.localdomain ]]; then
-	log "setting /etc/hostname to $NAME"
-	printf '%s\n' "$NAME" > /etc/hostname
+    if [[ $hostnamectl_available ]]; then
+	R="$(hostnamectl status --static)"
+    elif [[ -f /etc/hostname ]]; then
+	IFS='' read R < /etc/hostname
     else
-	[[ "$NAME" == "$current_hostname" ]] || \
-	    err "Already setup as $current_hostname." \
-		"To force either remove /etc/hostname or put localhost there"
+	R=""
+    fi
+}
+
+setup_hostname() {
+    read_hostname
+    local current="$R"
+    if [[ $current == "$NAME" ]]; then
+	return 0
+    fi
+    if [[ -z $current ]] || ! is_valid_host_name "$current"; then
+	log "setting hostname to $NAME"
+	if [[ $hostnamectl_available ]]; then
+	    hostnamectl set-hostname "$NAME" 
+	else
+	    printf '%s\n' "$NAME" > /etc/hostname
+	fi
+    else
+	err "Already setup as $current."
     fi
 }
 
@@ -182,7 +180,7 @@ setup_packages() {
 
 
 setup_fedora_packages() {
-    if let with_common_fedora_packages && let with_include_rpmfusion; then
+    if let with_common_packages && let with_include_rpmfusion; then
 	local rpmfusion_kinds=(
 	    free
 	    nonfree
@@ -202,10 +200,10 @@ setup_fedora_packages() {
 	fi
     fi
     local list=()
-    if let with_common_fedora_packages; then
+    if let with_common_packages; then
 	list+=(
 	    tmux xfce4-terminal
-	    git fuse-sshfs sshpass lsyncd
+	    git sshpass lsyncd
 	    quilt mercurial subversion
 	    livecd-tools
 	    autoconf automake gcc-c++ kernel-devel
@@ -343,16 +341,19 @@ setup_fedora_packages() {
 setup_ubuntu_packages() {
     local -a install_list=() remove_list=()
     install_list+=(
-	make make-doc gcc g++ "linux-headers-$(uname -r)"
+	build-essential make-doc gcc g++ pkgconf
 	git git-man liberror-perl
 	emacs24 emacs24-el xterm xfonts-base
-	xtightvncviewer
+	xtightvncviewer xclip
+	lsyncd apg apt-file libdigest-bcrypt-perl duplicity
     )
 
-    if let with_common_ubuntu_packages; then
+    if let with_common_packages; then
 	install_list+=(
 	    libreoffice
 	    gvfs-bin
+	    libglib2.0-dev
+	    libgnome-keyring-dev
 	)
     fi
 
@@ -360,6 +361,34 @@ setup_ubuntu_packages() {
 	remove_list+=(resolvconf)
     else
 	install_list+=(resolvconf)
+    fi
+
+    let with_transgui && install_list+=(transgui)
+    remove_list+=(transmission-common)
+
+    if let with_latex; then
+	install_list+=(
+	    texlive
+	    texlive-lang-cyrillic
+	    texlive-lang-european
+	)
+    fi
+
+    if let with_nicarnica_packages; then
+	install_list+=(
+	    python3-pip
+	    ldc
+	    libqtgui4
+	    libwxgtk3.0-dev
+	    liblapack3
+	    libcrypto++-dev
+	)
+    fi
+
+    if [[ $virt ]]; then
+	remove_list+=(
+	    xfce4-power-manager
+	)
     fi
 
     local -A package_status_map=()
@@ -456,6 +485,8 @@ remove_fstab_uuids() {
 }
 
 setup_fstab() {
+    let kind_fedora || let kind_ubuntu || return 0
+    
     log "Checking fstab"
     local fstab ids edits id disk
     inc_log_level
@@ -507,8 +538,8 @@ setup_grub() {
     fi
 
     local -a config=(
-	GRUB_TIMEOUT 0
-	GRUB_HIDDEN_TIMEOUT 1
+	GRUB_TIMEOUT 2
+	GRUB_HIDDEN_TIMEOUT ""
 	GRUB_DEFAULT saved
     )
 
@@ -1168,140 +1199,6 @@ exec sshpass -f $password_file ssh \"\$@\"
 "
 }
 
-setup_net_mounts() {
-
-    local -a autofs_dirs=()
-    if let with_kino_access; then
-	autofs_dirs+=(kino)
-	setup_kino_password
-    fi
-    if let with_hippyru_www_access; then
-	autofs_dirs+=(bergenrabbit hippyru lubavainfo)
-    fi
-    if [[ $NAME == miranda ]]; then
-	autofs_dirs+=(dzetacon)
-    fi
-
-    [[ ${#autofs_dirs[@]} -ne 0 ]] || return 0
-
-    p_dir ${autofs_dirs[*]/#/mount:}
-
-    local s="" dir host host_key_alias host_pubkey port keyfile remote_user remote_dir
-    local -A host_set=()
-    local known_hosts=""
-    for dir in "${autofs_dirs[@]}"; do
-	local extra_opt=""
-	case "$dir" in
-	    bergenrabbit )
-		host=bergenrabbit.net
-		port=2022
-		host_key_alias=bergenrabbit-www
-		host_pubkey="$hippyru_www_pubkey"
-		keyfile=hippyru-www
-		remote_user=user
-		remote_dir=/
-		;;
-	    hippyru )
-		host=hippyru.net
-		port=2022
-		host_key_alias=hippyru-www
-		host_pubkey="$hippyru_www_pubkey"
-		keyfile=hippyru-www
-		remote_user=user
-		remote_dir=/
-		;;
-	    lubavainfo )
-		host=lubava.info
-		port=2022
-		host_key_alias=lubavainfo-www
-		host_pubkey="$hippyru_www_pubkey"
-		keyfile=hippyru-www
-		remote_user=user
-		remote_dir=/
-		;;
-	    kino )
-		host=media.mir2.org
-		port=9092
-		host_key_alias=kino
-		host_pubkey="$media_pubkey"
-		keyfile=
-		remote_user=user
-		remote_dir=/files
-		extra_opt="ssh_command=$ssh_kino_wrap"
-		extra_opt+=",max_readahead=1048576"
-		;;
-	    dzetacon )
-		host=thip
-		port=3022
-		host_key_alias=dzetacon
-		host_pubkey="$dzetacon_pubkey"
-		keyfile=dzetacon
-		remote_user=user
-		remote_dir=/home/user
-		;;
-	    * ) err "$dir"
-	esac
-
-	known_hosts+="$host_key_alias $host_pubkey$NL"
-
-	host_set[$host]=1
-
-	local local_user
-	case "$NAME" in
-	    miranda ) local_user=igor ;;
-	    ultrabook ) local_user=lubava ;;
-	    untrusted ) local_user=user ;;
-	esac
-
-	local opt=""
-	opt+="rw,nodev,nosuid,noatime,allow_other,nonempty"
-	opt+=",max_read=65536,reconnect,intr"
-	opt+=",workaround=all,transform_symlinks,follow_symlinks"
-	opt+=",ServerAliveInterval=5,ServerAliveCountMax=2"
-	opt+=",CheckHostIP=no"
-	opt+=",Port=$port"
-	opt+=",Ciphers=aes128-gcm@openssh.com"
-	opt+=",MACs=umac-128@openssh.com"
-	opt+=",StrictHostKeyChecking=yes"
-	opt+=",HostKeyAlias=$host_key_alias"
-	opt+=",UserKnownHostsFile=$gen_config/sshfs_known_hosts"
-	opt+=",ControlPath=none"
-	if [[ $keyfile ]]; then
-	    local ssh_key_file=
-	    ensure_root_ssh_key "$keyfile"
-	    opt+=",IdentityFile=$ssh_key_file"
-	fi
-	opt+=",uid=$(id -u "$local_user"),gid=$(id -g "$local_user")"
-	opt+="${extra_opt:+,}$extra_opt"
-
-	local mount_dir="$gen_mount/$dir"
-	local unitname="$(systemd-escape -p "$mount_dir")"
-	p_file "service:$unitname.mount" "\
-[Mount]
-Where=$mount_dir
-Type=fuse.sshfs
-What=$remote_user@$host:$remote_dir
-Options=$opt
-"
-	# Using TimeoutIdleSec leads to a hung after network is
-	# recovered after first successful mount.
-	p_file "service:$unitname.automount" "\
-[Automount]
-Where=$mount_dir
-#TimeoutIdleSec=30
-"
-        multi_user_wants+=("$unitname.automount")
-    done
-
-    p_nl
-    p_file config:sshfs_known_hosts "$known_hosts"
-
-    if [[ ! -h /set || "$(readlink /set)" != "$gen_mount" ]]; then
-	cmd_log rm -f /set
-	cmd_log ln -s "$gen_mount" /set
-    fi
-}
-
 setup_hippyru_backup() {
     [[ $hippyru_backup_time || $NAME == thip ]] || return 0
 
@@ -1415,7 +1312,7 @@ backup_from_host() {
 echo "Backing up hippyru-dock source"
 src_top="$backup_root/src"
 if [[ ! -d $src_top ]]; then
-    mkdir "$src_top"
+    mkdir -p "$src_top"
 fi
 
 src_dir="$src_top/hippyru-dock"
@@ -1453,13 +1350,12 @@ setup_sshd() {
  	local f="$user_dir/.ssh/authorized_keys"
 	if [[ ! -f $f ]]; then
             ensure_dir -m 0700 -g "$single_ssh_user" -u "$single_ssh_user" "${f%/*}"
-            write_file -m 0660 -g "$single_ssh_user" -u "$single_ssh_user" "$f" ""
+            write_file -m 0600 -g "$single_ssh_user" -u "$single_ssh_user" "$f" ""
 	fi
     else
 	ensure_dir /etc/ssh/authorized_keys
 	local f=/etc/ssh/authorized_keys/root
 	if [[ ! -e "$f" ]]; then
-            mkdir -p
 	    touch "$f"
 	    chmod 640 "$f"
 	fi
@@ -1494,9 +1390,6 @@ ChallengeResponseAuthentication no
     if let kind_fedora || let kind_ubuntu; then
 	sshd_config+="GSSAPIAuthentication no$NL"
 	sshd_config+="UsePAM yes$NL"
-	if [[ $NAME == ultrabook ]]; then
-	    sshd_config+="X11Forwarding yes$NL"
-	fi
     fi
 
     if [[ $single_ssh_user ]]; then
@@ -1541,7 +1434,8 @@ ListenStream=$sshd_extra_listen_port
 	p_dir service:sshd@.service.d
 	p_file service:sshd@.service.d/tliset.conf "\
 [Service]
-Environment=\"OPTIONS=-f $sshd_config_path\"
+ExecStart=
+ExecStart=-/usr/sbin/sshd -i -f $sshd_config_path
 "
     fi
 
@@ -1551,10 +1445,8 @@ Environment=\"OPTIONS=-f $sshd_config_path\"
 	    multi_user_wants+=(sshd.service)
 	fi
     else
-	if systemctl -q is-enabled sshd; then
-	    log "disabling sshd"
-	    systemctl disable sshd
-	fi
+	p_mask_service sshd.service
+	p_mask_service sshd.socket	
     fi
 
     dec_log_level
@@ -1573,14 +1465,8 @@ add_user() {
 setup_users() {
     log "Checking users"
     inc_log_level
-    if [[ "$NAME" == ultrabook || "$NAME" == miranda ]]; then
-	add_user lubava 1978
-    fi
     if [[ "$NAME" == miranda ]]; then
-	add_user igor 1973
-	if ! getent group vboxsf >/dev/null ; then
-	    cmd_log usermod -a -G vboxsf igor
-	fi
+	add_user lubava 1978
     fi
     dec_log_level
 }
@@ -1588,8 +1474,6 @@ setup_users() {
 setup_services() {
     log "Checking services"
     inc_log_level
-
-    setup_net_mounts
 
     setup_hippyru_backup
 
@@ -1662,6 +1546,14 @@ setup_files() {
 ImageName $NAME
 "
 		;;
+	    r2 )
+		ensure_dir /opt /opt/dpodctl "/opt/dpodctl/transdock"
+		write_file "/opt/dpodctl/transdock/config.dpod" "\
+ImageName local/transdock
+HostEnv TLS_HOST media.mir2.org
+HostEnv ACME_CONTACT mailto:igor@mir2.org
+"
+		;;
 	    thip ) setup_thip_files ;;
 	esac
     fi
@@ -1700,10 +1592,11 @@ Include ../../$i/config.dpod
 AddHost boulder-mysql 127.0.0.1
 AddHost boulder-rabbitmq 127.0.0.1
 AddHost boulder 127.0.0.1
+AddHost boulder-hsm 127.0.0.1
 AddHost test.media.mir2.org 127.0.0.1
 HostEnv TLS_HOST test.media.mir2.org
-HostEnv LETSENCRYPT_CA http://boulder:4000/directory
-HostEnv LETSENCRYPT_LICENSE http://boulder:4001/terms/v1
+HostEnv ACME_CA http://boulder:4000/directory
+HostEnv ACME_CONTACT mailto:igor@mir2.org
 BindAddress $ipv4
 "
 		;;
@@ -1781,7 +1674,8 @@ fi
 if [[ -n "$remote" ]]; then
     NAME=$remote
 elif [[ -z "$NAME" ]]; then
-    IFS='' read NAME < /etc/hostname
+    read_hostname
+    NAME="$R"
     if ! is_valid_host_name "$NAME"; then
 	err "The content of /etc/hostname is '$NAME' is not a supported name." \
 	    "Use -n option to set the hostname explicitly."
@@ -1805,7 +1699,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exec sudo "$0" "$@"
 fi
 
-setup_etc_hostname
+setup_hostname
 
 if which systemctl 2> /dev/null 1>&2; then
     readonly has_systemd=1
@@ -1858,9 +1752,7 @@ if [[ ! -d /var/lib/tliset ]]; then
     mkdir -p -m 755 /var/lib/tliset
 fi
 
-if let kind_fedora; then
-    setup_fstab
-fi
+setup_fstab
 setup_packages
 setup_grub
 setup_sudo
