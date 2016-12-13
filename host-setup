@@ -12,7 +12,7 @@ declare -i kind_ubuntu=0
 
 declare -i with_vol_storage=0
 declare -i with_zram=1
-declare -i with_zswap=1
+declare -i with_zswap=0
 declare -i with_networkd=0
 declare -i with_networkd_if_virt=0
 declare -i with_dyndns=0
@@ -98,7 +98,10 @@ get_host_options() {
 	    with_networkd_if_virt=1
 	    with_common_packages=1
 	    with_nicarnica_packages=1
+	    with_zram=0
+            with_zswap=1
 	    downloads_user=user
+	    with_docker=1
 	    ;;
 	* )
 	    err "unknown '$NAME'"
@@ -142,7 +145,17 @@ determine_os() {
 		fi
 	    done
 	} < /etc/lsb-release
-	    
+    fi
+    if [[ -z $os_kind && -f /etc/os-release ]]; then
+        local line
+        {
+            while IFS='' read -r line; do
+                if [[ $line =~ ^ID=(.*)$ ]]; then
+                    os_kind="${BASH_REMATCH[1]}"
+                    break;
+                fi
+            done
+        } < /etc/os-release
     fi
 
     case "${os_kind,,}" in
@@ -252,7 +265,7 @@ setup_fedora_packages() {
 	    tigervnc
 	    strace
 	    policycoreutils-python-utils
-	    xclip
+	    xclip xorg-x11-apps
 
 	    # filesystems
 	    udftools inotify-tools fdupes fslint
@@ -1374,18 +1387,23 @@ setup_services() {
 	p_add_raw 'printf 1 > /sys/module/zswap/parameters/enabled || :'
     fi
 
-    if let kind_fedora; then
+    if let kind_fedora && ! let with_docker; then
 	p_mask_service docker.service
+    fi
+
+    if let with_docker; then
+	# Make sure that docker starts. On CoreOS docker is
+	# socket-activated by default which breaks restarting
+	# containers on boot unless a docker client runs
+	multi_user_wants+=(docker.service)
+
     fi
 
     if let kind_coreos; then
 	# Ignore system and user configs
 	#p_mask_service system-cloudinit@.service
 	#p_mask_service user-cloudinit@.service
-
-	# On CoreOS docker is socket-activated by default which breaks
-	# restarting containers on boot unless a docker client runs
-	multi_user_wants+=(docker.service)
+	:
     fi
 
     if let with_vol_storage; then
