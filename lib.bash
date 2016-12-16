@@ -152,6 +152,29 @@ ensure_dir() {
     done
 }
 
+ensure_symlink() {
+    local target="$1"
+    local link_dir="$2"
+    [[ $target ]] || err "link target cannot be empty"
+    [[ -d "$link_dir" ]] || err "link directory $link_dir does not exist or is not a directory"
+    
+    local link_name="${3-}"
+    if [[ -z $link_name ]]; then
+	link_name="${target##*/}"
+    fi
+    local link_location="$link_dir/$link_name"
+    if [[ -h "$link_location" ]]; then
+	local current_target
+	current_target="$(readlink -n "$link_location")"
+	[[ $current_target == "$target" ]] && return
+    fi
+    if [[ -d "$link_location" ]]; then
+	cmd_log rmdir "$link_location" || \
+	    err "remove symbolic link location $link_location manually and run again"
+    fi
+    cmd_log ln -sfT "$target" "$link_location"
+}
+
 file_update=0
 file_update_count=0
 

@@ -256,7 +256,7 @@ setup_fedora_packages() {
     local list=()
     if let with_common_packages; then
 	list+=(
-	    tmux xfce4-terminal
+	    tmux
 	    git sshpass lsyncd
 	    quilt mercurial subversion
 	    livecd-tools
@@ -266,6 +266,9 @@ setup_fedora_packages() {
 	    strace
 	    policycoreutils-python-utils
 	    xclip xorg-x11-apps
+	    xpra
+	    xorg-x11-server-Xephyr
+	    libXScrnSaver
 
 	    # filesystems
 	    udftools inotify-tools fdupes fslint
@@ -405,6 +408,9 @@ setup_ubuntu_packages() {
 	    libglib2.0-dev
 	    libgnome-keyring-dev
 	    ffmpeg
+	    firejail
+	    xpra
+	    xephyr
 	)
     fi
 
@@ -552,18 +558,17 @@ setup_fstab() {
     dec_log_level
 }
 
-setup_mounts() {
+setup_dir_and_mounts() {
     
     if [[ $downloads_user ]]; then
 	local dirname=downloads
 	local dir="/$dirname"
-	local unitname="$dirname"
-	if [[ ! -d "$dir" ]]; then
-	    # TODO find out why systemd does not create the dir
-	    # automatically.
-	    cmd_log mkdir -m 0755 "$dir"
+	ensure_dir -u "$downloads_user" -g "$downloads_user" "$dir"
+	if [[ -d /home/$downloads_user ]]; then
+	    ensure_symlink "$dir" "/home/$downloads_user" Downloads
 	fi
 	if [[ -n "$virt" ]] ; then
+	    local unitname="$dirname"
 	    p_nl
 	    p_file "service:$unitname.mount" "\
 [Mount]
@@ -587,6 +592,13 @@ Where=$dir
 [Swap]
 What=$swap_device
 "
+    fi
+
+    if let with_docker; then
+	if [[ -d /area/extra ]]; then
+	    ensure_dir -m 711 /area/extra/docker
+	    ensure_symlink /area/extra/docker /var/lib
+	fi
     fi
 }
 
@@ -1698,7 +1710,7 @@ if [[ ! -d /var/lib/tliset ]]; then
 fi
 
 setup_fstab
-setup_mounts
+setup_dir_and_mounts
 setup_packages
 setup_grub
 setup_sudo
