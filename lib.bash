@@ -107,11 +107,12 @@ ensure_dir() {
     local OPTIND opt dir
     local mode= group= user=
 
-    while getopts :g:m:u: opt; do
+    while getopts :g:m:u:P opt; do
 	case "$opt" in
 	    g ) user="$OPTARG";;
 	    m ) mode="$OPTARG";;
 	    u ) user="$OPTARG";;
+	    P ) user="$primary_user" group="$primary_group" ;;
 	    * ) err "bad ensure_dir usage";;
 	esac
     done
@@ -183,13 +184,14 @@ write_file() {
     local OPTIND opt path body dir
 
     file_update=0
-    while getopts :eg:l:m:u: opt; do
+    while getopts :eg:l:m:u:P opt; do
 	case "$opt" in
 	    e ) exec_cmd=1;;
 	    g ) group="$OPTARG";;
 	    l ) log_message="$OPTARG";;
 	    m ) mode="$OPTARG";;
 	    u ) user="$OPTARG";;
+	    P ) user="$primary_user" group="$primary_group" ;;
 	    * ) err "bad write_file usage";;
 	esac
     done

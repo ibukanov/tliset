@@ -21,6 +21,7 @@ declare -i with_transgui=0
 declare -i with_common_packages=0
 declare -i with_nicarnica_packages=0
 declare -i with_include_rpmfusion=1
+declare -i with_slash_downlods=0
 
 declare -i with_enabled_sshd=1
 declare -i sshd_extra_listen_port=0
@@ -34,8 +35,11 @@ declare swap_device=
 
 declare hippyru_backup_time=
 
-declare single_ssh_user=
-declare downloads_user=
+declare ssh_login_user=
+
+# These 2 are deduced automatically
+declare primary_user=
+declare primary_group=
 
 declare extra_system_users=()
 
@@ -48,6 +52,7 @@ declare -i with_disabled_disk_uuid=0
 declare -i with_dnsmasq=0
 
 readonly virt_net_ipv4_prefix="192.168.95"
+readonly dev_docker_network_prefix="192.168.96"
 
 readonly gen_self_dir="/run/tliset"
 readonly gen_scripts="$gen_self_dir"
@@ -68,39 +73,40 @@ get_host_options() {
 	    with_latex=1
 	    with_enabled_sshd=0
 	    sshd_extra_listen_port=19022
-	    downloads_user=user
-	    add_system_user lubava 1978
+	    with_slash_downlods=1
 	    with_zram=0
 	    with_zswap=1
+	    with_docker=1
+	    with_slash_downlods=1
 	    ;;
 	untrusted )
 	    with_common_packages=1
 	    with_networkd=1
 	    with_transgui=1
-	    downloads_user=user
-	    single_ssh_user=user
+	    with_slash_downlods=1
+	    ssh_login_user=user
 	    ;;
 	thip )
 	    with_vol_storage=1
 	    hippyru_backup_time=manual
-	    single_ssh_user=core
+	    ssh_login_user=core
 	    ;;
 	bergenrabbit | hippyru | lubavainfo )
-	    single_ssh_user=core
+	    ssh_login_user=core
 	    ;;
  	r2 )
 	    hippyru_backup_time=03:00:02
 	    explicit_ipv6=(2001:41d0:e:696::1/64 2001:41d0:e:6ff:ff:ff:ff:ff)
-	    single_ssh_user=core
+	    ssh_login_user=core
 	    ;;
  	rhea )
-	    single_ssh_user=user
+	    ssh_login_user=user
 	    with_networkd_if_virt=1
 	    with_common_packages=1
 	    with_nicarnica_packages=1
 	    with_zram=0
             with_zswap=1
-	    downloads_user=user
+	    with_slash_downlods=1
 	    with_docker=1
 	    ;;
 	* )
@@ -263,7 +269,7 @@ setup_fedora_packages() {
 	    autoconf automake gcc-c++ kernel-devel
 	    emacs
 	    tigervnc
-	    strace
+	    dstat strace
 	    policycoreutils-python-utils
 	    xclip xorg-x11-apps
 	    xpra
@@ -403,6 +409,7 @@ setup_ubuntu_packages() {
 
     if let with_common_packages; then
 	install_list+=(
+	    dstat
 	    libreoffice
 	    gvfs-bin
 	    libglib2.0-dev
@@ -560,12 +567,12 @@ setup_fstab() {
 
 setup_dir_and_mounts() {
     
-    if [[ $downloads_user ]]; then
+    if [[ $with_slash_downlods ]]; then
 	local dirname=downloads
 	local dir="/$dirname"
-	ensure_dir -u "$downloads_user" -g "$downloads_user" "$dir"
-	if [[ -d /home/$downloads_user ]]; then
-	    ensure_symlink "$dir" "/home/$downloads_user" Downloads
+	ensure_dir -P "$dir"
+	if [[ -d /home/$primary_user ]]; then
+	    ensure_symlink "$dir" "/home/$primary_user" Downloads
 	fi
 	if [[ -n "$virt" ]] ; then
 	    local unitname="$dirname"
@@ -575,7 +582,7 @@ setup_dir_and_mounts() {
 Where=$dir
 Type=vboxsf
 What=Downloads
-Options=uid=$downloads_user,gid=$downloads_user,nosuid,nodev
+Options=uid=$primary_user,gid=$primary_group,nosuid,nodev
 "
 	    p_file "service:$unitname.automount" "\
 [Automount]
@@ -686,7 +693,7 @@ setup_grub() {
 
 setup_sudo() {
     let kind_fedora || let kind_ubuntu || return 0
-    [[ $virt || $single_ssh_user ]] || return 0
+    [[ $virt || $ssh_login_user ]] || return 0
 
     if let kind_fedora; then
 	local sudo_with_password_re='^%wheel[[:space:]]+ALL=\(ALL\)[[:space:]]+ALL$'
@@ -1265,12 +1272,12 @@ setup_sshd() {
     log "Checking sshd"
     inc_log_level
 
-    if [[ $single_ssh_user ]]; then
-        eval "local user_dir=~$single_ssh_user"
+    if [[ $ssh_login_user ]]; then
+        eval "local user_dir=~$ssh_login_user"
  	local f="$user_dir/.ssh/authorized_keys"
 	if [[ ! -f $f ]]; then
-            ensure_dir -m 0700 -g "$single_ssh_user" -u "$single_ssh_user" "${f%/*}"
-            write_file -m 0600 -g "$single_ssh_user" -u "$single_ssh_user" "$f" ""
+            ensure_dir -m 0700 -g "$ssh_login_user" -u "$ssh_login_user" "${f%/*}"
+            write_file -m 0600 -g "$ssh_login_user" -u "$ssh_login_user" "$f" ""
 	fi
     else
 	ensure_dir /etc/ssh/authorized_keys
@@ -1312,8 +1319,8 @@ ChallengeResponseAuthentication no
 	sshd_config+="UsePAM yes$NL"
     fi
 
-    if [[ $single_ssh_user ]]; then
-	sshd_config+="AllowUsers $single_ssh_user$NL"
+    if [[ $ssh_login_user ]]; then
+	sshd_config+="AllowUsers $ssh_login_user$NL"
     else
 	sshd_config+="AuthorizedKeysFile /etc/ssh/authorized_keys/%u$NL"
     fi
@@ -1484,38 +1491,38 @@ HostEnv ACME_CONTACT mailto:igor@mir2.org
 	    thip ) setup_thip_files ;;
 	esac
     fi
+    if [[ $NAME == miranda ]]; then
+	setup_miranda_dpodctl
+    fi
 }
 
-setup_thip_files() {
-    if [[ ! -d /vol/src ]]; then
-	log "/vol/src does not exist, rerun after it is mounted"
-    fi
-
-    local dir="/vol/src/build-dpod"
-    ensure_dir "$dir"
-    local i j=0
+setup_miranda_dpodctl() {
+    local net_name="development"
+    
+    local dir="/vol/build"
+    ensure_dir /vol "$dir"
 
     # HostEnv lines for browser-thip with IP addresses of
     # hippyru-related hosts.
     local browser_thip_host_config=""
+    local projects_root="/home/$primary_user/p"
 
-    local -a virt_net_ids=()
-    add_virt_net_ids
+    local etc_host_overrides="\
+127.0.0.1   localhost
+::1         localhost
+"
 
-    # The order of services must match ip address usage.
+    local i ip4_last_byte=10
     for i in hippyru bergenrabbit lubavainfo transdock dzetacon browser-thip; do
+	local -a dns_aliases=()
 	ensure_dir "$dir/$i"
-	if [[ $j -lt ${#virt_net_ids[@]} ]]; then
-	    local ipv4="$virt_net_ipv4_prefix.${virt_net_ids[$j]}"
-	    : $((j+=1))
-	else
-	    local ipv4="$virt_net_ipv4_prefix.${virt_net_ids[0]}"
-	fi
+	local ipv4="$dev_docker_network_prefix.$ip4_last_byte"
+	: $((ip4_last_byte+=1))
 	local config="" uses_generator=1
 	case $i in
 	    transdock )
 		config+="\
-Include ../../$i/config.dpod
+Include $projects_root/$i/config.dpod
 #AddHost boulder-mysql 127.0.0.1
 #AddHost boulder-rabbitmq 127.0.0.1
 #AddHost boulder 127.0.0.1
@@ -1525,22 +1532,19 @@ DnsAlias test.media.mir2.org
 HostEnv TLS_HOSTS 'media.mir2.org test.media.mir2.org' 
 HostEnv ACME_CA http://boulder:4000/directory
 HostEnv ACME_CONTACT mailto:igor@mir2.org
-BindAddress $ipv4
-Network development
 "
+		dns_aliases=(media.mir2.org test.media.mir2.org)
 		;;
 	    browser-thip )
 		uses_generator=
 		config+="\
-IncludeBuildDir ../../hippyru-dock/tools/$i
-BindAddress $ipv4
-Network development
+IncludeBuildDir $projects_root/hippyru-dock/tools/$i
 "
 		config+="$browset_thip_host_config"
 		;;
 	    dzetacon )
 		config+="\
-Include ../../$i/config.dpod
+Include $projects_root/$i/config.dpod
 "
 		;;
 	    * )
@@ -1548,12 +1552,9 @@ Include ../../$i/config.dpod
 HostEnv ${i^^}_HOST $ipv4
 "
 		config+="\
-Include ../../hippyru-dock/$i/config.dpod
-Network development
-BindAddress $ipv4
+Include $projects_root/hippyru-dock/$i/config.dpod
 HostEnv ACME_CA http://boulder:4000/directory
 "
-		local -a dns_aliases=()
 		case $i in
 		    bergenrabbit )
 			dns_aliases+=(
@@ -1568,17 +1569,46 @@ HostEnv ACME_CA http://boulder:4000/directory
 			    www.lubava.info lubava.info
 			) ;;
 		esac
-		local dns_alias
-		for dns_alias in "${dns_aliases[@]}"; do
-		    config+="DnsAlias $dns_alias$NL"
-		done
+		ensure_dir -m 0750 /vol/$i
 		;;
 	esac
+	config+="\
+BindAddress none
+Network $net_name
+NetworkIPv4 $ipv4
+"
+	local dns_alias
+	for dns_alias in "${dns_aliases[@]:+${dns_aliases[@]}}"; do
+	    config+="DnsAlias $dns_alias$NL"
+	    etc_host_overrides+="$ipv4 $dns_alias$NL"
+	done
+	
 	write_file "$dir/$i/config.dpod" "$config"
 	if [[ $uses_generator ]]; then
-	    ensure_dir -u core -g core "$dir/$i/gen"
+	    ensure_dir -P "$dir/$i/gen"
 	fi
     done
+
+    write_file -P "$dir/test_etc_hosts" "$etc_host_overrides"
+    
+    if ! docker version -f '{{.Server.Version}}' > /dev/null 2>&1; then
+	log "Attempting to start the docker daemon"
+	cmd_log systemctl start docker
+    fi
+
+    local subnet_template="{{range .IPAM.Config}}{{if .Subnet}}{{.Subnet}}{{end}}{{end}}"
+    local subnet="$dev_docker_network_prefix.0/24"
+    local actual_subnet
+    actual_subnet="$(docker network inspect -f "$subnet_template" "$net_name" 2> /dev/null || :)"
+    if [[ $actual_subnet && $actual_subnet != "$subnet" ]]; then
+	log "Unexpected subnet $actual_subnet for the docker network $net_name, trying to recreate network"
+	cmd_log docker network rm "$net_name" > /dev/null
+	actual_subnet=
+    fi
+    if [[ -z $actual_subnet ]]; then
+	cmd_log docker network create --subnet="$subnet" "$net_name" > /dev/null
+    fi
+
 }
 
 . "$selfdir/zram-setup"
@@ -1587,7 +1617,7 @@ show_usage=""
 NAME=""
 remote=""
 
-while getopts :hn:r: opt; do
+while getopts :hn:r:u: opt; do
     case "$opt" in
 	h ) show_usage=1 ;;
 	n )
@@ -1636,9 +1666,9 @@ get_host_options
 
 if [[ -n "$remote" ]]; then
     cmd=(run_remotely)
-    if [[ -n "$single_ssh_user" ]]; then
+    if [[ -n "$ssh_login_user" ]]; then
 	# Use sudo
-	cmd+=(-s "$single_ssh_user@$remote")
+	cmd+=(-s "$ssh_login_user@$remote")
     else
 	cmd+=("root@$remote")
     fi
@@ -1646,16 +1676,23 @@ if [[ -n "$remote" ]]; then
 fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
-    exec sudo "$0" "$@"
+    exec sudo env SUDO_USER="$(id -un)" "$0" "$@"
 fi
 
 determine_os
+
+if [[ $SUDO_USER ]]; then
+    primary_user="$SUDO_USER"
+    primary_group="$(id -gn "$SUDO_USER")"
+else
+    [[ $primary_user && $primary_group ]] || \
+	err "primary_user and primary_group must be set when not using sudo"
+fi
 
 setup_hostname
 
 if let kind_coreos; then
     with_networkd=1
-    single_ssh_user=core
 fi
 
 if which systemctl 2> /dev/null 1>&2; then
