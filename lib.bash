@@ -1,6 +1,7 @@
 set -u
 set -e
 set -o pipefail
+shopt -s lastpipe
 
 declare -r NL=$'\n'
 
@@ -46,7 +47,7 @@ cleanup() {
 trap cleanup EXIT
 
 err() {
-    printf 'Error: %s\n' "$*" 1>&2
+    printf '%s:%d:%s: %s\n' "${BASH_SOURCE[0]}" "${BASH_LINENO[0]}" "${FUNCNAME[0]}" "$*" >&2
     exit 1
 }
 
@@ -105,14 +106,15 @@ get_temp() {
 
 ensure_dir() {
     local OPTIND opt dir
-    local mode= group= user=
+    local mode= group= user= create_parent=
 
-    while getopts :g:m:u:P opt; do
+    while getopts :g:m:u:Pp opt; do
 	case "$opt" in
-	    g ) user="$OPTARG";;
+	    g ) group="$OPTARG";;
 	    m ) mode="$OPTARG";;
 	    u ) user="$OPTARG";;
 	    P ) user="$primary_user" group="$primary_group" ;;
+	    p ) create_parent=1;;
 	    * ) err "bad ensure_dir usage";;
 	esac
     done
@@ -130,8 +132,18 @@ ensure_dir() {
 
     local dir
     for dir in "$@"; do
+	[[ $dir ]] || err "directory cannot be empty"
+	[[ $dir == "${dir%/}" ]] || err "directory must not end with slash - $dir"
+	[[ -z $create_parent || $dir =~ ^/ ]] || \
+	    err "directory must be absolute path when -p is given - $dir"
 	if [[ ! -d $dir ]]; then
 	    [[ -e $dir || -h $dir ]] && err "$dir exists and is not a directory"
+	    if [[ $create_parent ]]; then
+		local parent="${dir%/*}"
+		if [[ $parent ]]; then
+		    ensure_dir -m 0755 -g root -u root "$parent"
+		fi
+	    fi
 	    cmd_log mkdir -m "$mode" "$dir"
 	else
 	    [[ -h $dir ]] && err "$dir exists and is a symbilic link, not a directory"
@@ -158,7 +170,7 @@ ensure_symlink() {
     local link_dir="$2"
     [[ $target ]] || err "link target cannot be empty"
     [[ -d "$link_dir" ]] || err "link directory $link_dir does not exist or is not a directory"
-    
+
     local link_name="${3-}"
     if [[ -z $link_name ]]; then
 	link_name="${target##*/}"

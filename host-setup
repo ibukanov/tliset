@@ -4,34 +4,21 @@ source "$(dirname "$0")/lib.bash"
 
 #set -x
 
-valid_host_names=(miranda untrusted bergenrabbit hippyru lubavainfo thip r2 rhea)
+valid_host_names=(bergenrabbit hippyru lubavainfo r2 rhea)
 
 declare -i kind_coreos=0
 declare -i kind_fedora=0
 declare -i kind_ubuntu=0
 
-declare -i with_vol_storage=0
 declare -i with_zram=1
 declare -i with_zswap=0
-declare -i with_networkd=0
-declare -i with_networkd_if_virt=0
-declare -i with_dyndns=0
 declare -i with_latex=0
 declare -i with_transgui=0
 declare -i with_common_packages=0
-declare -i with_nicarnica_packages=0
 declare -i with_include_rpmfusion=1
-declare -i with_slash_downlods=0
-
-declare -i with_enabled_sshd=1
-declare -i sshd_extra_listen_port=0
 
 declare -i with_docker=0
-declare -i with_kvm=0
-declare -i with_libvirt_manager=0
-
-declare swap_device=
-
+declare -i with_sudoless_docker=0
 
 declare hippyru_backup_time=
 
@@ -49,9 +36,6 @@ declare -a explicit_ipv6=()
 # when allowing untrusted VM to access the whole disk.
 declare -i with_disabled_disk_uuid=0
 
-declare -i with_dnsmasq=0
-
-readonly virt_net_ipv4_prefix="192.168.95"
 readonly dev_docker_network_prefix="192.168.96"
 
 readonly gen_self_dir="/run/tliset"
@@ -59,55 +43,26 @@ readonly gen_scripts="$gen_self_dir"
 readonly gen_config="$gen_self_dir"
 readonly gen_mount="$gen_self_dir/set"
 
-add_system_user() {
-    local user="$1"
-    local id="$2"
-    extra_system_users+=("$user" "$id")
-}
-
 get_host_options() {
     case "$NAME" in
-	miranda )
-	    with_networkd_if_virt=1
-	    with_common_packages=1
-	    with_latex=1
-	    with_enabled_sshd=0
-	    sshd_extra_listen_port=19022
-	    with_slash_downlods=1
-	    with_zram=0
-	    with_zswap=1
-	    with_docker=1
-	    with_slash_downlods=1
-	    ;;
-	untrusted )
-	    with_common_packages=1
-	    with_networkd=1
-	    with_transgui=1
-	    with_slash_downlods=1
-	    ssh_login_user=user
-	    ;;
-	thip )
-	    with_vol_storage=1
-	    hippyru_backup_time=manual
-	    ssh_login_user=core
-	    ;;
 	bergenrabbit | hippyru | lubavainfo )
 	    ssh_login_user=core
+	    with_docker=1
 	    ;;
  	r2 )
 	    hippyru_backup_time=03:00:02
 	    explicit_ipv6=(2001:41d0:e:696::1/64 2001:41d0:e:6ff:ff:ff:ff:ff)
 	    ssh_login_user=core
+	    with_docker=1
 	    ;;
  	rhea )
-	    ssh_login_user=user
-	    with_networkd_if_virt=1
 	    with_common_packages=1
-	    with_nicarnica_packages=1
 	    with_zram=0
             with_zswap=1
-	    with_slash_downlods=1
 	    with_docker=1
+
+	    # disable until user namespaces works
+	    with_sudoless_docker=0
 	    ;;
 	* )
 	    err "unknown '$NAME'"
@@ -115,44 +70,9 @@ get_host_options() {
     esac
 }
 
-# Array of (host-name space-separated-list-of-net-ids) where the ids
-# are used to construct ip addresses assigned to virtual net
-# interface.
-readonly -a virt_net_host_info=(
-    miranda 10
-    untrusted 11
-    thip "12 13 14 15 16"
-    nicarnica 30
-)
-
-# Add to virt_net_ids array net ids cooresponding to the host
-add_virt_net_ids() {
-    local i
-    for ((i=0; i<${#virt_net_host_info[@]}; i+=2)); do
-	local host="${virt_net_host_info[$((i+0))]}"
-	local ids="${virt_net_host_info[$((i+1))]}"
-	if [[ $host == $NAME ]]; then
-	    virt_net_ids+=($ids)
-	    return 0
-	fi
-    done
-    err "$NAME is not on the $virt_net_host_info list"
-}
-
 determine_os() {
     local os_kind=
-    if [[ -f /etc/lsb-release ]]; then
-	local line
-	{
-	    while IFS='' read -r line; do
-		if [[ $line =~ ^DISTRIB_ID=(.*)$ ]]; then
-		    os_kind="${BASH_REMATCH[1]}"
-		    break;
-		fi
-	    done
-	} < /etc/lsb-release
-    fi
-    if [[ -z $os_kind && -f /etc/os-release ]]; then
+    if [[ -f /etc/os-release ]]; then
         local line
         {
             while IFS='' read -r line; do
@@ -167,9 +87,21 @@ determine_os() {
     case "${os_kind,,}" in
 	ubuntu ) kind_ubuntu=1 ;;
 	fedora ) kind_fedora=1 ;;
-	coreos ) kind_coreos=1 ;;
+	coreos | "") kind_coreos=1 ;;
 	* ) err "Do not know how to determine OS, os_kind='$os_kind'" ;;
     esac
+}
+
+under_qubes() {
+    if [[ ! -v under_qubes_flag ]]; then
+	if [[ -d /etc/qubes ]]; then
+	    declare -r -g under_qubes_flag=1
+	else
+	    declare -r -g under_qubes_flag=0
+	fi
+    fi
+    let under_qubes_flag && return 0
+    return 1
 }
 
 is_valid_host_name() {
@@ -182,35 +114,19 @@ is_valid_host_name() {
     return 1;
 }
 
-read_hostname() {
-    if [[ -z ${hostnamectl_available+1} ]]; then
-	declare -g hostnamectl_available="$(type -p hostnamectl)"
+read_tliset_name() {
+    R=''
+    local path=/etc/tliset.name name
+    if under_qubes; then
+	path="/usr/local$path"
     fi
-    if [[ $hostnamectl_available ]]; then
-	R="$(hostnamectl status --static)"
-    elif [[ -f /etc/hostname ]]; then
-	IFS='' read R < /etc/hostname
-    else
-	R=""
-    fi
-}
-
-setup_hostname() {
-    read_hostname
-    local current="$R"
-    if [[ $current == "$NAME" ]]; then
-	return 0
-    fi
-    if [[ -z $current ]] || ! is_valid_host_name "$current"; then
-	log "setting hostname to $NAME"
-	if [[ $hostnamectl_available ]]; then
-	    hostnamectl set-hostname "$NAME" 
-	else
-	    printf '%s\n' "$NAME" > /etc/hostname
-	fi
-    else
-	err "Already setup as $current."
-    fi
+    [[ -s "$path" ]] || \
+	err "$path does not exist or empty. Initilize it with a valid name and try again."
+    IFS='' read -r name < "$path"
+    local name_pattern='^[a-z0-9]+$'
+    [[ $name =~ $name_pattern ]] || \
+	err "$path content does not match $name_pattern - '$name'"
+    R="$name"
 }
 
 fixup_transgui() {
@@ -268,6 +184,7 @@ setup_fedora_packages() {
 	    livecd-tools
 	    autoconf automake gcc-c++ kernel-devel
 	    emacs
+	    geany geany-plugins-spellcheck
 	    tigervnc
 	    dstat strace
 	    policycoreutils-python-utils
@@ -319,20 +236,17 @@ setup_fedora_packages() {
 	    )
 	fi
 
-	if [[ -z "$virt" ]]; then
-	    list+=(
-		# hardware management
-		rfkill lm_sensors
-	    )
+	list+=(
+	    # hardware management
+	    rfkill lm_sensors
+	)
 
 
-	    list+=(
-		# Assume this is only necessary on real hardware
-		gnome-tweak-tool
-		gnome-terminal-nautilus
-		gnome-shell-extension-alternate-tab
-	    )
-	fi
+	list+=(
+	    gnome-tweak-tool
+	    gnome-terminal-nautilus
+	    gnome-shell-extension-alternate-tab
+	)
     fi
 
     let with_latex && list+=(
@@ -343,24 +257,7 @@ setup_fedora_packages() {
 	)
     let with_transgui && list+=(transgui openssl-devel)
 
-    if [[ -n "$virt" ]]; then
-	list+=(gcc kernel-devel)
-    fi
-
-    if let with_libvirt_manager; then
-	list+=(
-	    virt-manager
-	    virt-viewer
-	)
-    fi
-
-    if let with_kvm; then
-	list+=(
-	    libvirt-daemon-config-network
-	    libvirt-daemon-kvm
-	    qemu-kvm
-	)
-    fi
+    list+=(gcc kernel-devel)
 
     if let with_docker; then
 	list+=(
@@ -381,9 +278,6 @@ setup_fedora_packages() {
 
     if let with_transgui; then
 	remove_list+=(transmission-gtk transmission-remote-gtk)
-    fi
-    if let with_networkd; then
-	remove_list+=(network-manager-applet)
     fi
     if let ${#remove_list[@]}; then
 	local status=0
@@ -421,12 +315,6 @@ setup_ubuntu_packages() {
 	)
     fi
 
-    if let with_networkd; then
-	remove_list+=(resolvconf)
-    else
-	install_list+=(resolvconf)
-    fi
-
     let with_transgui && install_list+=(transgui)
     remove_list+=(transmission-common)
 
@@ -438,26 +326,9 @@ setup_ubuntu_packages() {
 	)
     fi
 
-    if let with_nicarnica_packages; then
-	install_list+=(
-	    python3-pip
-	    ldc
-	    libqtgui4
-	    libwxgtk3.0-dev
-	    liblapack3
-	    libcrypto++-dev
-	)
-    fi
-
     remove_list+=(
 	resolvconf
     )
-
-    if [[ $virt ]]; then
-	remove_list+=(
-	    # xfce4-power-manager
-	)
-    fi
 
     local -A package_status_map=()
 
@@ -524,288 +395,6 @@ fill_apt_action_list() {
     fi
 }
 
-remove_fstab_uuids() {
-    log "Checking /etc/fstab"
-    local fstab
-    IFS='' read -rd '' fstab < /etc/fstab
-    local -a ids
-    ids=($(egrep -o '^UUID=[A-Fa-f0-9-]+' <<< "$fstab" | cut -d= -f2 || true))
-    if [[ ${#ids[@]} -ge 1 ]]; then
-	log "replacing UUID with devices for security with untrusted VM"
-	local -a edits=()
-	local id
-	for id in "${ids[@]}"; do
-	    [[ -b "/dev/disk/by-uuid/$id" ]] || err "failed to locate disk for uuid=$id"
-	    local resolved disk
-	    resolved="$(readlink "/dev/disk/by-uuid/$id")"
-	    disk="/dev/$(basename "$resolved")"
-	    [[ -b "$disk" && ! -h "$disk" ]] || \
-		err "/dev/disk/by-uuid/$id does not point to real device file"
-	    edits+=(-e "s|^UUID=$id|$disk|")
-	done
-	fstab="$(printf %s "$fstab" | sed "${edits[@]}")"
-    fi
-
-    write_file /etc/fstab "$fstab"
-    if let file_update; then
-	log "/etc/fstab was updated"
-    fi
-}
-
-setup_fstab() {
-    let kind_fedora || let kind_ubuntu || return 0
-    
-    log "Checking fstab"
-    local fstab ids edits id disk
-    inc_log_level
-    if let with_disabled_disk_uuid; then
-	remove_fstab_uuids
-    fi
-
-    dec_log_level
-}
-
-setup_dir_and_mounts() {
-    
-    if [[ $with_slash_downlods ]]; then
-	local dirname=downloads
-	local dir="/$dirname"
-	ensure_dir -P "$dir"
-	if [[ -d /home/$primary_user ]]; then
-	    ensure_symlink "$dir" "/home/$primary_user" Downloads
-	fi
-	if [[ -n "$virt" ]] ; then
-	    local unitname="$dirname"
-	    p_nl
-	    p_file "service:$unitname.mount" "\
-[Mount]
-Where=$dir
-Type=vboxsf
-What=Downloads
-Options=uid=$primary_user,gid=$primary_group,nosuid,nodev
-"
-	    p_file "service:$unitname.automount" "\
-[Automount]
-Where=$dir
-"
-            multi_user_wants+=("$unitname.automount")
-	fi
-    fi
-
-    if [[ $swap_device ]]; then
-	local unitname
-	unitname="$(systemd-escape -p "$swap_device").swap"
-	p_file "service:$unitname" "\
-[Swap]
-What=$swap_device
-"
-    fi
-
-    if let with_docker; then
-	if [[ -d /area/extra ]]; then
-	    ensure_dir -m 711 /area/extra/docker
-	    ensure_symlink /area/extra/docker /var/lib
-	fi
-    fi
-}
-
-setup_grub() {
-
-    let kind_fedora || let kind_ubuntu || return 0
-
-    log "Checking grub"
-
-    local net_kernel_options=""
-    if [[ $virt ]]; then
-	# Disable predictable interface names under VM as they
-	# complicates autoconfig.
-	if let kind_fedora || let kind_ubuntu; then
-	    net_kernel_options=" net.ifnames=0"
-	fi
-    fi
-
-    local -a config=(
-	GRUB_TIMEOUT 2
-	GRUB_HIDDEN_TIMEOUT ""
-	GRUB_DEFAULT saved
-    )
-
-    if let kind_fedora; then
-	config+=(GRUB_CMDLINE_LINUX "rhgb quiet LANG=en_US.UTF-8$net_kernel_options")
-    elif let kind_ubuntu; then
-	config+=(GRUB_CMDLINE_LINUX "LANG=C.UTF-8$net_kernel_options")
-    fi
-
-    if let with_disabled_disk_uuid; then
-	# Avoid UUID for VM security
-	config+=(
-	    GRUB_DISABLE_LINUX_UUID true
-	)
-    fi
-
-    local -A config_keys=()
-    local i
-    for ((i=0; i<${#config[@]}; i+=2)); do
-	config_keys[${config[$i]}]="$i"
-    done
-
-    # copy to new_lines only lines that do not match keys then append
-    # the proper key=value.
-    local -a lines new_lines=()
-    mapfile -t lines < /etc/default/grub
-    local line
-    for line in "${lines[@]}"; do
-	if [[ $line =~ ^[[:space:]]*([^=]+)= ]]; then
-	    local key="${BASH_REMATCH[1]}"
-	    if [[ ${config_keys[$key]-} ]]; then
-		continue
-	    fi
-	fi
-	new_lines+=("$line")
-    done
-
-    for ((i=0; i<${#config[@]}; i+=2)); do
-	escape_for_shell "${config[$((i+1))]}"
-	new_lines+=("${config[$i]}=$R")
-    done
-
-    local new_text
-    printf -v new_text '%s\n' "${new_lines[@]}"
-
-    if let kind_fedora; then
-       local grub_config=/boot/grub2/grub.cfg
-       [[ -f "$grub_config" ]] || grub_config=/boot/efi/EFI/fedora/grub.cfg
-    elif let kind_ubuntu; then
-	local grub_config=/boot/grub/grub.cfg
-    fi
-    [[ -f "$grub_config" ]] || err "Failed to locate grub.cfg"
-
-    write_file /etc/default/grub "$new_text"
-    if let file_update; then
-	log "updating $grub_config"
-	if let kind_fedora; then
-	   grub2-mkconfig -o "$grub_config"
-	else
-	   grub-mkconfig -o "$grub_config"
-	fi
-    fi
-}
-
-setup_sudo() {
-    let kind_fedora || let kind_ubuntu || return 0
-    [[ $virt || $ssh_login_user ]] || return 0
-
-    if let kind_fedora; then
-	local sudo_with_password_re='^%wheel[[:space:]]+ALL=\(ALL\)[[:space:]]+ALL$'
-	local sudo_without_password="%wheel ALL=(ALL) NOPASSWD: ALL"
-    elif let kind_ubuntu; then
-	local sudo_with_password_re='^%sudo[[:space:]]+ALL=\(ALL:ALL\)[[:space:]]+ALL$'
-	local sudo_without_password="%sudo ALL=(ALL:ALL) NOPASSWD: ALL"
-    fi
-
-    local -a lines new_lines=()
-    mapfile -t lines < /etc/sudoers
-    local i should_patch=0 already_patched=0
-    for ((i=0; i<${#lines[@]}; i+=1)); do
-	local line="${lines[$i]}"
-	if [[ $line =~ $sudo_with_password_re ]]; then
-	    lines[$i]="$sudo_without_password"
-	    should_patch=1
-	elif [[ $line == "$sudo_without_password" ]]; then
-	    already_patched=1
-	fi
-    done
-    if let should_patch==0; then
-	let already_patched || err "/etc/sudoers contains neither unpatched no patched lines"
-	return 0
-    fi
-    let already_patched==0 || err "/etc/sudoers contains both unpatched and patched lines"
-
-    local new_text
-    printf -v new_text '%s\n' "${lines[@]}"
-    write_file -m 660 /etc/sudoers "$new_text"
-}
-
-setup_network() {
-    log "Checking network"
-    inc_log_level
-
-    # Array of (hostname ip)
-    local -a hosts=()
-    if let with_virtual_box_network; then
-	local i
-	for ((i=0; i<${#virt_net_host_info[@]}; i+=2)); do
-	    local host="${virt_net_host_info[$((i+0))]}"
-	    local ids="${virt_net_host_info[$((i+1))]}"
-	    if [[ $host != "$NAME" ]]; then
-		hosts+=("$host" "$virt_net_ipv4_prefix.${ids%% *}")
-	    fi
-	done
-    fi
-
-    if [[ ${#hosts[@]} -ne 0 ]]; then
-	local prefix_line='# auto-generated entries, do not edit after this line'
-	local -A ipv4_map=()
-	local i
-	for ((i=0; i<${#hosts[@]}; i+=2)); do
-	    local host="${hosts[$((i+0))]}"
-	    local ipv4="${hosts[$((i+1))]}"
-	    ipv4_map[$ipv4]="$host"
-	done
-	local -a lines new_lines=()
-	mapfile -t lines < /etc/hosts
-
-	# remove old mappings for the address
-	local line
-	for line in "${lines[@]:+${lines[@]}}"; do
-	    if [[ $line == "$prefix_line" ]]; then
-		continue
-	    fi
-	    if [[ $line =~ ^[[:blank:]]*([^[:blank:]]+)[[:blank:]]+ ]]; then
-		local token="${BASH_REMATCH[1]}"
-		if [[ ${ipv4_map[$token]-} ]]; then
-		    continue
-		fi
-	    fi
-	    new_lines+=("$line")
-	done
-	new_lines+=("$prefix_line")
-	for ((i=0; i<${#hosts[@]}; i+=2)); do
-	    local host="${hosts[$((i+0))]}"
-	    local ipv4="${hosts[$((i+1))]}"
-	    new_lines+=("$ipv4 $host")
-	done
-	local hosts_text
-	printf -v hosts_text '%s\n' "${new_lines[@]}"
-	write_file /etc/hosts "$hosts_text"
-    fi
-
-    if let with_networkd; then
-	# networkd implies resolved
-	if [[ ! -L /etc/resolv.conf || \
-		    "$(readlink /etc/resolv.conf)" != /run/systemd/resolve/resolv.conf ]]; then
-	    cmd_log ln -s -f /run/systemd/resolve/resolv.conf /etc/resolv.conf
-	fi
-
-	# For now do not switch glib resolver to use systemd-resolved
-	# to avoid differences between static and non-static builds.
-	#
-	#if grep -q '^hosts:.*\<dns\>' /etc/nsswitch.conf; then
-	#    sed -i -e 's/^\(hosts:.*\)\<dns\>/\1resolve/' /etc/nsswitch.conf
-	#fi
-    fi
-
-    print_network
-    if let with_dyndns; then
-	print_dyndns
-    fi
-    if let with_dnsmasq; then
-	print_dserver_dnsmasq
-    fi
-
-    dec_log_level
-}
-
 # Escape argument using single quotas with with each single quote in
 # arg replaced by '"'"'
 escape_for_shell() {
@@ -845,14 +434,13 @@ print_wants_list() {
 }
 
 finish_generator_write() {
-    let has_systemd || return 0
     p_dir scripts:
     print_wants_list multi-user.target "${multi_user_wants[@]:+${multi_user_wants[@]}}"
     print_wants_list sockets.target "${socket_wants[@]:+${socket_wants[@]}}"
 
     local script="#!/bin/sh$NL"
     if true; then
-	script+='
+		script+='
 if [[ -z "${TLISET_HAS_LOG-}" ]]; then
     export TLISET_HAS_LOG=1
     mkdir -p /run/tliset
@@ -873,9 +461,17 @@ mkdir -p ${gen_mkdir_list[*]}
 	script+="$gen_body_txt"
     fi
 
-    ensure_dir /etc/systemd/system-generators
-    write_file -m 755 /etc/systemd/system-generators/tliset "$script"
+    local dir="/etc/systemd/system-generators"
+    if under_qubes; then
+	dir="/usr/local/etc"
+    fi
+
+    ensure_dir -p "$dir"
+    write_file -m 755 "$dir/tliset" "$script"
     if let file_update; then
+	if under_qubes; then
+	    "$dir/tliset"
+	fi
 	cmd_log systemctl daemon-reload
     fi
 }
@@ -935,8 +531,8 @@ convert_shell_kind_path() {
     local file_path="${file_kind_and_path#*:}"
     local dir absolute=0
     case "$file_kind" in
-	service ) dir='"$1"' ;;
-	net ) dir='"$1"/../network' ;;
+	service ) dir='/run/systemd/system' ;;
+	net ) dir='/run/systemd/network' ;;
 	config ) dir="$gen_config" ;;
 	mount ) dir="$gen_mount" ;;
 	scripts ) dir="$gen_scripts" ;;
@@ -962,49 +558,128 @@ p_mask_service() {
     p_cmd ln -s /dev/null "service:$1"
 }
 
-print_network() {
-    if let with_networkd; then
-	if let kind_fedora || let kind_ubuntu; then
-	    multi_user_wants+=(systemd-networkd.service systemd-resolved.service)
-	    p_nl
-	    p_dir service:sockets.target.d
-	    p_file service:sockets.target.d/tliset.conf "\
-[Unit]
-Wants=systemd-networkd.socket
-"
-	    # Mask all NetworkManager-related services
-	    p_mask_service NetworkManager.service
-	    p_mask_service NetworkManager-dispatcher.service
-	    p_mask_service NetworkManager-wait-online.service
-	    p_mask_service firewalld.service
-	    p_mask_service dbus-org.fedoraproject.FirewallD1.service
-
-	    # Make sure that system-supplied dnsmasq is masked
-	    p_mask_service dnsmasq.service
-	fi
-    else
-	p_mask_service systemd-networkd.service
-	p_mask_service systemd-resolved.service
+setup_kernel_parameters() {
+    if let with_zswap; then
+	p_add_raw 'printf 1 > /sys/module/zswap/parameters/enabled || :'
     fi
+    setup_zram
+}
 
-    if let with_networkd; then
-	p_nl
-	p_dir net:
+setup_zram() {
+    let with_zram || return 0
 
-	if let kind_fedora; then
-	    p_cmd chcon -t etc_t net:
-	fi
+    log "Checking zram"
 
-	if let with_virtual_box_network; then
-	    print_virtualbox_network
-	elif let kind_fedora; then
-	    print_fedora_networkd_files
-	fi
+    p_nl
+    p_file -x top:/run/tliset/zram-status "$(cat <<'EOF'
+#!/bin/sh
+set -e -u
 
-	if [[ ${#explicit_ipv6[@]} -ne 0 ]]; then
-	    local ipv6_address="${explicit_ipv6[0]}"
-	    local ipv6_gateway="${explicit_ipv6[1]}"
-	    p_file net:zz-default.network "\
+dir=/sys/block/zram0
+if test ! -d "$dir"; then
+    echo "status: disabled"
+    exit 0
+fi
+
+mem_used_total="$(cat $dir/mem_used_total)"
+orig_data_size="$(cat $dir/orig_data_size)"
+
+echo "status: enabled"
+echo "compressed_size: $(($mem_used_total * 100 / $orig_data_size))%"
+echo "disksize: $(($(cat $dir/disksize) / 1048576))M"
+echo "compr_data_size: $(($(cat $dir/compr_data_size) / 1024))K"
+echo "orig_data_size: $(($orig_data_size / 1024))K"
+echo "mem_used_total: $(($mem_used_total / 1024))K"
+echo "max_comp_streams: $(cat $dir/max_comp_streams)"
+echo "comp_algorithm: $(cat $dir/comp_algorithm)"
+EOF
+)"
+
+    p_nl
+    p_file top:/run/tliset/zram-enable.sh "$(cat <<'EOF'
+set -e -u
+
+read_memtotal() {
+	memtotal=
+	{
+		local line
+		while read -r line; do
+			if [[ $line =~ ^MemTotal:[[:blank:]]*([0-9]+)[[:blank:]]+(.*)$ ]]; then
+				memtotal="${BASH_REMATCH[1]}"
+				local units="${BASH_REMATCH[2]}"
+				[[ $units == kB ]] || err "unexpected MemTotal units $units"
+				local scale=1024
+				memtotal="$((memtotal * scale))"
+			fi
+		done
+		local a=1
+	} < /proc/meminfo
+	[[ $memtotal ]] || err "Failed to locate MemTotal in /proc/meminfo"
+}
+
+read_memtotal
+SWAP_SIZE=$(($memtotal / 10 * 18))
+
+num_cpus=$(grep -c processor /proc/cpuinfo)
+if [[ 0 = "$num_cpus" ]]; then
+    num_cpus=1
+fi
+
+rm -f /run/tliset/zram-device
+device="$(zramctl --find --size "$SWAP_SIZE" -t "$num_cpus")"
+printf '%s\n' "$device" > /run/tliset/zram-device
+
+/sbin/mkswap "$device"
+/sbin/swapon -p 100 "$device"
+EOF
+)"
+
+    p_nl
+    p_file top:/run/tliset/zram-disable.sh "$(cat <<'EOF'
+#!/bin/sh
+set -e -u
+
+device=
+[[ -f /run/tliset/zram-device ]] || exit 0
+read -r device < /run/tliset/zram-device || :
+[[ $device ]] || exit 0
+if grep -q "^$device\\s" /proc/swaps; then
+    /sbin/swapoff "$device"
+fi
+zramctl --reset "$device"
+rm /run/tliset/zram-device
+EOF
+)"
+
+    p_nl
+    p_file service:tliset-zram.service "\
+[Unit]
+Description=Service enabling RAM compression using zRam
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/modprobe zram num_devices=1
+ExecStart=/bin/bash /run/tliset/zram-enable.sh
+ExecStop=/bin/bash /run/tliset/zram-disable.sh
+RemainAfterExit=yes
+"
+    multi_user_wants+=(tliset-zram.service)
+
+}
+
+
+setup_network() {
+    log "Checking network"
+    inc_log_level
+
+    if [[ ${#explicit_ipv6[@]} -ne 0 ]]; then
+	let kind_coreos || err "unsupported configuration"
+	local ipv6_address="${explicit_ipv6[0]}"
+	local ipv6_gateway="${explicit_ipv6[1]}"
+	p_file net:zz-default.network "\
 [Network]
 DHCP=ipv4
 
@@ -1015,87 +690,9 @@ Gateway=$ipv6_gateway
 UseMTU=true
 UseDomains=true
 "
-	fi
     fi
-}
 
-print_dyndns() {
-    if [[ ! -s /etc/duckdns.key ]]; then
-	[[ -t 1 ]] || err "cannot ask for /etc/duckdns.key value as input is not tty"
-	local api_key
-	IFS='' read -p 'Enter API key for www.duckdns.org: ' api_key
-	write_file -m 640 -u root -g nobody /etc/duckdns.key "$api_key"
-    fi
-    local key="$(< /etc/duckdns.key)"
-    local url="https://www.duckdns.org/update?domains=dsrv&token=$key&ip="
-
-    multi_user_wants+=(tliset-dyndns.timer)
-    p_nl
-    p_file service:tliset-dyndns.timer "\
-[Unit]
-After=network-online.target
-Wants=network-online.target
-
-[Timer]
-Persistent=true
-# Each 10 minutes
-OnCalendar=*:0/10
-"
-    p_file service:tliset-dyndns.service "\
-[Unit]
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=nobody
-Type=oneshot
-ExecStart=/bin/sh -c $gen_scripts/dyndns-update.sh
-"
-    escape_for_shell "$url"
-    p_file scripts:dyndns-update.sh '
-s="$(/usr/bin/curl -s $R)"
-printf "curl output: %s\n" "$s" 1>&2
-test OK = "$s"
-'
-}
-
-print_fedora_networkd_files() {
-    p_file net:zz-default.network "\
-[Network]
-DHCP=ipv4
-
-[DHCP]
-UseMTU=true
-UseDomains=true
-"
-}
-
-print_virtualbox_network() {
-    local -a virt_net_ids=()
-    add_virt_net_ids
-    local -a addresses=()
-    for i in "${virt_net_ids[@]}"; do
-	addresses+=("Address=$virt_net_ipv4_prefix.$i/24")
-	addresses+=("Address=fda9:eefb:0a88:883f::$(printf %x "$i")/64")
-    done
-
-    p_file net:99-link-local.network "\
-[Match]
-Name=eth1
-
-[Network]
-$(printf '%s\n' "${addresses[@]}")
-LLMNR=no
-"
-    p_file net:9a-default.network "\
-[Network]
-DHCP=yes
-LLMNR=no
-
-[DHCP]
-UseMTU=yes
-UseDNS=yes
-"
+    dec_log_level
 }
 
 ensure_root_ssh_key() {
@@ -1106,24 +703,6 @@ ensure_root_ssh_key() {
 	cmd_log ssh-keygen -t ed25519 -N '' -f "$file"
     fi
     ssh_key_file="$file"
-}
-
-setup_kino_password() {
-    if ! [[ -f $kino_password_file ]]; then
-	(umask 077 && printf '' > "$kino_password_file")
-    fi
-    if ! [[ -s $kino_password_file ]]; then
-	local password
-	read -p "Enter password for kino access (it will be echoed): " -r password
-	[[ $password ]] || err "password cannot be empty"
-	printf '%s\n' "$password" > $kino_password_file
-    fi
-    escape_for_shell "$kino_password_file"
-    local password_file="$R"
-    p_file -x "top:$ssh_kino_wrap" "\
-#/bin/sh
-exec sshpass -f $password_file ssh \"\$@\"
-"
 }
 
 setup_hippyru_backup() {
@@ -1222,7 +801,7 @@ backup_from_host() {
     echo "Backing up $pod_name" >&2
     local ok=1
     rsync "${rsync_args[@]}" --backup --backup-dir="$changed_files" \
-        "rsync://$host_name/adata/" "$data/adata/" || ok=
+        "rsync://$host_name/srv/" "$data/srv/" || ok=
     if [[ $ok ]]; then
 	local i cur_time
 	cur_time="$(date +%s)"
@@ -1268,204 +847,76 @@ fi
     fi
 }
 
-setup_sshd() {
-    log "Checking sshd"
-    inc_log_level
-
-    if [[ $ssh_login_user ]]; then
-        eval "local user_dir=~$ssh_login_user"
- 	local f="$user_dir/.ssh/authorized_keys"
-	if [[ ! -f $f ]]; then
-            ensure_dir -m 0700 -g "$ssh_login_user" -u "$ssh_login_user" "${f%/*}"
-            write_file -m 0600 -g "$ssh_login_user" -u "$ssh_login_user" "$f" ""
-	fi
-    else
-	ensure_dir /etc/ssh/authorized_keys
-	local f=/etc/ssh/authorized_keys/root
-	if [[ ! -e "$f" ]]; then
-	    touch "$f"
-	    chmod 640 "$f"
-	fi
-    fi
-
-    if let sshd_extra_listen_port && let kind_fedora; then
-	local re='^ssh_port_t\s\+tcp\s\+%s$'
-	if ! semanage port -l -C | grep -q "$(printf "$re" "$sshd_extra_listen_port")"; then
-	    cmd_log semanage port -a -t ssh_port_t -p tcp "$sshd_extra_listen_port"
-	fi
-    fi
-
-    # Based on https://stribika.github.io/2015/01/04/secure-secure-shell.htlm
-    local sshd_config="\
-UsePrivilegeSeparation sandbox
-PidFile none
-
-KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
-HostKey /etc/ssh/ssh_host_ed25519_key
-Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
-MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-ripemd160-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,hmac-ripemd160,umac-128@openssh.com
-
-UseDNS no
-ClientAliveInterval 180
-
-Subsystem sftp internal-sftp
-
-PubkeyAuthentication yes
-PasswordAuthentication no
-ChallengeResponseAuthentication no
-"
-    if let kind_fedora || let kind_ubuntu; then
-	sshd_config+="GSSAPIAuthentication no$NL"
-	sshd_config+="UsePAM yes$NL"
-    fi
-
-    if [[ $ssh_login_user ]]; then
-	sshd_config+="AllowUsers $ssh_login_user$NL"
-    else
-	sshd_config+="AuthorizedKeysFile /etc/ssh/authorized_keys/%u$NL"
-    fi
-
-    local sshd_config_path="/run/tliset/sshd_config"
-    p_nl
-    p_file config:sshd_config "$sshd_config"
-    if let kind_fedora; then
-	p_cmd chcon -t etc_t config:sshd_config
-    fi
-
-    if let kind_fedora || let kind_ubuntu; then
-	local extra_sshd_options=""
-	if let sshd_extra_listen_port; then
-	    extra_sshd_options+=" -o Port=22 -o Port=$sshd_extra_listen_port"
-	fi
-	if let kind_fedora; then
-	    local service_name=sshd
-	else
-	    local service_name=ssh
-	fi
-	p_dir "service:$service_name.service.d"
-	p_file "service:$service_name.service.d/tliset.conf" "\
-[Service]
-Type=simple
-PIDFile=
-ExecStart=
-ExecStart=/usr/sbin/sshd -D -e -f $gen_config/sshd_config$extra_sshd_options
-"
-    elif let kind_coreos; then
-	if let sshd_extra_listen_port; then
-	    p_dir service:sshd.socket.d
-	    p_file service:sshd.socket.d/tliset.conf "\
-[Socket]
-ListenStream=$sshd_extra_listen_port
-"
-	fi
-	p_dir service:sshd@.service.d
-	p_file service:sshd@.service.d/tliset.conf "\
-[Service]
-ExecStart=
-ExecStart=-/usr/sbin/sshd -i -f $sshd_config_path
-"
-    fi
-
-    if let with_enabled_sshd; then
-	# On coreos this is enabled by default
-	if let kind_fedora || let kind_ubuntu; then
-	    multi_user_wants+=(sshd.service)
-	fi
-    else
-	p_mask_service sshd.service
-	p_mask_service sshd.socket	
-    fi
-
-    dec_log_level
-}
-
-setup_users() {
-    log "Checking users"
-    inc_log_level
-    local i
-    for ((i=0; i<${#extra_system_users[@]}; i+=2)); do
-	local user_name="${extra_system_users[$((i+0))]}"
-	local user_id="${extra_system_users[$((i+1))]}"
-	if ! id -u "$user_name" 2>/dev/null 1>&2; then
-	    log "creating user name=$user_name id=$user_id"
-	    groupadd -g "$user_id" "$user_name"
-	    useradd -g "$user_id" -u "$user_id" "$user_name"
-	    passwd -d "$user_name"
-	fi
-    done
-    dec_log_level
-}
-
 setup_services() {
     log "Checking services"
     inc_log_level
 
     setup_hippyru_backup
 
-    if let with_zswap; then
-	p_add_raw 'printf 1 > /sys/module/zswap/parameters/enabled || :'
-    fi
-
-    if let kind_fedora && ! let with_docker; then
-	p_mask_service docker.service
-    fi
-
     if let with_docker; then
 	# Make sure that docker starts. On CoreOS docker is
 	# socket-activated by default which breaks restarting
 	# containers on boot unless a docker client runs
-	multi_user_wants+=(docker.service)
+	if ! under_qubes; then
+	    multi_user_wants+=(docker.service)
+	fi
 
-    fi
-
-    if let kind_coreos; then
-	# Ignore system and user configs
-	#p_mask_service system-cloudinit@.service
-	#p_mask_service user-cloudinit@.service
-	:
-    fi
-
-    if let with_vol_storage; then
-	p_file scripts:mount-vol.sh "$(cat <<'EOF'
-#!/bin/sh
-set -e -u
-mkdir -p /vol
-root_mount="$(grep ' / ' /proc/mounts)"
-root_device_prefix="${root_mount%%[0-9]*}"
-case "$root_device_prefix" in
-    /dev/sda ) device=/dev/sdb ;;
-    /dev/vda ) device=/dev/vdb ;;
-    * ) echo "Cannot deduce storage device, root_device_prefix='$root_device_prefix' root_mount='$root_mount'" 1>&2; exit 1 ;;
-esac
-
-test -b "$device" || { echo "No extra storage" 1>&2; exit 0; }
-if ! grep -q "^$device\>" /proc/mounts && ! mount -t ext4 "$device" /vol 2>/dev/null; then
-    set -x
-    mkfs.ext4 "$device"
-    mount -t ext4 "$device" /vol
-    set +x
-fi
-if [[ ! -d /vol/src ]]; then
-    set -x
-    tmp="$(mktemp -d -p /vol)"
-    chmod 755 "$tmp" && chown core:core "$tmp" && mv "$tmp" /vol/src || \
-        { rmdir "$tmp"; exit 1; }
-    set +x
-fi
-if [[ ! -d /vol/docker ]]; then
-    mkdir -m 755 /vol/docker
-fi
-mount --bind /vol/docker /var/lib/docker
-EOF
-)"
-	p_file service:tliset-mount-vol.service "\
-[Unit]
-Before=docker.service
-[Service]
-Type=oneshot
-ExecStart=/bin/sh $gen_scripts/mount-vol.sh
+	local docker_lib_dir=
+	if under_qubes; then
+	    docker_lib_dir=/rw/varlib/docker
+	fi
+	local docker_service_lines=()
+	if [[ $docker_lib_dir ]]; then
+	    local unit
+	    unit="$(systemd-escape -p "/var/lib/docker").mount"
+	    p_nl
+	    p_file "service:$unit" "\
+[Mount]
+Where=/var/lib/docker
+Type=none
+Options=bind
+What=$docker_lib_dir
 "
-	multi_user_wants+=(tliset-mount-vol.service)
+	    docker_service_lines+=(
+		"[Unit]"
+		"BindsTo=$unit"
+		"After=$unit"
+	    )
+	fi
+
+	if let kind_fedora; then
+	    p_mask_service docker-storage-setup.service
+	    local exec_start=(
+		/usr/bin/dockerd-current
+		--add-runtime oci=/usr/libexec/docker/docker-runc-current
+		--default-runtime=oci
+		--containerd /run/containerd.sock
+		--exec-opt native.cgroupdriver=systemd
+		--userland-proxy=false
+		--log-driver=journald
+		--storage-driver=overlay2
+	    )
+	    docker_service_lines+=(
+		"[Service]"
+		"ExecStart="
+		"ExecStart=${exec_start[*]}"
+	    )
+	fi
+
+	if [[ $NAME == r2 ]]; then
+	    docker_service_lines+=(
+		"[Service]"
+		"Environment=DOCKER_OPTS=--userland-proxy=false"
+	    )
+
+	fi
+
+	if [[ ${#docker_service_lines[@]} -ne 0 ]]; then
+	    p_dir service:docker.service.d
+	    local text
+	    printf -v text '%s\n' "${docker_service_lines[@]}"
+	    p_file service:docker.service.d/tliset.conf "$text"
+	fi
     fi
 
     dec_log_level
@@ -1486,19 +937,20 @@ ImageName $NAME
 ImageName local/transdock
 HostEnv TLS_HOSTS media.mir2.org
 HostEnv ACME_CONTACT mailto:igor@mir2.org
+UseHostNetwork
 "
 		;;
-	    thip ) setup_thip_files ;;
 	esac
     fi
-    if [[ $NAME == miranda ]]; then
-	setup_miranda_dpodctl
+    if [[ $NAME == rhea ]]; then
+	setup_dpodctl
+	ensure_dir -u "$primary_user" "$primary_group" /vol/projects
     fi
 }
 
-setup_miranda_dpodctl() {
+setup_dpodctl() {
     local net_name="development"
-    
+
     local dir="/vol/build"
     ensure_dir /vol "$dir"
 
@@ -1523,13 +975,9 @@ setup_miranda_dpodctl() {
 	    transdock )
 		config+="\
 Include $projects_root/$i/config.dpod
-#AddHost boulder-mysql 127.0.0.1
-#AddHost boulder-rabbitmq 127.0.0.1
-#AddHost boulder 127.0.0.1
-#AddHost boulder-hsm 127.0.0.1
 DnsAlias media.mir2.org
 DnsAlias test.media.mir2.org
-HostEnv TLS_HOSTS 'media.mir2.org test.media.mir2.org' 
+HostEnv ACME_HOST 'media.mir2.org test.media.mir2.org'
 HostEnv ACME_CA http://boulder:4000/directory
 HostEnv ACME_CONTACT mailto:igor@mir2.org
 "
@@ -1569,7 +1017,7 @@ HostEnv ACME_CA http://boulder:4000/directory
 			    www.lubava.info lubava.info
 			) ;;
 		esac
-		ensure_dir -m 0750 /vol/$i
+		ensure_dir -m 0700 /vol/$i
 		;;
 	esac
 	config+="\
@@ -1582,7 +1030,7 @@ NetworkIPv4 $ipv4
 	    config+="DnsAlias $dns_alias$NL"
 	    etc_host_overrides+="$ipv4 $dns_alias$NL"
 	done
-	
+
 	write_file "$dir/$i/config.dpod" "$config"
 	if [[ $uses_generator ]]; then
 	    ensure_dir -P "$dir/$i/gen"
@@ -1590,7 +1038,7 @@ NetworkIPv4 $ipv4
     done
 
     write_file -P "$dir/test_etc_hosts" "$etc_host_overrides"
-    
+
     if ! docker version -f '{{.Server.Version}}' > /dev/null 2>&1; then
 	log "Attempting to start the docker daemon"
 	cmd_log systemctl start docker
@@ -1611,7 +1059,19 @@ NetworkIPv4 $ipv4
 
 }
 
-. "$selfdir/zram-setup"
+setup_accounts() {
+    if let with_sudoless_docker; then
+	local s
+	s="$(getent group docker 2>/dev/null || :)"
+	if [[ ! $s  ]]; then
+	    cmd_log groupadd docker
+	fi
+	if ! [[ $s =~ ^[^:]+:[^:]*:[^:]+:(.*,)?"$primary_user"(,|$) ]]; then
+	    cmd_log usermod -aG docker "$primary_user"
+	fi
+    fi
+}
+
 
 show_usage=""
 NAME=""
@@ -1628,7 +1088,7 @@ while getopts :hn:r:u: opt; do
 	r )
 	    remote="$OPTARG"
 	    is_valid_host_name "$remote" || \
-		usage_err "The value of -n argument '$remote' is not a known host name."
+		usage_err "The value of -r argument '$remote' is not a known host name."
 	    ;;
 	* ) getopts_err "$opt" "${OPTARG-}";;
     esac
@@ -1651,15 +1111,11 @@ if [[ -n "$show_usage" ]]; then
     exit
 fi
 
-if [[ -n "$remote" ]]; then
+if [[ $remote ]]; then
     NAME=$remote
 elif [[ -z "$NAME" ]]; then
-    read_hostname
+    read_tliset_name
     NAME="$R"
-    if ! is_valid_host_name "$NAME"; then
-	err "The content of /etc/hostname is '$NAME' is not a supported name." \
-	    "Use -n option to set the hostname explicitly."
-    fi
 fi
 
 get_host_options
@@ -1689,78 +1145,21 @@ else
 	err "primary_user and primary_group must be set when not using sudo"
 fi
 
-setup_hostname
-
-if let kind_coreos; then
-    with_networkd=1
-fi
-
-if which systemctl 2> /dev/null 1>&2; then
-    readonly has_systemd=1
-else
-    readonly has_systemd=0
-fi
-
-if ! let has_systemd; then
-    virt=""
-else
-    virt="$(systemd-detect-virt -v || true)"
-    if [[ "$virt" == none ]]; then
-        virt=""
-    fi
-fi
-
-if [[ "$virt" == kvm ]]; then
-    # systemd detects incorrectly
-    if lspci | grep -q VirtualBox; then
-	virt=oracle
-    fi
-fi
-
-if [[ "$virt" == oracle ]]; then
-    readonly with_virtual_box_network="1"
-else
-    readonly with_virtual_box_network="0"
-fi
-
-if let with_networkd_if_virt && [[ $virt ]]; then
-    with_networkd=1
-fi
-
-if let kind_coreos && ! let with_enabled_sshd; then
-    err "On CoreOS sshd must always be enabled"
-fi
-
-#if let kind_coreos; then
-#    [[ ! -d /media/configdrive && ! -d /media/configvirtfs ]] || \
-#	err "Cannot configure CoreOS that under cloudconfig control"
-#fi
-
 if let kind_fedora; then
     fedora_release="$(rpm -E %fedora)"
 fi
 
+if ! under_qubes; then
+    setup_packages
+fi
+
 start_generator_write
 
-if [[ ! -d /var/lib/tliset ]]; then
-    mkdir -p -m 755 /var/lib/tliset
-fi
-
-setup_fstab
-setup_dir_and_mounts
-setup_packages
-setup_grub
-setup_sudo
-if let with_zram; then
-    setup_zram
-fi
-setup_sshd
+setup_kernel_parameters
 setup_network
-if let kind_fedora; then
-    setup_users
-fi
 setup_services
 setup_files
+setup_accounts
 
 finish_generator_write
 log "Done."
