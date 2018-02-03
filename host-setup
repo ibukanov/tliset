@@ -4,7 +4,7 @@ source "$(dirname "$0")/lib.bash"
 
 #set -x
 
-valid_host_names=(bergenrabbit hippyru lubavainfo r2 rhea)
+valid_host_names=(bergenrabbit hippyru lubavainfo r2 rhea thip)
 
 declare -i kind_coreos=0
 declare -i kind_fedora=0
@@ -57,12 +57,16 @@ get_host_options() {
 	    ;;
  	rhea )
 	    with_common_packages=1
-	    with_zram=0
-            with_zswap=1
 	    with_docker=1
+	    with_zram=0
+	    with_zswap=1
 
 	    # disable until user namespaces works
 	    with_sudoless_docker=0
+	    ;;
+	thip )
+	    ssh_login_user=core
+	    with_docker=1
 	    ;;
 	* )
 	    err "unknown '$NAME'"
@@ -571,31 +575,6 @@ setup_zram() {
     log "Checking zram"
 
     p_nl
-    p_file -x top:/run/tliset/zram-status "$(cat <<'EOF'
-#!/bin/sh
-set -e -u
-
-dir=/sys/block/zram0
-if test ! -d "$dir"; then
-    echo "status: disabled"
-    exit 0
-fi
-
-mem_used_total="$(cat $dir/mem_used_total)"
-orig_data_size="$(cat $dir/orig_data_size)"
-
-echo "status: enabled"
-echo "compressed_size: $(($mem_used_total * 100 / $orig_data_size))%"
-echo "disksize: $(($(cat $dir/disksize) / 1048576))M"
-echo "compr_data_size: $(($(cat $dir/compr_data_size) / 1024))K"
-echo "orig_data_size: $(($orig_data_size / 1024))K"
-echo "mem_used_total: $(($mem_used_total / 1024))K"
-echo "max_comp_streams: $(cat $dir/max_comp_streams)"
-echo "comp_algorithm: $(cat $dir/comp_algorithm)"
-EOF
-)"
-
-    p_nl
     p_file top:/run/tliset/zram-enable.sh "$(cat <<'EOF'
 set -e -u
 
@@ -618,7 +597,7 @@ read_memtotal() {
 }
 
 read_memtotal
-SWAP_SIZE=$(($memtotal / 10 * 18))
+SWAP_SIZE=$(($memtotal / 10 * 12))
 
 num_cpus=$(grep -c processor /proc/cpuinfo)
 if [[ 0 = "$num_cpus" ]]; then
@@ -925,30 +904,34 @@ What=$docker_lib_dir
 setup_files() {
     if let kind_coreos; then
 	case $NAME in
-	    bergenrabbit | hippyru | lubavainfo  )
-		ensure_dir /opt /opt/dpodctl "/opt/dpodctl/$NAME"
-		write_file "/opt/dpodctl/$NAME/config.dpod" "\
+	bergenrabbit | hippyru | lubavainfo  )
+	    ensure_dir /opt /opt/dpodctl "/opt/dpodctl/$NAME"
+	    write_file "/opt/dpodctl/$NAME/config.dpod" "\
 ImageName $NAME
 "
-		;;
-	    r2 )
-		ensure_dir /opt /opt/dpodctl "/opt/dpodctl/transdock"
-		write_file "/opt/dpodctl/transdock/config.dpod" "\
+	    ;;
+	r2 )
+	    ensure_dir /opt /opt/dpodctl "/opt/dpodctl/transdock"
+	    write_file "/opt/dpodctl/transdock/config.dpod" "\
 ImageName local/transdock
 HostEnv TLS_HOSTS media.mir2.org
 HostEnv ACME_CONTACT mailto:igor@mir2.org
 UseHostNetwork
 "
-		;;
+	    ;;
+	thip )
+	    setup_development_dpodctl
+	    ensure_dir /vol
+	    ensure_dir -u "$primary_user" "$primary_group" /vol/projects
 	esac
     fi
     if [[ $NAME == rhea ]]; then
-	setup_dpodctl
+	ensure_dir /vol
 	ensure_dir -u "$primary_user" "$primary_group" /vol/projects
     fi
 }
 
-setup_dpodctl() {
+setup_development_dpodctl() {
     local net_name="development"
 
     local dir="/vol/build"
@@ -957,7 +940,7 @@ setup_dpodctl() {
     # HostEnv lines for browser-thip with IP addresses of
     # hippyru-related hosts.
     local browser_thip_host_config=""
-    local projects_root="/home/$primary_user/p"
+    local projects_root="/vol/projects"
 
     local etc_host_overrides="\
 127.0.0.1   localhost
@@ -974,19 +957,24 @@ setup_dpodctl() {
 	case $i in
 	    transdock )
 		config+="\
-Include $projects_root/$i/config.dpod
+IncludeBuild $projects_root/$i/config.dpod
 DnsAlias media.mir2.org
 DnsAlias test.media.mir2.org
-HostEnv ACME_HOST 'media.mir2.org test.media.mir2.org'
+HostEnv ACMELOOP_HOST 'media.mir2.org test.media.mir2.org'
+HostEnv ACMELOOP_CA http://boulder:4000/directory
+HostEnv ACMELOOP_CONTACT mailto:igor@mir2.org
+
+HostEnv TLS_HOSTS 'media.mir2.org test.media.mir2.org'
 HostEnv ACME_CA http://boulder:4000/directory
 HostEnv ACME_CONTACT mailto:igor@mir2.org
+
 "
 		dns_aliases=(media.mir2.org test.media.mir2.org)
 		;;
 	    browser-thip )
 		uses_generator=
 		config+="\
-IncludeBuildDir $projects_root/hippyru-dock/tools/$i
+IncludeBuild $projects_root/hippyru-dock/tools/$i/config.dpod
 "
 		config+="$browset_thip_host_config"
 		;;
@@ -1000,22 +988,22 @@ Include $projects_root/$i/config.dpod
 HostEnv ${i^^}_HOST $ipv4
 "
 		config+="\
-Include $projects_root/hippyru-dock/$i/config.dpod
+IncludeBuild $projects_root/hippyru-dock/image/build.config.dpod
 HostEnv ACME_CA http://boulder:4000/directory
 "
 		case $i in
-		    bergenrabbit )
-			dns_aliases+=(
-			    www.bergenrabbit.net bergenrabbit.net www.bergenrabbit.no bergenrabbit.no
-			) ;;
-		    hippyru )
-			dns_aliases+=(
-			    www.hippyru.net hippyru.net www.hippy.ru hippy.ru
-			) ;;
-		    lubavainfo )
-			dns_aliases+=(
-			    www.lubava.info lubava.info
-			) ;;
+		bergenrabbit )
+		    dns_aliases+=(
+			www.bergenrabbit.net bergenrabbit.net www.bergenrabbit.no bergenrabbit.no
+		    ) ;;
+		hippyru )
+		    dns_aliases+=(
+			www.hippyru.net hippyru.net www.hippy.ru hippy.ru
+		    ) ;;
+		lubavainfo )
+		    dns_aliases+=(
+			www.lubava.info lubava.info
+		    ) ;;
 		esac
 		ensure_dir -m 0700 /vol/$i
 		;;
@@ -1057,6 +1045,26 @@ NetworkIPv4 $ipv4
 	cmd_log docker network create --subnet="$subnet" "$net_name" > /dev/null
     fi
 
+    local container="development.proxy"
+    local status
+    status="$(docker inspect --type container -f {{.State.Running}} "$container" 2>/dev/null || :)"
+    if [[ $status != true ]]; then
+	if [[ $status ]]; then
+	    docker rm -v "$container"
+	fi
+	docker build -t "local/$container" - <<EOF
+FROM alpine:latest
+RUN apk update && apk add tinyproxy && rm -rf /var/cache/apk/*
+RUN sed -i \
+    -e 's|^Allow |#&|' -e 's|#LogFile .*|LogFile "/dev/stderr"|' \
+    /etc/tinyproxy/tinyproxy.conf
+USER tinyproxy
+CMD ["/usr/sbin/tinyproxy", "-d"]
+EOF
+	docker run -d --name "$container" --restart=unless-stopped \
+	    --net "$net_name" --ip "$dev_docker_network_prefix.150" \
+	    "local/$container"
+    fi
 }
 
 setup_accounts() {
