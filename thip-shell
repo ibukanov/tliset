@@ -19,12 +19,12 @@ readonly user_unit_dir="$XDG_RUNTIME_DIR/systemd/user"
 readonly user_unit="$name.service"
 readonly user_unit_path="$user_unit_dir/$user_unit"
 
-export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent-$name.socket"
-
 readonly dir=/vol/vm/coreos
 readonly rundir="/tmp/vm/$name"
 
 readonly socks_proxy_port=25346
+
+export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent-thip.socket"
 
 log() {
 	printf '%s\n' "$*"
@@ -41,15 +41,15 @@ cmd_log() {
 }
 
 fetch_as_tmp_file() {
-	local name="$1"
-	curl -o "$name.tmp" "$base_url/$name"
+	local file="$1"
+	curl -o "$file.tmp" "$base_url/$file"
 }
 
 check_gpg_signature() {
-	local path="$1"
+	local path="$1" sig="$2"
 	local gpg_output
 	log "Checking $path signature"
-	gpg_output="$(gpg --batch --verify "$path.sig" "$path" 2>&1 || true)"
+	gpg_output="$(gpg --batch --verify "$sig" "$path" 2>&1 || true)"
 	if ! grep -q "^gpg: Good signature from " <<< "$gpg_output"; then
 		err "$gpg_output"
 	fi
@@ -57,7 +57,7 @@ check_gpg_signature() {
 
 umask 002
 
-setup_coreos() {
+setup_coreos_images() {
 
 	if [[ ! -d $dir ]]; then
 		mkdir -p "$dir"
@@ -70,15 +70,11 @@ setup_coreos() {
 			log "Importing CoreOS key"
 			curl "$key_url" | gpg --import -
 		fi
-		fetch_as_tmp_file "${prefix}.sh"
-		fetch_as_tmp_file "${prefix}.sh.sig"
 		fetch_as_tmp_file "${prefix}_image.img.bz2"
 		fetch_as_tmp_file "${prefix}_image.img.bz2.sig"
-		check_gpg_signature "${prefix}.sh.tmp"
-		check_gpg_signature "${prefix}_image.img.bz2.tmp"
-		mv "${prefix}.sh.tmp" "${prefix}.sh"
+		check_gpg_signature "${prefix}_image.img.bz2.tmp" "${prefix}_image.img.bz2.sig.tmp"
 		mv "${prefix}_image.img.bz2.tmp" "${prefix}_image.img.bz2"
-		rm "${prefix}.sh.sig.tmp" "${prefix}_image.img.bz2.sig.tmp"
+		rm "${prefix}_image.img.bz2.sig.tmp"
 	fi
 
 	if [[ ! -f ${prefix}_image.img ]]; then
@@ -110,13 +106,15 @@ setup_coreos() {
 
 }
 
-start_vm() {
+setup_coreos_config() {
 	rm -rf "$rundir"
+
+	mkdir -m 700 "$rundir"
 
 	mkdir -p "$rundir/configdrive/openstack/latest"
 
 	local ssh_keys_yaml
-	ssh_keys_yaml="$(ssh-add -L | head -1 | sed -e 's/^/  - /' || :)"
+	ssh_keys_yaml="$(ssh-add -L | sed -e 's/^/  - /' || :)"
 	[[ $ssh_keys_yaml ]] || err "ssh agent at $SSH_AUTH_SOCK has no identities"
 
 	printf %s '#!/bin/bash
@@ -172,6 +170,25 @@ coreos:
         ExecStart=/bin/bash /media/configvirtfs/setup_storage
 " > "$rundir/configdrive/openstack/latest/user_data"
 
+	printf %s "
+HostKeyAlias $name
+HostName 127.0.0.1
+CheckHostIP no
+Port 2222
+User core
+Ciphers aes128-gcm@openssh.com
+IdentitiesOnly no
+IdentityFile none
+IdentityAgent $SSH_AUTH_SOCK
+ForwardAgent yes
+UserKnownHostsFile $rundir/ssh.known_hosts
+" > "$rundir/ssh.conf"
+
+	chmod 600 "$rundir/ssh.conf"
+}
+
+start_vm() {
+
 	local args=(
 		-name "$name-coreos"
 		-machine accel=kvm
@@ -189,7 +206,7 @@ coreos:
 		-qmp "unix:$rundir/qmp-sock,server,nowait"
 	)
 
-	qemu-system-x86_64 "${args[@]}" < /dev/null &> "$rundir/qemu.log" &
+	qemu-system-x86_64 "${args[@]}" < /dev/null > "$rundir/log" 2>&1 &
 	local qemu_pid="$!"
 	disown "$qemu_pid"
 
@@ -198,11 +215,9 @@ coreos:
 	while : ; do
 		sleep 0.5
 		local ssh_opts=(
-			-A
 			-o StrictHostKeyChecking=no
 			-o ExitOnForwardFailure=yes
 			-o ControlMaster=yes
-			-o KbdInteractiveAuthentication=no
 			-L "8888:192.168.96.150:8888"
 		)
 		ssh -vvv "${ssh_opts[@]}" -f -N "$name" && break
@@ -215,10 +230,7 @@ coreos:
 	done
 	log "$name started and ssh is ready"
 	echo "$qemu_pid" > "$rundir/pid"
-
-	# Use -nodaemon/disown to force stderr/stdout log in lsyncd that we
-	# redirect to the desired file
-	/usr/bin/lsyncd -nodaemon "/vol/projects/tliset/lsyncd/$name" &> "$rundir/lsyncd.log"
+	/usr/bin/lsyncd -nodaemon "/vol/projects/tliset/lsyncd/$name" &
 	disown
 }
 
@@ -266,7 +278,8 @@ elif ! systemctl --user is-active -q "$user_unit"; then
 fi
 
 if [[ $start_user_unit ]]; then
-	setup_coreos
+	setup_coreos_images
+	setup_coreos_config
 	mkdir -p "$user_unit_dir"
 	printf %s '
 [Service]
