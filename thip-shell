@@ -1,0 +1,283 @@
+#!/bin/bash
+
+set -e -u -o pipefail
+shopt -s lastpipe
+
+readonly channel=beta
+readonly base_url="https://$channel.release.core-os.net/amd64-usr/current"
+readonly key_uid='CoreOS Buildbot (Offical Builds) <buildbot@coreos.com>'
+readonly key_url="https://coreos.com/security/image-signing-key/CoreOS_Image_Signing_Key.pem"
+readonly prefix="coreos_production_qemu"
+
+readonly name=thip
+readonly vm_memory=1024M
+readonly data_vol="data.img"
+readonly data_vol_size=145G
+readonly swap_vol="swap.img"
+
+readonly user_unit_dir="$XDG_RUNTIME_DIR/systemd/user"
+readonly user_unit="$name.service"
+readonly user_unit_path="$user_unit_dir/$user_unit"
+
+export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent-$name.socket"
+
+readonly dir=/vol/vm/coreos
+readonly rundir="/tmp/vm/$name"
+
+readonly socks_proxy_port=25346
+
+log() {
+	printf '%s\n' "$*"
+}
+
+err() {
+	log "$@"
+	exit 1
+}
+
+cmd_log() {
+	log "$@"
+	"$@"
+}
+
+fetch_as_tmp_file() {
+	local name="$1"
+	curl -o "$name.tmp" "$base_url/$name"
+}
+
+check_gpg_signature() {
+	local path="$1"
+	local gpg_output
+	log "Checking $path signature"
+	gpg_output="$(gpg --batch --verify "$path.sig" "$path" 2>&1 || true)"
+	if ! grep -q "^gpg: Good signature from " <<< "$gpg_output"; then
+		err "$gpg_output"
+	fi
+}
+
+umask 002
+
+setup_coreos() {
+
+	if [[ ! -d $dir ]]; then
+		mkdir -p "$dir"
+	fi
+
+	cd "$dir"
+
+	if ! [[ -f ${prefix}_image.img.bz2 ]]; then
+		if ! gpg -k "$key_uid" > /dev/null 2>&1; then
+			log "Importing CoreOS key"
+			curl "$key_url" | gpg --import -
+		fi
+		fetch_as_tmp_file "${prefix}.sh"
+		fetch_as_tmp_file "${prefix}.sh.sig"
+		fetch_as_tmp_file "${prefix}_image.img.bz2"
+		fetch_as_tmp_file "${prefix}_image.img.bz2.sig"
+		check_gpg_signature "${prefix}.sh.tmp"
+		check_gpg_signature "${prefix}_image.img.bz2.tmp"
+		mv "${prefix}.sh.tmp" "${prefix}.sh"
+		mv "${prefix}_image.img.bz2.tmp" "${prefix}_image.img.bz2"
+		rm "${prefix}.sh.sig.tmp" "${prefix}_image.img.bz2.sig.tmp"
+	fi
+
+	if [[ ! -f ${prefix}_image.img ]]; then
+		log "Decompressing downloaded coreos image"
+		bzip2 -d "${prefix}_image.img.bz2" -c > "${prefix}_image.img.tmp"
+		mv "${prefix}_image.img.tmp" "${prefix}_image.img"
+	fi
+
+	if [[ ! -f "$data_vol" ]]; then
+		log "Allocating $data_vol - $data_vol_size"
+
+		# write zeros at the start to facilitate detection of filesystem absence
+		dd if=/dev/zero "of=$data_vol.tmp" bs=64K count=1 status=none
+		fallocate -l "$data_vol_size" "$data_vol.tmp"
+		chmod 640 "$data_vol.tmp"
+		mv "$data_vol.tmp" "$data_vol"
+	fi
+
+	if [[ ! -f "$swap_vol" ]]; then
+		log "Allocating $swap_vol - $vm_memory"
+
+		# write zeros at the start to facilitate detection of filesystem absence
+		rm -f "$swap_vol.tmp"
+		fallocate -l "$vm_memory" "$swap_vol.tmp"
+		mkswap "$swap_vol.tmp"
+		chmod 640 "$swap_vol.tmp"
+		mv "$swap_vol.tmp" "$swap_vol"
+	fi
+
+}
+
+start_vm() {
+	rm -rf "$rundir"
+
+	mkdir -p "$rundir/configdrive/openstack/latest"
+
+	local ssh_keys_yaml
+	ssh_keys_yaml="$(ssh-add -L | head -1 | sed -e 's/^/  - /' || :)"
+	[[ $ssh_keys_yaml ]] || err "ssh agent at $SSH_AUTH_SOCK has no identities"
+
+	printf %s '#!/bin/bash
+set -e -u
+if [[ ! -d /vol ]]; then
+	mkdir /vol
+fi
+
+if ! [[ -b /dev/vdb ]]; then
+	echo "cannot mount /vol - /dev/vdb does not exist" 1>&2
+else
+	if ! mount -t ext4 /dev/vdb /vol 2>/dev/null; then
+		mkfs.ext4 /dev/vdb
+		mount -t ext4 /dev/vdb /vol
+	fi
+
+	if :; then
+		if [[ ! -d /vol/docker ]]; then
+			mkdir -m 711 /vol/docker
+		fi
+
+		if [[ ! -e /var/lib/docker ]]; then
+			mkdir -m 711 /var/lib/docker
+		fi
+
+		mount --bind /vol/docker /var/lib/docker
+	fi
+fi
+
+if ! [[ -b /dev/vdc ]]; then
+	echo "cannot enable swap - /dev/vdc does not exist" 1>&2
+else
+	swapon /dev/vdc || :
+fi
+
+' > $rundir/configdrive/setup_storage
+
+	printf %s "#cloud-config
+ssh_authorized_keys:
+$ssh_keys_yaml
+
+coreos:
+  units:
+    - name: setup_storage.service
+      command: start
+      content: |
+        [Unit]
+        Before=docker.service
+        Before=sshd.socket
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/bin/bash /media/configvirtfs/setup_storage
+" > "$rundir/configdrive/openstack/latest/user_data"
+
+	local args=(
+		-name "$name-coreos"
+		-machine accel=kvm
+		-m 1024
+		-cpu host
+		-smp 2
+		-net nic,vlan=0,model=virtio
+		-net user,vlan=0,hostfwd=tcp:127.0.0.1:2222-:22,hostname="$name"
+		-drive if=virtio,index=0,file="$dir/coreos_production_qemu_image.img"
+		-drive if=virtio,index=1,file="$dir/$data_vol",format=raw
+		-drive if=virtio,index=2,file="$dir/$swap_vol",format=raw
+		-fsdev local,id=conf,security_model=none,readonly,path="$rundir/configdrive"
+		-device virtio-9p-pci,fsdev=conf,mount_tag=config-2
+		-nographic
+		-qmp "unix:$rundir/qmp-sock,server,nowait"
+	)
+
+	qemu-system-x86_64 "${args[@]}" < /dev/null &> "$rundir/qemu.log" &
+	local qemu_pid="$!"
+	disown "$qemu_pid"
+
+	log "waiting for $name to start sshd"
+	local i=0
+	while : ; do
+		sleep 0.5
+		local ssh_opts=(
+			-A
+			-o StrictHostKeyChecking=no
+			-o ExitOnForwardFailure=yes
+			-o ControlMaster=yes
+			-o KbdInteractiveAuthentication=no
+			-L "8888:192.168.96.150:8888"
+		)
+		ssh -vvv "${ssh_opts[@]}" -f -N "$name" && break
+		kill -n 0 "$qemu_pid" || err "unexpected qemu exit"
+		if let '++i>=60'; then
+			log "failed to connect to ssh at $name, shutting down"
+			stop_vm "$qemu_pid"
+			exit 1
+		fi
+	done
+	log "$name started and ssh is ready"
+	echo "$qemu_pid" > "$rundir/pid"
+
+	# Use -nodaemon/disown to force stderr/stdout log in lsyncd that we
+	# redirect to the desired file
+	/usr/bin/lsyncd -nodaemon "/vol/projects/tliset/lsyncd/$name" &> "$rundir/lsyncd.log"
+	disown
+}
+
+stop_vm() {
+	local pid="$1"
+	printf '{ "execute": "qmp_capabilities" }\n { "execute": "system_powerdown" }' \
+		| nc -U "$rundir/qmp-sock"
+	local i;
+	for ((i=0; i<100; i+=1)); do
+		sleep 0.05
+		if ! kill -0 "$pid" 2>/dev/null; then
+			echo "qemu has performed clean powerdown" >&2
+			break
+		fi
+	done
+	if let 'i>=100'; then
+		echo "qemu has not performed a clean powerdown after 5 seconds" >&2
+	fi
+}
+
+if [[ $# -eq 0 ]]; then
+	set -- run
+fi
+
+case "$1" in
+run ) shift 1 ;;
+stop ) exec systemctl --user stop "$user_unit" ;;
+status ) exec systemctl --user status "$user_unit" ;;
+internal )
+	shift
+	"$@"
+	exit 0
+	;;
+* ) err "unknown command - $1"
+esac
+
+start_user_unit=
+if [[ ! -f $user_unit_path ]]; then
+	start_user_unit=1
+elif ! systemctl --user is-active -q "$user_unit"; then
+	if systemctl --user is-failed -q "$user_unit"; then
+		systemctl -q --user reset-failed "$user_unit"
+	fi
+	start_user_unit=1
+fi
+
+if [[ $start_user_unit ]]; then
+	setup_coreos
+	mkdir -p "$user_unit_dir"
+	printf %s '
+[Service]
+Environment=SSH_AUTH_SOCK='"$SSH_AUTH_SOCK"'
+Type=forking
+ExecStart='"${BASH_SOURCE[-1]}"' internal start_vm
+ExecStop='"${BASH_SOURCE[-1]}"' internal stop_vm $MAINPID
+PIDFile='"$rundir/pid"'
+' > $user_unit_path
+	systemctl --user daemon-reload
+	systemctl --user start "$user_unit"
+fi
+
+exec ssh "$name" "$@"
