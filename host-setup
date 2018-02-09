@@ -1031,40 +1031,6 @@ NetworkIPv4 $ipv4
 	log "Attempting to start the docker daemon"
 	cmd_log systemctl start docker
     fi
-
-    local subnet_template="{{range .IPAM.Config}}{{if .Subnet}}{{.Subnet}}{{end}}{{end}}"
-    local subnet="$dev_docker_network_prefix.0/24"
-    local actual_subnet
-    actual_subnet="$(docker network inspect -f "$subnet_template" "$net_name" 2> /dev/null || :)"
-    if [[ $actual_subnet && $actual_subnet != "$subnet" ]]; then
-	log "Unexpected subnet $actual_subnet for the docker network $net_name, trying to recreate network"
-	cmd_log docker network rm "$net_name" > /dev/null
-	actual_subnet=
-    fi
-    if [[ -z $actual_subnet ]]; then
-	cmd_log docker network create --subnet="$subnet" "$net_name" > /dev/null
-    fi
-
-    local container="development.proxy"
-    local status
-    status="$(docker inspect --type container -f {{.State.Running}} "$container" 2>/dev/null || :)"
-    if [[ $status != true ]]; then
-	if [[ $status ]]; then
-	    docker rm -v "$container"
-	fi
-	docker build -t "local/$container" - <<EOF
-FROM alpine:latest
-RUN apk update && apk add tinyproxy && rm -rf /var/cache/apk/*
-RUN sed -i \
-    -e 's|^Allow |#&|' -e 's|#LogFile .*|LogFile "/dev/stderr"|' \
-    /etc/tinyproxy/tinyproxy.conf
-USER tinyproxy
-CMD ["/usr/sbin/tinyproxy", "-d"]
-EOF
-	docker run -d --name "$container" --restart=unless-stopped \
-	    --net "$net_name" --ip "$dev_docker_network_prefix.150" \
-	    "local/$container"
-    fi
 }
 
 setup_accounts() {

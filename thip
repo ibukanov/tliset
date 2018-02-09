@@ -27,7 +27,7 @@ readonly socks_proxy_port=25346
 export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent-thip.socket"
 
 log() {
-	printf '%s\n' "$*"
+	printf '%s\n' "$*" >&2
 }
 
 err() {
@@ -38,6 +38,24 @@ err() {
 cmd_log() {
 	log "$@"
 	"$@"
+}
+
+escape_for_shell() {
+	R=''
+	local arg
+	for arg in "$@"; do
+		if ! [[ $arg =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+			local escaped= before_quote
+			while : ; do
+				before_quote="${arg%%\'*}"
+				[[ $arg != "$before_quote" ]] || break
+				escaped="$escaped$before_quote'\"'\"'"
+				arg="${arg#*\'}"
+			done
+			arg="'$escaped$arg'"
+		fi
+		R+="${R:+ }$arg"
+	done
 }
 
 fetch_as_tmp_file() {
@@ -109,7 +127,7 @@ setup_coreos_images() {
 setup_coreos_config() {
 	rm -rf "$rundir"
 
-	mkdir -m 700 "$rundir"
+	mkdir -p -m 700 "$rundir"
 
 	mkdir -p "$rundir/configdrive/openstack/latest"
 
@@ -189,6 +207,9 @@ UserKnownHostsFile $rundir/ssh.known_hosts
 
 start_vm() {
 
+	local net_options="user,vlan=0,hostname=$name"
+	net_options+=",hostfwd=tcp:127.0.0.1:2222-:22"
+	net_options+=",hostfwd=tcp:127.0.0.1:2223-:2223"
 	local args=(
 		-name "$name-coreos"
 		-machine accel=kvm
@@ -196,7 +217,7 @@ start_vm() {
 		-cpu host
 		-smp 2
 		-net nic,vlan=0,model=virtio
-		-net user,vlan=0,hostfwd=tcp:127.0.0.1:2222-:22,hostname="$name"
+		-net "$net_options"
 		-drive if=virtio,index=0,file="$dir/coreos_production_qemu_image.img"
 		-drive if=virtio,index=1,file="$dir/$data_vol",format=raw
 		-drive if=virtio,index=2,file="$dir/$swap_vol",format=raw
@@ -218,9 +239,8 @@ start_vm() {
 			-o StrictHostKeyChecking=no
 			-o ExitOnForwardFailure=yes
 			-o ControlMaster=yes
-			-L "8888:192.168.96.150:8888"
 		)
-		ssh -vvv "${ssh_opts[@]}" -f -N "$name" && break
+		ssh "${ssh_opts[@]}" -f -N "$name" && break
 		kill -n 0 "$qemu_pid" || err "unexpected qemu exit"
 		if let '++i>=60'; then
 			log "failed to connect to ssh at $name, shutting down"
@@ -252,11 +272,11 @@ stop_vm() {
 }
 
 if [[ $# -eq 0 ]]; then
-	set -- run
+	set -- setup
 fi
 
 case "$1" in
-run ) shift 1 ;;
+setup ) shift 1 ;;
 stop ) exec systemctl --user stop "$user_unit" ;;
 status ) exec systemctl --user status "$user_unit" ;;
 internal )
@@ -267,21 +287,22 @@ internal )
 * ) err "unknown command - $1"
 esac
 
-start_user_unit=
-if [[ ! -f $user_unit_path ]]; then
-	start_user_unit=1
-elif ! systemctl --user is-active -q "$user_unit"; then
-	if systemctl --user is-failed -q "$user_unit"; then
-		systemctl -q --user reset-failed "$user_unit"
+start_vm() {
+	local start_user_unit=
+	if [[ ! -f $user_unit_path ]]; then
+		start_user_unit=1
+	elif ! systemctl --user is-active -q "$user_unit"; then
+		if systemctl --user is-failed -q "$user_unit"; then
+			systemctl -q --user reset-failed "$user_unit"
+		fi
+		start_user_unit=1
 	fi
-	start_user_unit=1
-fi
 
-if [[ $start_user_unit ]]; then
-	setup_coreos_images
-	setup_coreos_config
-	mkdir -p "$user_unit_dir"
-	printf %s '
+	if [[ $start_user_unit ]]; then
+		setup_coreos_images
+		setup_coreos_config
+		mkdir -p "$user_unit_dir"
+		printf %s '
 [Service]
 Environment=SSH_AUTH_SOCK='"$SSH_AUTH_SOCK"'
 Type=forking
@@ -289,8 +310,73 @@ ExecStart='"${BASH_SOURCE[-1]}"' internal start_vm
 ExecStop='"${BASH_SOURCE[-1]}"' internal stop_vm $MAINPID
 PIDFile='"$rundir/pid"'
 ' > $user_unit_path
-	systemctl --user daemon-reload
-	systemctl --user start "$user_unit"
-fi
+		systemctl --user daemon-reload
+		systemctl --user start "$user_unit"
+	fi
+}
 
-exec ssh "$name" "$@"
+rc() {
+	escape_for_shell "$@"
+	ssh "$name" "$R"
+}
+
+setup_vm_docker() {
+	local net_name="development"
+	local container="development.proxy"
+	local dev_docker_network_prefix="192.168.96"
+
+    local subnet_template="{{range .IPAM.Config}}{{if .Subnet}}{{.Subnet}}{{end}}{{end}}"
+    local subnet="$dev_docker_network_prefix.0/24"
+    local actual_subnet=
+    rc docker network inspect -f "$subnet_template" "$net_name" 2> /dev/null \
+		| read -r actual_subnet || :
+    if [[ $actual_subnet != "$subnet" ]]; then
+		log "Creating docker subnet $subnet"
+		if [[ $actual_subnet ]]; then
+			cmd_log rc docker network rm "$net_name" > /dev/null
+		fi
+		cmd_log rc docker network create --subnet="$subnet" "$net_name" > /dev/null
+    fi
+
+	local dockerfile
+	IFS= read -r -d '' dockerfile <<EOF || :
+FROM alpine:latest
+RUN apk update && apk add tinyproxy && rm -rf /var/cache/apk/*
+RUN sed -i \
+    -e 's|^Allow |# &|' \
+    -e 's|#LogFile .*|LogFile "/dev/stderr"|' \
+    -e 's|^Port .*|Port 2223|' \
+    -e 's|^ConnectPort .*|# &|' \
+    /etc/tinyproxy/tinyproxy.conf
+USER tinyproxy
+CMD ["/usr/sbin/tinyproxy", "-d"]
+EOF
+	local docker_args=(
+		--restart=unless-stopped
+		--net "$net_name" --ip "$dev_docker_network_prefix.150"
+		-p 2223:2223 "local/$container"
+	)
+	local tag
+	declare -p dockerfile docker_args | sha256sum | read -r tag _
+
+	local status= current_tag=
+	rc docker inspect --type container \
+		-f  '{{.State.Running}} {{index .Config.Labels "local.tag"}}' \
+		"$container" 2>/dev/null | read -r status current_tag || :
+	if [[ $status != true || $current_tag != "$tag" ]]; then
+		log "Starting $container container"
+		if [[ $status == true ]]; then
+			cmd_log rc docker stop "$container" > /dev/null
+		fi
+		if [[ $status ]]; then
+			cmd_log rc docker rm -v "$container" > /dev/null
+		fi
+		printf %s "$dockerfile" | cmd_log rc docker build -t "local/$container" -
+		cmd_log rc docker run -d --name "$container" --label local.tag="$tag" \
+			"${docker_args[@]}" > /dev/null
+	fi
+}
+
+start_vm
+setup_vm_docker
+log Done
