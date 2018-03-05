@@ -1,0 +1,30 @@
+settings {
+   insist = 1
+}
+
+sync {
+   default.rsync,
+   source = "/home/user/p",
+   target = "thip:/vol/projects",
+--   exclude = "/hippyru-dock",
+   delay = 1,
+   rsync = {
+      perms = true,
+      chmod = "D775,F664,Fugo+X"
+   }
+}
+
+sync {
+   default.rsync,
+   source = "/home/user/p/hippyru-dock",
+   target = "root@thip:/vol/bergenrabbit/data/lib",
+   exclude = "/.git/",
+   delay = 1,
+   rsync = {
+      perms = true,
+      owner = true,
+      group = true,
+      chown = "1001:1001",
+      chmod = "D2775,F664,Fugo+X",
+   }
+}

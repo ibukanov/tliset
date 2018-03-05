@@ -1,0 +1,371 @@
+#!/bin/bash
+
+set -e -u -o pipefail
+shopt -s lastpipe
+
+log() {
+	printf '%s\n' "$*" >&2
+}
+
+err() {
+	log "$@"
+	exit 1
+}
+
+cmd_log() {
+	log "$@"
+	"$@"
+}
+
+self="${BASH_SOURCE[-1]}"
+readonly VM="${self##*/}"
+readonly self_dir="${self%/*}"
+
+coreos=
+debian=
+ssh_login_key=
+
+case "$VM" in
+thip )
+	coreos=1
+	readonly vm_memory=2048M
+	readonly data_vol_size=145G
+	readonly ssh_host_port=2222
+	readonly http_proxy_host_port=2223
+	;;
+debian )
+	debian=1
+	readonly vm_memory=1024M
+	data_vol_size=
+	readonly ssh_host_port=15022
+	readonly http_proxy_host_port=15023
+	ssh_login_key="${HOME}/.local/hsetup/vm/${VM}_ssh_login_key"
+	;;
+
+* ) err "unknown VN name - '$VM'" ;;
+esac
+
+readonly coreos debian
+readonly ssh_login_key
+
+readonly channel=beta
+readonly base_url="https://$channel.release.core-os.net/amd64-usr/current"
+readonly key_uid='CoreOS Buildbot (Offical Builds) <buildbot@coreos.com>'
+readonly key_url="https://coreos.com/security/image-signing-key/CoreOS_Image_Signing_Key.pem"
+readonly prefix="coreos_production_qemu"
+
+readonly user_unit_dir="$XDG_RUNTIME_DIR/systemd/user"
+readonly user_unit="$VM.service"
+readonly user_unit_path="$user_unit_dir/$user_unit"
+
+if [[ $coreos ]]; then
+	readonly dir=/vol/vm/coreos
+elif [[ $debian ]]; then
+	readonly dir=/vol/vm/debian
+fi
+readonly rundir="$XDG_RUNTIME_DIR/vm/$VM"
+
+
+readonly main_vol="$VM-main.img"
+readonly data_vol="$VM-data.img"
+
+if [[ $ssh_login_key ]]; then
+	export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+else
+	export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent-$VM.socket"
+fi
+
+escape_for_shell() {
+	R=''
+	local arg
+	for arg in "$@"; do
+		if ! [[ $arg =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+			local escaped= before_quote
+			while : ; do
+				before_quote="${arg%%\'*}"
+				[[ $arg != "$before_quote" ]] || break
+				escaped="$escaped$before_quote'\"'\"'"
+				arg="${arg#*\'}"
+			done
+			arg="'$escaped$arg'"
+		fi
+		R+="${R:+ }$arg"
+	done
+}
+
+fetch_as_tmp_file() {
+	local file="$1"
+	curl -o "$file.tmp" "$base_url/$file"
+}
+
+check_gpg_signature() {
+	local path="$1" sig="$2"
+	local gpg_output
+	log "Checking $path signature"
+	gpg_output="$(gpg --batch --verify "$sig" "$path" 2>&1 || true)"
+	if ! grep -q "^gpg: Good signature from " <<< "$gpg_output"; then
+		err "$gpg_output"
+	fi
+}
+
+umask 002
+
+setup_vm_images() {
+
+	if [[ ! -d $dir ]]; then
+		mkdir -p "$dir"
+	fi
+
+	cd "$dir"
+
+	[[ $coreos ]] || return 0
+
+	if ! [[ -f ${prefix}_image.img.bz2 ]]; then
+		if ! gpg -k "$key_uid" > /dev/null 2>&1; then
+			log "Importing CoreOS key"
+			curl "$key_url" | gpg --import -
+		fi
+		fetch_as_tmp_file "${prefix}_image.img.bz2"
+		fetch_as_tmp_file "${prefix}_image.img.bz2.sig"
+		check_gpg_signature "${prefix}_image.img.bz2.tmp" "${prefix}_image.img.bz2.sig.tmp"
+		mv "${prefix}_image.img.bz2.tmp" "${prefix}_image.img.bz2"
+		rm "${prefix}_image.img.bz2.sig.tmp"
+	fi
+
+	if [[ ! -f $main_vol ]]; then
+		log "Decompressing downloaded coreos image"
+		bzip2 -d "${prefix}_image.img.bz2" -c > "$main_vol.tmp"
+		mv "$main_vol.tmp" "$main_vol"
+	fi
+
+	if [[ ! -f "$data_vol" ]]; then
+		log "Allocating $data_vol - $data_vol_size"
+
+		# write zeros at the start to facilitate detection of filesystem absence
+		dd if=/dev/zero "of=$data_vol.tmp" bs=64K count=1 status=none
+		fallocate -l "$data_vol_size" "$data_vol.tmp"
+		chmod 640 "$data_vol.tmp"
+		mv "$data_vol.tmp" "$data_vol"
+	fi
+}
+
+setup_vm_config() {
+	rm -rf "$rundir"
+
+	mkdir -p -m 700 "$rundir"
+
+	local ssh_config="\
+HostKeyAlias $VM
+HostName 127.0.0.1
+CheckHostIP no
+Port $ssh_host_port
+User core
+Ciphers aes128-gcm@openssh.com
+UserKnownHostsFile $rundir/ssh.known_hosts
+IdentityAgent $SSH_AUTH_SOCK
+"
+
+	if [[ $ssh_login_key ]]; then
+		local real_key
+		real_key="$(realpath $ssh_login_key)"
+		ssh_config+="\
+IdentitiesOnly yes
+IdentityFile $real_key
+ForwardAgent no
+"
+	else
+		ssh_config+="\
+IdentitiesOnly no
+IdentityFile none
+ForwardAgent yes
+"
+	fi
+
+	printf %s "$ssh_config" > "$rundir/ssh.conf"
+
+	chmod 600 "$rundir/ssh.conf"
+
+	if [[ $coreos ]]; then
+		mkdir -p "$rundir/configdrive/openstack/latest"
+
+		local ssh_keys_yaml
+		ssh_keys_yaml="$(ssh-add -L | sed -e 's/^/  - /' || :)"
+		[[ $ssh_keys_yaml ]] || err "ssh agent at $SSH_AUTH_SOCK has no identities"
+
+		local storage_script='#!/bin/sh
+set -e -u
+if ! test -d /vol; then
+	mkdir /vol
+fi
+
+if ! test -b /dev/vdb; then
+	echo "cannot mount /vol - /dev/vdb does not exist" >&2
+else
+	if ! mount -t ext4 /dev/vdb /vol 2>/dev/null; then
+		mkfs.ext4 /dev/vdb
+		mount -t ext4 /dev/vdb /vol
+	fi
+
+	if :; then
+		if [[ ! -d /vol/docker ]]; then
+			mkdir -m 711 /vol/docker
+		fi
+
+		if [[ ! -e /var/lib/docker ]]; then
+			mkdir -m 711 /var/lib/docker
+		fi
+
+		mount --bind /vol/docker /var/lib/docker
+	fi
+fi
+'
+		printf '%s' "$storage_script" > $rundir/configdrive/setup_storage
+
+		printf %s "#cloud-config
+hostname: \"$VM\"
+ssh_authorized_keys:
+$ssh_keys_yaml
+
+coreos:
+  units:
+    - name: setup_storage.service
+      command: start
+      content: |
+        [Unit]
+        Before=docker.service
+        Before=sshd.socket
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/bin/bash /media/configvirtfs/setup_storage
+" > "$rundir/configdrive/openstack/latest/user_data"
+	fi
+}
+
+start_vm() {
+
+	local net_options="user,vlan=0,hostname=$VM"
+	net_options+=",hostfwd=tcp:127.0.0.1:$ssh_host_port-:22"
+	net_options+=",hostfwd=tcp:127.0.0.1:$http_proxy_host_port-:8080"
+	local args=(
+		-name "$VM"
+		-machine accel=kvm
+		-m "$vm_memory"
+		-cpu host
+		-smp 2
+		-nographic
+		-qmp "unix:$rundir/qmp-sock,server,nowait"
+		-net nic,vlan=0,model=virtio
+		-net "$net_options"
+		-drive if=virtio,index=0,file="$dir/$main_vol"
+	)
+	if [[ $data_vol_size ]]; then
+		arg+=(-drive if=virtio,index=1,file="$dir/$data_vol",format=raw)
+	fi
+	if [[ $coreos ]]; then
+		args+=(
+			-fsdev local,id=conf,security_model=none,readonly,path="$rundir/configdrive"
+			-device virtio-9p-pci,fsdev=conf,mount_tag=config-2
+		)
+	fi
+
+	qemu-system-x86_64 "${args[@]}" < /dev/null > "$rundir/log" 2>&1 &
+	local qemu_pid="$!"
+	disown "$qemu_pid"
+
+	log "waiting for $VM to start sshd"
+	local i=0
+	while : ; do
+		sleep 0.5
+		local ssh_opts=(
+			-o StrictHostKeyChecking=no
+			-o ExitOnForwardFailure=yes
+			-o ControlMaster=yes
+		)
+		ssh "${ssh_opts[@]}" -f -N "$VM" && break
+		kill -n 0 "$qemu_pid" || err "unexpected qemu exit"
+		if let '++i>=60'; then
+			log "failed to connect to ssh at $VM, shutting down"
+			stop_vm "$qemu_pid"
+			exit 1
+		fi
+	done
+	log "$VM started and ssh is ready"
+	echo "$qemu_pid" > "$rundir/pid"
+
+	local lsyncd_config="${self_dir}/lsyncd/${VM}.lsyncd"
+	if [[ -f ${lsyncd_config} ]]; then
+		# Use -nodaemon + disown to disable logging to syslog
+		/usr/bin/lsyncd -nodaemon "${lsyncd_config}" &
+		disown
+	fi
+}
+
+stop_vm() {
+	local pid="$1"
+	printf '{ "execute": "qmp_capabilities" }\n { "execute": "system_powerdown" }' \
+		| nc -U "$rundir/qmp-sock"
+	local i;
+	for ((i=0; i<100; i+=1)); do
+		sleep 0.05
+		if ! kill -0 "$pid" 2>/dev/null; then
+			echo "qemu has performed clean powerdown" >&2
+			break
+		fi
+	done
+	if let 'i>=100'; then
+		echo "qemu has not performed a clean powerdown after 5 seconds" >&2
+	fi
+}
+
+if [[ $# -eq 0 ]]; then
+	set -- setup
+fi
+
+command="$1"
+shift
+
+case "$command" in
+setup ) ;;
+stop ) exec systemctl --user stop "$user_unit" ;;
+status ) exec systemctl --user status "$user_unit" ;;
+internal_start_vm ) start_vm "$@"; exit 0 ;;
+internal_stop_vm ) stop_vm "$@"; exit 0 ;;
+* ) err "unknown command - $command"
+esac
+
+start_vm() {
+	local start_user_unit=
+	if [[ ! -f $user_unit_path ]]; then
+		start_user_unit=1
+	elif ! systemctl --user is-active -q "$user_unit"; then
+		if systemctl --user is-failed -q "$user_unit"; then
+			systemctl -q --user reset-failed "$user_unit"
+		fi
+		start_user_unit=1
+	fi
+
+	if [[ $start_user_unit ]]; then
+		setup_vm_images
+		setup_vm_config
+		mkdir -p "$user_unit_dir"
+		printf %s '
+[Service]
+Environment=SSH_AUTH_SOCK='"$SSH_AUTH_SOCK"'
+Type=forking
+ExecStart='"${BASH_SOURCE[-1]}"' internal_start_vm
+ExecStop='"${BASH_SOURCE[-1]}"' internal_stop_vm $MAINPID
+PIDFile='"$rundir/pid"'
+' > $user_unit_path
+		systemctl --user daemon-reload
+		systemctl --user start "$user_unit"
+	fi
+}
+
+rc() {
+	escape_for_shell "$@"
+	ssh "$VM" "$R"
+}
+
+start_vm
+log Done

@@ -1,0 +1,61 @@
+#!/bin/sh
+
+set -e -u
+
+readonly ssh_host_port=15022
+readonly http_proxy_host_port=15023
+readonly VM=debian
+readonly vm_memory=1G
+
+readonly dir=/vol/vm/debian
+readonly main_vol=test-debian.img
+
+add_args() {
+    local arg escaped before_quote
+    for arg in "$@"; do
+        escaped=
+        while : ; do
+            before_quote="${arg%%\'*}"
+            [[ $arg != "$before_quote" ]] || break
+            escaped="$escaped$before_quote'\"'\"'"
+            arg="${arg#*\'}"
+        done
+        cmd="$cmd${cmd:+ }'$escaped$arg'"
+    done
+}
+
+start_vm() {
+	local net_options cmd
+
+	cmd=qemu-system-x86_64
+
+	add_args -name "$VM" -machine accel=kvm
+	add_args -m "$vm_memory" -cpu host -smp 2
+
+	net_options="user,vlan=0,hostname=$VM"
+	net_options="$net_options,hostfwd=tcp:127.0.0.1:$ssh_host_port-:22"
+	net_options="$net_options,hostfwd=tcp:127.0.0.1:$http_proxy_host_port-:8080"
+	add_args -net nic,vlan=0,model=virtio
+	add_args -net "$net_options"
+
+	add_args -drive if=virtio,index=0,file="$dir/$main_vol,format=raw,boot=on"
+	#add_args if=virtio,index=1,file="$dir/$data_vol",format=raw
+	#add_args -fsdev local,id=conf,security_model=none,readonly,path="$rundir/configdrive"
+	#add_args -device virtio-9p-pci,fsdev=conf,mount_tag=config-2
+
+	#add_args -qmp "unix:$rundir/qmp-sock,server,nowait"
+	#add_args -cdrom "$dir/debian-9.3.0-amd64-netinst.iso"
+	add_args -nographic
+	add_args -serial mon:stdio
+
+	#add_args -kernel "$dir/vmlinuz"
+	#add_args -initrd "$dir/initrd.gz"
+	#add_args -append "vga=off console=ttyS0,115200n8"
+	#add_args -append "vga=off console=ttyS0,115200n8 root=/dev/vda1 ro"
+	#add_args -boot c
+
+
+	eval "$cmd"
+}
+
+start_vm

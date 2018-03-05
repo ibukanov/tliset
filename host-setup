@@ -4,13 +4,13 @@ source "$(dirname "$0")/lib.bash"
 
 #set -x
 
-valid_host_names=(bergenrabbit hippyru lubavainfo r2 rhea thip)
+valid_host_names=(bergenrabbit r2 rhea thip)
 
 declare -i kind_coreos=0
 declare -i kind_fedora=0
 declare -i kind_ubuntu=0
 
-declare -i with_zram=1
+declare zram_size=
 declare -i with_zswap=0
 declare -i with_latex=0
 declare -i with_transgui=0
@@ -19,6 +19,8 @@ declare -i with_include_rpmfusion=1
 
 declare -i with_docker=0
 declare -i with_sudoless_docker=0
+declare -i with_docker_development_net=0
+declare -i with_http_proxy=0
 
 declare hippyru_backup_time=
 
@@ -38,28 +40,33 @@ declare -i with_disabled_disk_uuid=0
 
 readonly dev_docker_network_prefix="192.168.96"
 
+declare extra_etc_hosts=
+
 readonly gen_self_dir="/run/tliset"
 readonly gen_scripts="$gen_self_dir"
 readonly gen_config="$gen_self_dir"
 readonly gen_mount="$gen_self_dir/set"
 
+
+
 get_host_options() {
     case "$NAME" in
-	bergenrabbit | hippyru | lubavainfo )
+	bergenrabbit )
 	    ssh_login_user=core
 	    with_docker=1
+	    zram_size=512M
 	    ;;
  	r2 )
 	    hippyru_backup_time=03:00:02
 	    explicit_ipv6=(2001:41d0:e:696::1/64 2001:41d0:e:6ff:ff:ff:ff:ff)
 	    ssh_login_user=core
 	    with_docker=1
+	    zram_size=512M
 	    ;;
  	rhea )
 	    with_common_packages=1
 	    with_docker=1
-	    with_zram=0
-	    with_zswap=1
+	    zram_size=8G
 
 	    # disable until user namespaces works
 	    with_sudoless_docker=0
@@ -67,6 +74,7 @@ get_host_options() {
 	thip )
 	    ssh_login_user=core
 	    with_docker=1
+	    with_docker_development_net=1
 	    ;;
 	* )
 	    err "unknown '$NAME'"
@@ -183,7 +191,7 @@ setup_fedora_packages() {
     if let with_common_packages; then
 	list+=(
 	    tmux
-	    git sshpass lsyncd
+	    git lsyncd
 	    quilt mercurial subversion
 	    livecd-tools
 	    autoconf automake gcc-c++ kernel-devel
@@ -191,11 +199,10 @@ setup_fedora_packages() {
 	    geany geany-plugins-spellcheck
 	    tigervnc
 	    dstat strace
-	    policycoreutils-python-utils
 	    xclip xorg-x11-apps
 	    xpra
 	    xorg-x11-server-Xephyr
-	    libXScrnSaver
+	    openssh-askpass
 
 	    # filesystems
 	    udftools inotify-tools fdupes fslint
@@ -570,34 +577,15 @@ setup_kernel_parameters() {
 }
 
 setup_zram() {
-    let with_zram || return 0
+    [[ $zram_size ]] || return 0
 
     log "Checking zram"
 
     p_nl
-    p_file top:/run/tliset/zram-enable.sh "$(cat <<'EOF'
+    p_file top:/run/tliset/zram-enable.sh '
 set -e -u
 
-read_memtotal() {
-	memtotal=
-	{
-		local line
-		while read -r line; do
-			if [[ $line =~ ^MemTotal:[[:blank:]]*([0-9]+)[[:blank:]]+(.*)$ ]]; then
-				memtotal="${BASH_REMATCH[1]}"
-				local units="${BASH_REMATCH[2]}"
-				[[ $units == kB ]] || err "unexpected MemTotal units $units"
-				local scale=1024
-				memtotal="$((memtotal * scale))"
-			fi
-		done
-		local a=1
-	} < /proc/meminfo
-	[[ $memtotal ]] || err "Failed to locate MemTotal in /proc/meminfo"
-}
-
-read_memtotal
-SWAP_SIZE=$(($memtotal / 10 * 12))
+SWAP_SIZE='"$zram_size"'
 
 num_cpus=$(grep -c processor /proc/cpuinfo)
 if [[ 0 = "$num_cpus" ]]; then
@@ -606,12 +594,11 @@ fi
 
 rm -f /run/tliset/zram-device
 device="$(zramctl --find --size "$SWAP_SIZE" -t "$num_cpus")"
-printf '%s\n' "$device" > /run/tliset/zram-device
+printf "%s\\n" "$device" > /run/tliset/zram-device
 
 /sbin/mkswap "$device"
 /sbin/swapon -p 100 "$device"
-EOF
-)"
+'
 
     p_nl
     p_file top:/run/tliset/zram-disable.sh "$(cat <<'EOF'
@@ -794,22 +781,7 @@ backup_from_host() {
 
 }
 
-echo "Backing up hippyru-dock source"
-src_top="$backup_root/src"
-if [[ ! -d $src_top ]]; then
-    mkdir -p "$src_top"
-fi
-
-src_dir="$src_top/hippyru-dock"
-if [[ ! -d $src_dir ]]; then
-    git clone https://github.com/ibukanov/hippyru-dock "$src_dir"
-else
-    (cd "$src_dir" && git pull)
-fi
-
-backup_from_host hippyru hippyru.net
 backup_from_host bergenrabbit bergenrabbit.net
-backup_from_host lubavainfo lubava.info
 
 if [[ ${#remove_list[@]} -ne 0 ]]; then
     printf -v s "\\n\\t%s" "${remove_list[@]}"
@@ -904,10 +876,15 @@ What=$docker_lib_dir
 setup_files() {
     if let kind_coreos; then
 	case $NAME in
-	bergenrabbit | hippyru | lubavainfo  )
+	bergenrabbit  )
+	    ensure_dir -m 0750 -g core /vol
+	    ensure_dir -m 0750 -g core /vol/bergenrabbit
+	    ensure_dir /vol/bergenrabbit/data
+
 	    ensure_dir /opt /opt/dpodctl "/opt/dpodctl/$NAME"
 	    write_file "/opt/dpodctl/$NAME/config.dpod" "\
 ImageName $NAME
+UseHostNetwork
 "
 	    ;;
 	r2 )
@@ -920,116 +897,17 @@ UseHostNetwork
 "
 	    ;;
 	thip )
-	    setup_development_dpodctl
-	    ensure_dir /vol
-	    ensure_dir -u "$primary_user" "$primary_group" /vol/projects
+	    ensure_dir -m 0750 -g core /vol
+	    ensure_dir -m 0750 -g core /vol/bergenrabbit
+	    ensure_dir /vol/bergenrabbit/data
+
+	    ensure_dir -m 0775 -g "$primary_group" /vol/projects
+	    ;;
 	esac
     fi
     if [[ $NAME == rhea ]]; then
 	ensure_dir /vol
-	ensure_dir -u "$primary_user" "$primary_group" /vol/projects
-    fi
-}
-
-setup_development_dpodctl() {
-    local net_name="development"
-
-    local dir="/vol/build"
-    ensure_dir /vol "$dir"
-
-    # HostEnv lines for browser-thip with IP addresses of
-    # hippyru-related hosts.
-    local browser_thip_host_config=""
-    local projects_root="/vol/projects"
-
-    local etc_host_overrides="\
-127.0.0.1   localhost
-::1         localhost
-"
-
-    local i ip4_last_byte=10
-    for i in hippyru bergenrabbit lubavainfo transdock dzetacon browser-thip; do
-	local -a dns_aliases=()
-	ensure_dir "$dir/$i"
-	local ipv4="$dev_docker_network_prefix.$ip4_last_byte"
-	: $((ip4_last_byte+=1))
-	local config="" uses_generator=1
-	case $i in
-	    transdock )
-		config+="\
-IncludeBuild $projects_root/$i/config.dpod
-DnsAlias media.mir2.org
-DnsAlias test.media.mir2.org
-HostEnv ACMELOOP_HOST 'media.mir2.org test.media.mir2.org'
-HostEnv ACMELOOP_CA http://boulder:4000/directory
-HostEnv ACMELOOP_CONTACT mailto:igor@mir2.org
-
-HostEnv TLS_HOSTS 'media.mir2.org test.media.mir2.org'
-HostEnv ACME_CA http://boulder:4000/directory
-HostEnv ACME_CONTACT mailto:igor@mir2.org
-
-"
-		dns_aliases=(media.mir2.org test.media.mir2.org)
-		;;
-	    browser-thip )
-		uses_generator=
-		config+="\
-IncludeBuild $projects_root/hippyru-dock/tools/$i/config.dpod
-"
-		config+="$browset_thip_host_config"
-		;;
-	    dzetacon )
-		config+="\
-Include $projects_root/$i/config.dpod
-"
-		;;
-	    * )
-		browset_thip_host_config+="\
-HostEnv ${i^^}_HOST $ipv4
-"
-		config+="\
-IncludeBuild $projects_root/hippyru-dock/image/build.config.dpod
-HostEnv ACME_CA http://boulder:4000/directory
-"
-		case $i in
-		bergenrabbit )
-		    dns_aliases+=(
-			www.bergenrabbit.net bergenrabbit.net www.bergenrabbit.no bergenrabbit.no
-		    ) ;;
-		hippyru )
-		    dns_aliases+=(
-			www.hippyru.net hippyru.net www.hippy.ru hippy.ru
-		    ) ;;
-		lubavainfo )
-		    dns_aliases+=(
-			www.lubava.info lubava.info
-		    ) ;;
-		esac
-		ensure_dir -m 0700 /vol/$i
-		;;
-	esac
-	config+="\
-BindAddress none
-Network $net_name
-NetworkIPv4 $ipv4
-"
-	local dns_alias
-	for dns_alias in "${dns_aliases[@]:+${dns_aliases[@]}}"; do
-	    config+="DnsAlias $dns_alias$NL"
-	    etc_host_overrides+="$ipv4 $dns_alias$NL"
-	done
-
-	write_file "$dir/$i/config.dpod" "$config"
-	if [[ $uses_generator ]]; then
-	    ensure_dir -P "$dir/$i/gen"
-	fi
-    done
-
-    write_file -P "$dir/test_etc_hosts" "$etc_host_overrides"
-
-    if ! docker version -f '{{.Server.Version}}' > /dev/null 2>&1; then
-	log "Attempting to start the docker daemon"
-	cmd_log systemctl start docker
+	ensure_dir -u "$primary_user" -g "$primary_group" /vol/projects
     fi
 }
 
@@ -1046,6 +924,148 @@ setup_accounts() {
     fi
 }
 
+setup_docker_services() {
+    let with_docker || return 0
+
+    if ! docker version -f '{{.Server.Version}}' > /dev/null 2>&1; then
+	log "Attempting to start the docker daemon"
+	cmd_log systemctl start docker
+    fi
+
+    if let with_docker_development_net; then
+	local net_name="development"
+	local subnet_template
+	subnet_template='{{range .IPAM.Config}}{{if .Subnet}}{{.Subnet}}{{end}}{{end}}'
+	local subnet="$dev_docker_network_prefix.0/24"
+	local actual_subnet=
+	docker network inspect -f "$subnet_template" "$net_name" 2> /dev/null \
+	    | read -r actual_subnet || :
+	if [[ $actual_subnet != "$subnet" ]]; then
+	    log "Creating docker subnet $subnet"
+	    if [[ $actual_subnet ]]; then
+		cmd_log docker network rm "$net_name" > /dev/null
+	    fi
+	    cmd_log docker network create --subnet="$subnet" "$net_name" > /dev/null
+	fi
+
+	local extra_etc_hosts=()
+	if [[ $NAME == thip ]]; then
+	    setup_development_dpodctl
+	fi
+
+	local http_proxy_port=8080
+	local container=http-proxy
+	local dockerfile
+	IFS= read -r -d '' dockerfile <<EOF || :
+FROM alpine:latest
+RUN apk update && apk add tinyproxy && rm -rf /var/cache/apk/*
+RUN sed -i \
+    -e 's|^Allow |# &|' \
+    -e 's|#LogFile .*|LogFile "/dev/stderr"|' \
+    -e 's|^Port .*|Port $http_proxy_port|' \
+    -e 's|^ConnectPort .*|# &|' \
+    /etc/tinyproxy/tinyproxy.conf
+USER tinyproxy
+CMD ["/usr/sbin/tinyproxy", "-d"]
+EOF
+	local docker_args=(
+	    --restart=unless-stopped
+	    --net development
+	    -p "$http_proxy_port:$http_proxy_port"
+	    --cap-drop ALL
+	)
+	local i
+	for ((i=0; i<${#extra_etc_hosts[@]}; i+=2)); do
+	    local ip="${extra_etc_hosts[i]}"
+	    local hostname="${extra_etc_hosts[i+1]}"
+	    docker_args+=(--add-host "$hostname:$ip")
+	done
+	docker_args+=("local/$container")
+
+	local tag
+	declare -p dockerfile docker_args | sha256sum | read -r tag _
+
+	local status= current_tag=
+	docker inspect --type container \
+	    -f  '{{.State.Running}} {{index .Config.Labels "local.tag"}}' \
+	    "$container" 2>/dev/null | read -r status current_tag || :
+	if [[ $status != true || $current_tag != "$tag" ]]; then
+	    log "Starting $container container"
+	    if [[ $status == true ]]; then
+		cmd_log docker stop "$container" > /dev/null
+	    fi
+	    if [[ $status ]]; then
+		cmd_log docker rm -v "$container" > /dev/null
+	    fi
+	    printf %s "$dockerfile" | cmd_log docker build -t "local/$container" -
+	    cmd_log docker run -d --name "$container" --label local.tag="$tag" \
+		    "${docker_args[@]}" > /dev/null
+	fi
+    fi
+}
+
+setup_development_dpodctl() {
+    local net_name="development"
+
+    local dir="/opt/dpodctl"
+    ensure_dir /opt/dpodctl
+
+    local projects_root="/vol/projects"
+
+    local i ip4_last_byte=10
+    for i in bergenrabbit transdock; do
+	local -a dns_aliases=()
+	ensure_dir "$dir/$i"
+	local ipv4="$dev_docker_network_prefix.$ip4_last_byte"
+	: $((ip4_last_byte+=1))
+	case $i in
+	transdock )
+	    dns_aliases=(media.mir2.org test.media.mir2.org)
+	    write_file "$dir/$i/config.dpod" "\
+IncludeBuild $projects_root/$i/config.dpod
+DnsAlias media.mir2.org
+DnsAlias test.media.mir2.org
+HostEnv ACMELOOP_HOST 'media.mir2.org test.media.mir2.org'
+HostEnv ACMELOOP_CA http://boulder:4000/directory
+HostEnv ACMELOOP_CONTACT mailto:igor@mir2.org
+
+HostEnv TLS_HOSTS 'media.mir2.org test.media.mir2.org'
+HostEnv ACME_CA http://boulder:4000/directory
+HostEnv ACME_CONTACT mailto:igor@mir2.org
+BindAddress none
+Network $net_name
+NetworkIPv4 $ipv4
+"
+	    ;;
+	bergenrabbit )
+	    dns_aliases=(
+		www.bergenrabbit.net bergenrabbit.net
+		www.bergenrabbit.no bergenrabbit.no
+
+		www.hippyru.net hippyru.net lib.hippyru.net
+		www.hippy.ru hippy.ru
+
+		www.lubava.info lubava.info
+	    )
+	    local config="\
+development_mode
+docker_arg --net=$net_name
+docker_arg --ip=$ipv4
+"
+	    local dns_alias
+	    for dns_alias in "${dns_aliases[@]:+${dns_aliases[@]}}"; do
+		config+="docker_arg --net-alias=$dns_alias$NL"
+	    done
+	    write_file "/vol/$i.conf" "$config"
+	    ;;
+	esac
+
+	local dns_alias
+	for dns_alias in "${dns_aliases[@]:+${dns_aliases[@]}}"; do
+	    extra_etc_hosts+=("$ipv4" "$dns_alias")
+	done
+    done
+}
 
 show_usage=""
 NAME=""
@@ -1136,4 +1156,8 @@ setup_files
 setup_accounts
 
 finish_generator_write
+
+# Run services after the docker is configured
+setup_docker_services
+
 log "Done."
