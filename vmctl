@@ -5,92 +5,92 @@ set -e -u
 umask 002
 
 log() {
-	printf '%s\n' "$*" >&2
+    printf '%s\n' "$*" >&2
 }
 
 err() {
-	log "$@"
-	exit 1
+    log "$@"
+    exit 1
 }
 
 cmd_log() {
-	log "$@"
-	"$@"
+    log "$@"
+    "$@"
 }
 
 get_config() {
-	VM="$1"
-	readonly VM
+    VM="$1"
+    readonly VM
 
-	coreos=
-	debian=
-	centos=
-	use_ssh_login_key=
+    coreos=
+    debian=
+    centos=
+    use_ssh_login_key=
 
-	case "$VM" in
-	thip )
-		coreos=1
-		readonly vm_memory=2048M
-		readonly data_vol_size=145G
-		readonly ssh_host_port=2222
-		readonly http_proxy_host_port=2223
-		;;
-	debian )
-		debian=1
-		readonly vm_memory=1024M
-		data_vol_size=
-		readonly ssh_host_port=15022
-		readonly http_proxy_host_port=15023
-		use_ssh_login_key=1
-		;;
-	centos )
-		centos=1
-		readonly vm_memory=1024M
-		data_vol_size=
-		readonly ssh_host_port=15122
-		readonly http_proxy_host_port=15123
-		use_ssh_login_key=1
-		;;
+    case "$VM" in
+    thip )
+        coreos=1
+        readonly vm_memory=2048M
+        readonly data_vol_size=145G
+        readonly ssh_host_port=2222
+        readonly http_proxy_host_port=2223
+        ;;
+    debian )
+        debian=1
+        readonly vm_memory=1024M
+        data_vol_size=
+        readonly ssh_host_port=15022
+        readonly http_proxy_host_port=15023
+        use_ssh_login_key=1
+        ;;
+    centos )
+        centos=1
+        readonly vm_memory=1024M
+        data_vol_size=
+        readonly ssh_host_port=15122
+        readonly http_proxy_host_port=15123
+        use_ssh_login_key=1
+        ;;
 
-	* ) err "unknown VN name - '${VM}'" ;;
-	esac
+    * ) err "unknown VN name - '${VM}'" ;;
+    esac
 
-	readonly centos coreos debian
-	readonly use_ssh_login_key
+    readonly centos coreos debian
+    readonly use_ssh_login_key
 
-	if test -n "${centos}"; then
-		readonly channel=beta
-		readonly base_url="https://$channel.release.core-os.net/amd64-usr/current"
-		readonly key_uid='CoreOS Buildbot (Offical Builds) <buildbot@coreos.com>'
-		readonly key_url="https://coreos.com/security/image-signing-key/CoreOS_Image_Signing_Key.pem"
-		readonly prefix="coreos_production_qemu"
-	fi
+    if test -n "${centos}"; then
+        readonly channel=beta
+        readonly base_url="https://$channel.release.core-os.net/amd64-usr/current"
+        readonly key_uid='CoreOS Buildbot (Offical Builds) <buildbot@coreos.com>'
+        readonly key_url="https://coreos.com/security/image-signing-key/CoreOS_Image_Signing_Key.pem"
+        readonly prefix="coreos_production_qemu"
+    fi
 
-	readonly user_unit_dir="${XDG_RUNTIME_DIR}/systemd/user"
-	readonly user_unit="${VM}.service"
-	readonly user_unit_path="${user_unit_dir}/${user_unit}"
+    readonly user_unit_dir="${XDG_RUNTIME_DIR}/systemd/user"
+    readonly user_unit="${VM}.service"
+    readonly user_unit_path="${user_unit_dir}/${user_unit}"
 
-	if test -n "${coreos}"; then
-		readonly dir=/vol/vm/coreos
-		readonly ssh_user=core
-	elif test -n "${debian}"; then
-		readonly dir=/vol/vm/debian
-		readonly ssh_user=core
-	elif test -n "${centos}"; then
-		readonly dir=/vol/vm/centos
-		readonly ssh_user=root
-	fi
+    if test -n "${coreos}"; then
+        readonly dir=/vol/vm/coreos
+        readonly ssh_user=core
+    elif test -n "${debian}"; then
+        readonly dir=/vol/vm/debian
+        readonly ssh_user=core
+    elif test -n "${centos}"; then
+        readonly dir=/vol/vm/centos
+        readonly ssh_user=root
+    fi
 
-	readonly rundir="${XDG_RUNTIME_DIR}/vm/${VM}"
+    readonly rundir="${XDG_RUNTIME_DIR}/vm/${VM}"
 
-	readonly main_vol="${VM}-main.img"
-	readonly data_vol="${VM}-data.img"
+    readonly main_vol="${VM}-main.img"
+    readonly data_vol="${VM}-data.img"
 
-	if test -n "${use_ssh_login_key}"; then
-		export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR}/ssh-agent.socket"
-	else
-		export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR}/ssh-agent-$VM.socket"
-	fi
+    if test -n "${use_ssh_login_key}"; then
+        export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR}/ssh-agent.socket"
+    else
+        export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR}/ssh-agent-$VM.socket"
+    fi
 }
 
 add_args() {
@@ -108,33 +108,33 @@ add_args() {
 }
 
 fetch_as_tmp_file() {
-	local file
-	file="$1"
-	curl -o "${file}.tmp" "${base_url}/${file}"
+    local file
+    file="$1"
+    curl -o "${file}.tmp" "${base_url}/${file}"
 }
 
 check_gpg_signature() {
-	local path="$1" sig="$2"
-	local gpg_output
-	log "Checking ${path} signature"
-	gpg_output="$(gpg --batch --verify "${sig}" "${path}" 2>&1 || true)"
-	if ! printf '%s\n' "${gpg_output}" | grep -q "^gpg: Good signature from "; then
-		err "${gpg_output}"
-	fi
+    local path="$1" sig="$2"
+    local gpg_output
+    log "Checking ${path} signature"
+    gpg_output="$(gpg --batch --verify "${sig}" "${path}" 2>&1 || true)"
+    if ! printf '%s\n' "${gpg_output}" | grep -q "^gpg: Good signature from "; then
+        err "${gpg_output}"
+    fi
 }
 
 setup_vm_images() {
 
-	if ! test -d "${dir}"; then
-		mkdir -p "${dir}"
-	fi
+    if ! test -d "${dir}"; then
+        mkdir -p "${dir}"
+    fi
 
-	if test -n "${centos}"; then
-		setup_centos_images
-	fi
-	if test -n "${coreos}"; then
-		setup_coreos_images
-	fi
+    if test -n "${centos}"; then
+        setup_centos_images
+    fi
+    if test -n "${coreos}"; then
+        setup_coreos_images
+    fi
 }
 
 setup_centos_images() {
@@ -269,9 +269,9 @@ grub2-mkconfig > /boot/grub2/grub.cfg
 echo "blacklist floppy" > /etc/modprobe.d/blacklist-floppy.conf
 
 sed -i \
-	-e "s/^#?PermitRootLogin .*/PermitRootLogin prohibit-password/" \
-	-e "s/^AcceptEnv .*/#&/g" \
-	/etc/ssh/sshd_config
+    -e "s/^#?PermitRootLogin .*/PermitRootLogin prohibit-password/" \
+    -e "s/^AcceptEnv .*/#&/g" \
+    /etc/ssh/sshd_config
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
 printf "%s\\n" '"'${ssh_pubkey}'"' > /root/.ssh/authorized_keys
@@ -324,44 +324,44 @@ systemctl disable firewalld
 
 setup_coreos_images() {
 
-	cd "$dir"
+    cd "$dir"
 
-	if ! test -f "${prefix}_image.img.bz2"; then
-		if ! gpg -k "${key_uid}" > /dev/null 2>&1; then
-			log "Importing CoreOS key"
-			curl "${key_url}" | gpg --import -
-		fi
-		fetch_as_tmp_file "${prefix}_image.img.bz2"
-		fetch_as_tmp_file "${prefix}_image.img.bz2.sig"
-		check_gpg_signature "${prefix}_image.img.bz2.tmp" "${prefix}_image.img.bz2.sig.tmp"
-		mv "${prefix}_image.img.bz2.tmp" "${prefix}_image.img.bz2"
-		rm "${prefix}_image.img.bz2.sig.tmp"
-	fi
+    if ! test -f "${prefix}_image.img.bz2"; then
+        if ! gpg -k "${key_uid}" > /dev/null 2>&1; then
+            log "Importing CoreOS key"
+            curl "${key_url}" | gpg --import -
+        fi
+        fetch_as_tmp_file "${prefix}_image.img.bz2"
+        fetch_as_tmp_file "${prefix}_image.img.bz2.sig"
+        check_gpg_signature "${prefix}_image.img.bz2.tmp" "${prefix}_image.img.bz2.sig.tmp"
+        mv "${prefix}_image.img.bz2.tmp" "${prefix}_image.img.bz2"
+        rm "${prefix}_image.img.bz2.sig.tmp"
+    fi
 
-	if ! test -f "${main_vol}"; then
-		log "Decompressing downloaded coreos image"
-		bzip2 -d "${prefix}_image.img.bz2" -c > "${main_vol}.tmp"
-		mv "${main_vol}.tmp" "${main_vol}"
-	fi
+    if ! test -f "${main_vol}"; then
+        log "Decompressing downloaded coreos image"
+        bzip2 -d "${prefix}_image.img.bz2" -c > "${main_vol}.tmp"
+        mv "${main_vol}.tmp" "${main_vol}"
+    fi
 
-	if ! test -f "${data_vol}"; then
-		log "Allocating ${data_vol} - ${data_vol_size}"
+    if ! test -f "${data_vol}"; then
+        log "Allocating ${data_vol} - ${data_vol_size}"
 
-		# write zeros at the start to facilitate detection of filesystem absence
-		dd if=/dev/zero "of=${data_vol}.tmp" bs=64K count=1 status=none
-		fallocate -l "${data_vol_size}" "${data_vol}.tmp"
-		chmod 640 "${data_vol}.tmp"
-		mv "${data_vol}.tmp" "${data_vol}"
-	fi
+        # write zeros at the start to facilitate detection of filesystem absence
+        dd if=/dev/zero "of=${data_vol}.tmp" bs=64K count=1 status=none
+        fallocate -l "${data_vol_size}" "${data_vol}.tmp"
+        chmod 640 "${data_vol}.tmp"
+        mv "${data_vol}.tmp" "${data_vol}"
+    fi
 }
 
 setup_vm_config() {
-	rm -rf "${rundir}"
+    rm -rf "${rundir}"
 
-	mkdir -p -m 700 "${rundir}"
+    mkdir -p -m 700 "${rundir}"
 
-	local ssh_config
-	ssh_config="\
+    local ssh_config
+    ssh_config="\
 HostKeyAlias $VM
 HostName 127.0.0.1
 CheckHostIP no
@@ -372,63 +372,63 @@ UserKnownHostsFile ${rundir}/ssh.known_hosts
 IdentityAgent ${SSH_AUTH_SOCK}
 "
 
-	if test -n "${use_ssh_login_key}"; then
-		local real_key
-		real_key="$(realpath "${HOME}/.local/hsetup/vm/${VM}_ssh_login_key")"
-		ssh_config="${ssh_config}\
+    if test -n "${use_ssh_login_key}"; then
+        local real_key
+        real_key="$(realpath "${HOME}/.local/hsetup/vm/${VM}_ssh_login_key")"
+        ssh_config="${ssh_config}\
 IdentitiesOnly yes
 IdentityFile ${real_key}
 ForwardAgent no
 "
-	else
-		ssh_config="${ssh_config}\
+    else
+        ssh_config="${ssh_config}\
 IdentitiesOnly no
 IdentityFile none
 ForwardAgent yes
 "
-	fi
+    fi
 
-	printf %s "${ssh_config}" > "${rundir}/ssh.conf"
+    printf %s "${ssh_config}" > "${rundir}/ssh.conf"
 
-	chmod 600 "${rundir}/ssh.conf"
+    chmod 600 "${rundir}/ssh.conf"
 
-	if test -n "${coreos}"; then
-		mkdir -p "${rundir}/configdrive/openstack/latest"
+    if test -n "${coreos}"; then
+        mkdir -p "${rundir}/configdrive/openstack/latest"
 
-		local ssh_keys_yaml
-		ssh_keys_yaml="$(ssh-add -L | sed -e 's/^/  - /' || :)"
-		test -n "${ssh_keys_yaml}" || err "ssh agent at ${SSH_AUTH_SOCK} has no identities"
+        local ssh_keys_yaml
+        ssh_keys_yaml="$(ssh-add -L | sed -e 's/^/  - /' || :)"
+        test -n "${ssh_keys_yaml}" || err "ssh agent at ${SSH_AUTH_SOCK} has no identities"
 
-		local storage_script='#!/bin/sh
+        local storage_script='#!/bin/sh
 set -e -u
 if ! test -d /vol; then
-	mkdir /vol
+    mkdir /vol
 fi
 
 if ! test -b /dev/vdb; then
-	echo "cannot mount /vol - /dev/vdb does not exist" >&2
+    echo "cannot mount /vol - /dev/vdb does not exist" >&2
 else
-	if ! mount -t ext4 /dev/vdb /vol 2>/dev/null; then
-		mkfs.ext4 /dev/vdb
-		mount -t ext4 /dev/vdb /vol
-	fi
+    if ! mount -t ext4 /dev/vdb /vol 2>/dev/null; then
+        mkfs.ext4 /dev/vdb
+        mount -t ext4 /dev/vdb /vol
+    fi
 
-	if :; then
-		if ! test -d /vol/docker; then
-			mkdir -m 711 /vol/docker
-		fi
+    if :; then
+        if ! test -d /vol/docker; then
+            mkdir -m 711 /vol/docker
+        fi
 
-		if ! test -e /var/lib/docker; then
-			mkdir -m 711 /var/lib/docker
-		fi
+        if ! test -e /var/lib/docker; then
+            mkdir -m 711 /var/lib/docker
+        fi
 
-		mount --bind /vol/docker /var/lib/docker
-	fi
+        mount --bind /vol/docker /var/lib/docker
+    fi
 fi
 '
-		printf '%s' "$storage_script" > "${rundir}/configdrive/setup_storage"
+        printf '%s' "$storage_script" > "${rundir}/configdrive/setup_storage"
 
-		printf %s "#cloud-config
+        printf %s "#cloud-config
 hostname: \"$VM\"
 ssh_authorized_keys:
 $ssh_keys_yaml
@@ -446,109 +446,109 @@ coreos:
         RemainAfterExit=yes
         ExecStart=/bin/sh /media/configvirtfs/setup_storage
 " > "${rundir}/configdrive/openstack/latest/user_data"
-	fi
+    fi
 }
 
 start_vm() {
 
-	local net_options
-	net_options="user,vlan=0,hostname=$VM"
-	net_options="${net_options},hostfwd=tcp:127.0.0.1:$ssh_host_port-:22"
-	net_options="${net_options},hostfwd=tcp:127.0.0.1:$http_proxy_host_port-:8080"
+    local net_options
+    net_options="user,vlan=0,hostname=$VM"
+    net_options="${net_options},hostfwd=tcp:127.0.0.1:$ssh_host_port-:22"
+    net_options="${net_options},hostfwd=tcp:127.0.0.1:$http_proxy_host_port-:8080"
 
-	local cmd
-	cmd=qemu-system-x86_64
+    local cmd
+    cmd=qemu-system-x86_64
 
-	add_args -name "${VM}"
-	add_args -machine accel=kvm
-	add_args -m "${vm_memory}"
-	add_args -cpu host
-	add_args -smp 2
-	add_args -nographic
-	add_args -qmp "unix:${rundir}/qmp-sock,server,nowait"
-	add_args -net nic,vlan=0,model=virtio
-	add_args -net "${net_options}"
-	add_args -drive if=virtio,index=0,file="${dir}/${main_vol}"
-	if test -n "${data_vol_size}"; then
-		add_args -drive if=virtio,index=1,file="$dir/$data_vol",format=raw
-	fi
-	if test -n "${coreos}"; then
-		add_args -fsdev local,id=conf,security_model=none,readonly,path="${rundir}/configdrive"
-		add_args -device virtio-9p-pci,fsdev=conf,mount_tag=config-2
-	fi
+    add_args -name "${VM}"
+    add_args -machine accel=kvm
+    add_args -m "${vm_memory}"
+    add_args -cpu host
+    add_args -smp 2
+    add_args -nographic
+    add_args -qmp "unix:${rundir}/qmp-sock,server,nowait"
+    add_args -net nic,vlan=0,model=virtio
+    add_args -net "${net_options}"
+    add_args -drive if=virtio,index=0,file="${dir}/${main_vol}"
+    if test -n "${data_vol_size}"; then
+        add_args -drive if=virtio,index=1,file="$dir/$data_vol",format=raw
+    fi
+    if test -n "${coreos}"; then
+        add_args -fsdev local,id=conf,security_model=none,readonly,path="${rundir}/configdrive"
+        add_args -device virtio-9p-pci,fsdev=conf,mount_tag=config-2
+    fi
 
-	eval "${cmd}" < /dev/null > "${rundir}/log" 2>&1 &
-	local qemu_pid
-	qemu_pid="$!"
+    eval "${cmd}" < /dev/null > "${rundir}/log" 2>&1 &
+    local qemu_pid
+    qemu_pid="$!"
 
-	log "waiting for $VM to start sshd"
-	local i
-	i=0
-	while : ; do
-		sleep 0.5
-		local cmd
-		cmd=ssh
-		add_args -o StrictHostKeyChecking=no
-		add_args -o ExitOnForwardFailure=yes
-		add_args -o ControlMaster=yes
-		add_args -f -N "${VM}"
-		eval "${cmd}" && break
-		kill -n 0 "${qemu_pid}" || err "unexpected qemu exit"
-		: "$((i+=1))"
-		if test 60 -le "$((i+=1))"; then
-			log "failed to connect to ssh at ${VM}, shutting down"
-			stop_vm "${qemu_pid}"
-			exit 1
-		fi
-	done
-	log "${VM} started and ssh is ready"
-	echo "${qemu_pid}" > "${rundir}/pid"
+    log "waiting for $VM to start sshd"
+    local i
+    i=0
+    while : ; do
+        sleep 0.5
+        local cmd
+        cmd=ssh
+        add_args -o StrictHostKeyChecking=no
+        add_args -o ExitOnForwardFailure=yes
+        add_args -o ControlMaster=yes
+        add_args -f -N "${VM}"
+        eval "${cmd}" && break
+        kill -n 0 "${qemu_pid}" || err "unexpected qemu exit"
+        : "$((i+=1))"
+        if test 60 -le "$((i+=1))"; then
+            log "failed to connect to ssh at ${VM}, shutting down"
+            stop_vm "${qemu_pid}"
+            exit 1
+        fi
+    done
+    log "${VM} started and ssh is ready"
+    echo "${qemu_pid}" > "${rundir}/pid"
 
-	local lsyncd_config
-	lsyncd_config="${self_dir}/lsyncd/${VM}.lsyncd"
-	if test -f "${lsyncd_config}"; then
-		# Use -nodaemon + & to disable logging to syslog
-		/usr/bin/lsyncd -nodaemon "${lsyncd_config}" &
-	fi
+    local lsyncd_config
+    lsyncd_config="${self_dir}/lsyncd/${VM}.lsyncd"
+    if test -f "${lsyncd_config}"; then
+        # Use -nodaemon + & to disable logging to syslog
+        /usr/bin/lsyncd -nodaemon "${lsyncd_config}" &
+    fi
 }
 
 stop_vm() {
-	local pid
-	pid="$1"
-	printf '{ "execute": "qmp_capabilities" }\n { "execute": "system_powerdown" }' \
-		| nc -U "$rundir/qmp-sock"
-	local i;
-	i=0
-	while :; do
-		if test 100 -lt "$((i+=1))"; then
-			echo "qemu has not performed a clean powerdown after 5 seconds" >&2
-		fi
-		sleep 0.05
-		if ! kill -0 "${pid}" 2>/dev/null; then
-			echo "qemu has performed clean powerdown" >&2
-			break
-		fi
-	done
+    local pid
+    pid="$1"
+    printf '{ "execute": "qmp_capabilities" }\n { "execute": "system_powerdown" }' \
+        | nc -U "$rundir/qmp-sock"
+    local i;
+    i=0
+    while :; do
+        if test 100 -lt "$((i+=1))"; then
+            echo "qemu has not performed a clean powerdown after 5 seconds" >&2
+        fi
+        sleep 0.05
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            echo "qemu has performed clean powerdown" >&2
+            break
+        fi
+    done
 }
 
 setup_and_run_vm() {
-	local start_user_unit
-	if ! test -f $user_unit_path; then
-		start_user_unit=1
-	elif ! systemctl --user is-active -q "${user_unit}"; then
-		start_user_unit=1
-		if systemctl --user is-failed -q "${user_unit}"; then
-			systemctl -q --user reset-failed "${user_unit}"
-		fi
-	else
-		start_user_unit=
-	fi
+    local start_user_unit
+    if ! test -f $user_unit_path; then
+        start_user_unit=1
+    elif ! systemctl --user is-active -q "${user_unit}"; then
+        start_user_unit=1
+        if systemctl --user is-failed -q "${user_unit}"; then
+            systemctl -q --user reset-failed "${user_unit}"
+        fi
+    else
+        start_user_unit=
+    fi
 
-	if test -n "${start_user_unit}"; then
-		setup_vm_images
-		setup_vm_config
-		mkdir -p "${user_unit_dir}"
-		printf %s '
+    if test -n "${start_user_unit}"; then
+        setup_vm_images
+        setup_vm_config
+        mkdir -p "${user_unit_dir}"
+        printf %s '
 [Service]
 Environment=SSH_AUTH_SOCK='"${SSH_AUTH_SOCK}"'
 Type=forking
@@ -556,11 +556,11 @@ ExecStart='"${self}"' internal start_vm '"${VM}"'
 ExecStop='"${self}"' internal stop_vm '"${VM}"' $MAINPID
 PIDFile='"${rundir}/pid"'
 ' > "${user_unit_path}"
-		systemctl --user daemon-reload
+        systemctl --user daemon-reload
 
-		systemctl --user start "${user_unit}"
-	fi
-	log Done
+        systemctl --user start "${user_unit}"
+    fi
+    log Done
 }
 
 self="$(realpath "$0")"
@@ -568,22 +568,22 @@ self_dir="${self%/*}"
 readonly self self_dir
 
 if test $# -eq 0; then
-	set -- setup
+    set -- setup
 fi
 
 command="$1"
 shift
 
 if test internal = "${command}"; then
-	internal_command="$1"
-	get_config "$2"
-	shift 2
-	case "${internal_command}" in
-	start_vm ) start_vm "$@" ;;
-	stop_vm ) stop_vm "$@" ;;
-	* ) err "unknown internal command - ${internal_command}" ;;
-	esac
-	exit 0
+    internal_command="$1"
+    get_config "$2"
+    shift 2
+    case "${internal_command}" in
+    start_vm ) start_vm "$@" ;;
+    stop_vm ) stop_vm "$@" ;;
+    * ) err "unknown internal command - ${internal_command}" ;;
+    esac
+    exit 0
 fi
 
 get_config "${0##*/}"
