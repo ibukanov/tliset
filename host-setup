@@ -195,7 +195,6 @@ setup_fedora_packages() {
 	    quilt mercurial subversion
 	    livecd-tools
 	    autoconf automake gcc-c++ kernel-devel
-	    emacs
 	    geany geany-plugins-spellcheck
 	    tigervnc
 	    dstat strace
@@ -205,7 +204,7 @@ setup_fedora_packages() {
 	    openssh-askpass
 
 	    # filesystems
-	    udftools inotify-tools fdupes fslint
+	    udftools inotify-tools fdupes fslint mtools
 
 	    # encryption and backup
 	    apg duplicity perl-Digest-Bcrypt python-gdata
