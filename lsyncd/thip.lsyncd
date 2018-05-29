@@ -6,7 +6,7 @@ sync {
    default.rsync,
    source = "/home/user/p",
    target = "thip:/vol/projects",
---   exclude = "/hippyru-dock",
+   exclude = "/bergenrabbit",
    delay = 1,
    rsync = {
       perms = true,
@@ -17,7 +17,7 @@ sync {
 sync {
    default.rsync,
    source = "/home/user/p/hippyru-dock",
-   target = "root@thip:/vol/bergenrabbit/data/lib",
+   target = "root@thip:/vol/bergenrabbit/opt",
    exclude = "/.git/",
    delay = 1,
    rsync = {

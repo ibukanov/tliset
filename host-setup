@@ -4,11 +4,12 @@ source "$(dirname "$0")/lib.bash"
 
 #set -x
 
-valid_host_names=(bergenrabbit r2 rhea thip)
+valid_host_names=(bergenrabbit r2 rhea thip test-br)
 
 declare -i kind_coreos=0
 declare -i kind_fedora=0
 declare -i kind_ubuntu=0
+declare -i kind_debian=0
 
 declare zram_size=
 declare -i with_zswap=0
@@ -22,13 +23,13 @@ declare -i with_sudoless_docker=0
 declare -i with_docker_development_net=0
 declare -i with_http_proxy=0
 
-declare hippyru_backup_time=
+declare bergenrabbit_backup_time=
 
 declare ssh_login_user=
+declare machine_host=
 
 # These 2 are deduced automatically
 declare primary_user=
-declare primary_group=
 
 declare extra_system_users=()
 
@@ -39,15 +40,18 @@ declare -a explicit_ipv6=()
 declare -i with_disabled_disk_uuid=0
 
 readonly dev_docker_network_prefix="192.168.96"
-
-declare extra_etc_hosts=
+readonly dev_vz_network_prefix="192.168.97"
 
 readonly gen_self_dir="/run/tliset"
 readonly gen_scripts="$gen_self_dir"
 readonly gen_config="$gen_self_dir"
 readonly gen_mount="$gen_self_dir/set"
 
-
+bergenrabbit_dns="www.bergenrabbit.net bergenrabbit.net"
+bergenrabbit_dns="${bergenrabbit_dns} www.bergenrabbit.no bergenrabbit.no"
+bergenrabbit_dns="${bergenrabbit_dns} www.hippyru.net hippyru.net lib.hippyru.net"
+bergenrabbit_dns="${bergenrabbit_dns} www.hippy.ru hippy.ru"
+bergenrabbit_dns="${bergenrabbit_dns} www.lubava.info lubava.info"
 
 get_host_options() {
     case "$NAME" in
@@ -57,7 +61,7 @@ get_host_options() {
 	    zram_size=512M
 	    ;;
  	r2 )
-	    hippyru_backup_time=03:00:02
+	    bergenrabbit_backup_time=03:00:02
 	    explicit_ipv6=(2001:41d0:e:696::1/64 2001:41d0:e:6ff:ff:ff:ff:ff)
 	    ssh_login_user=core
 	    with_docker=1
@@ -75,6 +79,10 @@ get_host_options() {
 	    ssh_login_user=core
 	    with_docker=1
 	    with_docker_development_net=1
+	    ;;
+	test-br )
+	    ssh_login_user=core
+	    machine_host=thip
 	    ;;
 	* )
 	    err "unknown '$NAME'"
@@ -97,9 +105,10 @@ determine_os() {
     fi
 
     case "${os_kind,,}" in
-	ubuntu ) kind_ubuntu=1 ;;
-	fedora ) kind_fedora=1 ;;
 	coreos | "") kind_coreos=1 ;;
+	debian ) kind_debian=1 ;;
+	fedora ) kind_fedora=1 ;;
+	ubuntu ) kind_ubuntu=1 ;;
 	* ) err "Do not know how to determine OS, os_kind='$os_kind'" ;;
     esac
 }
@@ -141,6 +150,22 @@ read_tliset_name() {
     R="$name"
 }
 
+add_dns_record_a() {
+    local host ipv4
+    host="$1"
+    ipv4="$2"
+    escape_for_shell "--host-record=${host},${ipv4}"
+    extra_dnsmasq_eargs="${extra_dnsmasq_eargs} ${R}"
+}
+
+add_dns_interface_name() {
+    local host interface
+    host="$1"
+    interface="$2"
+    escape_for_shell "--interface-name=${host},${interface}"
+    extra_dnsmasq_eargs="${extra_dnsmasq_eargs} ${R}"
+}
+
 fixup_transgui() {
     local path=/usr/share/applications/transgui.desktop
     local line='MimeType=application/x-bittorrent;x-scheme-handler/magnet;'
@@ -153,6 +178,17 @@ fixup_transgui() {
 	chmod 644 "$tmp"
 	mv "$tmp" "$path"
     fi
+}
+
+note_path() {
+    local path
+    path="$1"
+    printf '%s\n' "${path}" 1>&9
+}
+
+setup_tliset() {
+    ensure_dir /var/lib/tliset
+    exec 9>/var/lib/tliset/paths_new.txt
 }
 
 setup_packages() {
@@ -298,7 +334,7 @@ setup_fedora_packages() {
 	fixup_transgui
     fi
 
-    printf 'new-session\n' | write_file /etc/tmux.conf
+    write_file /etc/tmux.conf "new-session${NL}"
 }
 
 setup_ubuntu_packages() {
@@ -405,63 +441,75 @@ fill_apt_action_list() {
     fi
 }
 
-# Escape argument using single quotas with with each single quote in
-# arg replaced by '"'"'
+# Set R to concatenation of arguments with spaces escaped if necessary.
 escape_for_shell() {
-    local arg="$1"
-    if [[ $arg =~ ^[-_./a-zA-Z0-9]+$ ]]; then
-	R="$arg"
-    else
-	local escaped=
-	while : ; do
-	    local before_quote="${arg%%\'*}"
-	    [[ $arg != "$before_quote" ]] || break
-	    escaped="$escaped$before_quote'\"'\"'"
-	    arg="${arg#*\'}"
-	done
-	printf -v R %s "'$escaped$arg'"
-    fi
+    R=
+    local arg
+    for arg in "$@"; do
+        case "${arg}" in
+        *[!A-Z0-9a-z_./-]* )
+            local escaped before_quote
+            escaped=
+            while : ; do
+                before_quote="${arg%%\'*}"
+                if test "x${arg}" = "x${before_quote}"; then
+                    break
+                fi
+                escaped="${escaped}${before_quote}'\\''"
+                arg="${arg#*\'}"
+            done
+            arg="'$escaped$arg'"
+            ;;
+        esac
+        R="${R}${R:+ }${arg}"
+    done
+}
+
+earg() {
+    escape_for_shell "$@"
+    eargs="${eargs}${eargs:+ }$R"
 }
 
 start_generator_write() {
     multi_user_wants=()
     sockets_wants=()
+    basic_target_wants=()
     gen_body=()
     gen_mkdir_list=()
+    with_nspawn_configs=
 }
 
 print_wants_list() {
-    local target="$1"
+    local target
+    target="$1"
     shift
-    let $# || return 0
-    p_nl
-    p_dir "service:$target.d"
-    local i wants_body="[Unit]$NL"
+    test $# -ne 0 || return 0
+    local i wants_body
+    wants_body="[Unit]${NL}"
     for i in "$@"; do
-	wants_body+="Wants=$i$NL"
+	wants_body="${wants_body}Wants=${i}${NL}"
     done
-    p_file "service:$target.d/tliset.conf" "$wants_body"
+    p_systemd_drop_in "${target}" "${wants_body}"
 }
 
 finish_generator_write() {
+    if [[ ${with_nspawn_configs} ]]; then
+	p_dir nspawn:
+    fi
     p_dir scripts:
     print_wants_list multi-user.target "${multi_user_wants[@]:+${multi_user_wants[@]}}"
     print_wants_list sockets.target "${socket_wants[@]:+${socket_wants[@]}}"
+    print_wants_list basic.target "${basic_target_wants[@]:+${basic_target_wants[@]}}"
 
-    local script="#!/bin/sh$NL"
-    if true; then
-		script+='
-if [[ -z "${TLISET_HAS_LOG-}" ]]; then
-    export TLISET_HAS_LOG=1
-    mkdir -p /run/tliset
-    exec "$0" "$@" > /run/tliset/log 2>&1
-fi
+    local script="\
+#!/bin/sh
+
+mkdir -p /run/tliset
+exec > /run/tliset/log 2>&1
+
 date '+%Y-%m-%d_%H:%M:%S'
-set -x
-'
-    fi
-    script+="\
-set -u
+
+set -x -u
 
 mkdir -p ${gen_mkdir_list[*]}
 "
@@ -473,14 +521,15 @@ mkdir -p ${gen_mkdir_list[*]}
 
     local dir="/etc/systemd/system-generators"
     if under_qubes; then
+	ensure_dir "/usr/local"
 	dir="/usr/local/etc"
     fi
 
-    ensure_dir -p "$dir"
-    write_file -m 755 "$dir/tliset" "$script"
-    if let file_update; then
+    ensure_dir "${dir}"
+    write_file -m 0755 "${dir}/tliset" "$script"
+    if test -n "${file_update}"; then
 	if under_qubes; then
-	    "$dir/tliset"
+	    "${dir}/tliset"
 	fi
 	cmd_log systemctl daemon-reload
     fi
@@ -499,26 +548,46 @@ p_nl() {
 # text that should be written into the file at that path. Option -x
 # indicattes that file must be executable.
 p_file() {
-    local -i executable=0
-    if [[ "$1" == "-x" ]]; then
-	shift
-	executable=1
-    fi
-    local file_kind_and_path="$1"
-    local body="$2"
-    convert_shell_kind_path "$file_kind_and_path"
-    local escaped_path="$R"
-    escape_for_shell "$body"
-    p_add_raw "> $escaped_path printf %s $R"
-    if let executable; then
-	p_add_raw "chmod 755 $escaped_path"
+    local executable
+    executable=
+    case "$1" in
+    -x ) shift; executable=1 ;;
+    esac
+    local file_kind_and_path body
+    file_kind_and_path="$1"
+    body="$2"
+    local path
+    convert_shell_kind_path "${file_kind_and_path}"
+    path="${R}"
+    note_path "${path}"
+    local escaped_path
+    escape_for_shell "${path}"
+    escaped_path="${R}"
+    escape_for_shell "${body}"
+    p_add_raw "> ${escaped_path} printf %s ${R}"
+    if test -n "${executable}"; then
+	p_add_raw "chmod 755 ${escaped_path}"
     fi
 }
 
 p_dir() {
-    local dir="$1"
-    convert_shell_kind_path "$dir"
+    local dir
+    dir="$1"
+    convert_shell_kind_path "${dir}"
+    dir="${R}"
+    note_path "${dir}"
+    escape_for_shell "${dir}"
     gen_mkdir_list+=("$R")
+}
+
+p_systemd_drop_in() {
+    local unit_name drop_in
+    unit_name="$1"
+    drop_in_text="$2"
+
+    p_nl
+    p_dir "service:${unit_name}.d"
+    p_file "service:${unit_name}.d/tliset.conf" "${drop_in_text}"
 }
 
 p_cmd() {
@@ -526,9 +595,9 @@ p_cmd() {
     for arg in "$@"; do
 	if [[ $arg == *:* ]]; then
 	    convert_shell_kind_path "$arg"
-	else
-	    escape_for_shell "$arg"
+	    arg="${R}"
 	fi
+	escape_for_shell "$arg"
 	s+="${s:+ }$R"
     done
     p_add_raw "$s"
@@ -541,13 +610,17 @@ convert_shell_kind_path() {
     local file_path="${file_kind_and_path#*:}"
     local dir absolute=0
     case "$file_kind" in
-	service ) dir='/run/systemd/system' ;;
-	net ) dir='/run/systemd/network' ;;
-	config ) dir="$gen_config" ;;
-	mount ) dir="$gen_mount" ;;
-	scripts ) dir="$gen_scripts" ;;
-	top ) dir="" ; absolute=1 ;;
-	* ) err "Unknown dir_kind $dir_kind" ;;
+    service ) dir='/run/systemd/system' ;;
+    net ) dir='/run/systemd/network' ;;
+    config ) dir="$gen_config" ;;
+    mount ) dir="$gen_mount" ;;
+    scripts ) dir="$gen_scripts" ;;
+    top ) dir="" ; absolute=1 ;;
+    nspawn )
+	dir='/run/systemd/nspawn'
+	with_nspawn_configs=1
+	;;
+    * ) err "Unknown dir_kind $dir_kind" ;;
     esac
     if let absolute; then
 	[[ $file_path =~ ^/. ]] || err "$file_kind must come with absolute path: $file_kind_and_path"
@@ -560,8 +633,7 @@ convert_shell_kind_path() {
 	    err "$file_kind must come with relative path: $file_kind_and_path"
 	dir+="/"
     fi
-    escape_for_shell "$file_path"
-    R="$dir$R"
+    R="${dir}${file_path}"
 }
 
 p_mask_service() {
@@ -657,6 +729,22 @@ UseDomains=true
 "
     fi
 
+    if [[ ${NAME} == thip ]]; then
+	write_file "/etc/systemd/network/40-nspawn1.network" "\
+[Match]
+Name=*-nspawn1
+
+[Network]
+# Default to using a /24 prefix, giving up to 253 addresses per virtual network.
+Address=${dev_vz_network_prefix}.1/24
+LinkLocalAddressing=yes
+#DHCPServer=yes
+IPMasquerade=yes
+LLDP=yes
+EmitLLDP=customer-bridge
+"
+    fi
+
     dec_log_level
 }
 
@@ -670,47 +758,47 @@ ensure_root_ssh_key() {
     ssh_key_file="$file"
 }
 
-setup_hippyru_backup() {
-    [[ $hippyru_backup_time ]] || return 0
+setup_bergenrabbit_backup() {
+    [[ $bergenrabbit_backup_time ]] || return 0
 
     local ssh_key_file=
-    ensure_root_ssh_key hippyru-www-backup
+    ensure_root_ssh_key bergenrabbit-www-backup
 
-    if [[ $hippyru_backup_time == manual ]]; then
+    if [[ $bergenrabbit_backup_time == manual ]]; then
 	return 0
     fi
 
-    [[ $hippyru_backup_time =~ ^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$ ]] || \
-	err "Invalid backup time spec in hippyru_backup_time - '$hippyru_backup_time'"
+    [[ $bergenrabbit_backup_time =~ ^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$ ]] || \
+	err "Invalid backup time spec in bergenrabbit_backup_time - '${bergenrabbit_backup_time}'"
 
-    p_file service:tliset-hippyru-backup.timer "\
+    p_file service:tliset-bergenrabbit-backup.timer "\
 [Unit]
 After=network-online.target
 Wants=network-online.target
 
 [Timer]
 Persistent=true
-OnCalendar=$hippyru_backup_time
+OnCalendar=${bergenrabbit_backup_time}
 "
-    p_file service:tliset-hippyru-backup.service "\
+    p_file service:tliset-bergenrabbit-backup.service "\
 [Unit]
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/bin/bash $gen_scripts/hippyru-backup.bash
+ExecStart=/bin/bash $gen_scripts/bergenrabbit-backup.bash
 StandardError=journal
 StandardOutput=journal
 Type=oneshot
 "
-    multi_user_wants+=("tliset-hippyru-backup.timer")
+    multi_user_wants+=("tliset-bergenrabbit-backup.timer")
 
     # Script source with condition code
     local s='#!/usr/bin/bash
 set -e -u -o pipefail
 
 # Number of days to keep old backups in the changed dir
-max_keep_changed_days=60
+max_keep_changed_days=90
 
 '
     # On fedora change SELinux context for rsync so it is treated as
@@ -746,7 +834,7 @@ backup_from_host() {
     done
 
     local -a ssh_cmd=(
-        ssh -l backup -p 2022 -i ~/.ssh/hippyru-www-backup-ed25519
+        ssh -l br-backup -i ~/.ssh/bergenrabbit-www-backup-ed25519
         -o Ciphers=aes128-gcm@openssh.com
         -o StrictHostKeyChecking=no
     )
@@ -763,15 +851,21 @@ backup_from_host() {
     rm -rf "$too_old_backup"
     local changed_files
     changed_files="$changes/$(date +%Y-%m-%d)"
+    mkdir -p "${changed_files}.srv" "${changed_files}.opt"
+
     echo "Backing up $pod_name" >&2
     local ok=1
-    rsync "${rsync_args[@]}" --backup --backup-dir="$changed_files" \
+    rsync "${rsync_args[@]}" --backup --backup-dir="${changed_files}.srv" \
         "rsync://$host_name/srv/" "$data/srv/" || ok=
+    rsync "${rsync_args[@]}" --backup --backup-dir="${changed_files}.opt" \
+        "rsync://$host_name/opt/" "$data/opt/" || ok=
     if [[ $ok ]]; then
 	local i cur_time
 	cur_time="$(date +%s)"
-	for i in "$changes"/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]; do
-	    dir_time="$(date --date="${i##*/}" +%s)"
+	for i in "$changes"/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].*; do
+	    local file_name
+	    file_name="${i##*/}"
+	    dir_time="$(date --date="${file_name%%.*}" +%s)"
 	    if test "$((cur_time-dir_time))" -gt "$((max_keep_changed_days*86400))"; then
 		remove_list+=("$i")
 	    fi
@@ -790,7 +884,7 @@ fi
 
 '
 
-    p_file scripts:hippyru-backup.bash "$s"
+    p_file scripts:bergenrabbit-backup.bash "$s"
 
     if let kind_fedora; then
 	setsebool rsync_client 1
@@ -801,7 +895,7 @@ setup_services() {
     log "Checking services"
     inc_log_level
 
-    setup_hippyru_backup
+    setup_bergenrabbit_backup
 
     if let with_docker; then
 	# Make sure that docker starts. On CoreOS docker is
@@ -857,16 +951,79 @@ What=$docker_lib_dir
 	    docker_service_lines+=(
 		"[Service]"
 		"Environment=DOCKER_OPTS=--userland-proxy=false"
+		"[Unit]"
+		"[]"
 	    )
 
 	fi
 
 	if [[ ${#docker_service_lines[@]} -ne 0 ]]; then
-	    p_dir service:docker.service.d
 	    local text
 	    printf -v text '%s\n' "${docker_service_lines[@]}"
-	    p_file service:docker.service.d/tliset.conf "$text"
+	    p_systemd_drop_in docker.service "$text"
 	fi
+    fi
+
+    if [[ ${NAME} == thip ]]; then
+	local unit
+	unit="$(systemd-escape -p "/vol").mount"
+	p_nl
+	p_file "service:${unit}" "\
+[Mount]
+Where=/vol
+What=/dev/vdb
+Type=ext4
+"
+	basic_target_wants+=("${unit}")
+
+	local mount_path
+	mount_path=/run/projects
+	local unit
+	unit="$(systemd-escape -p "${mount_path}").mount"
+	p_nl
+	p_file "service:${unit}" "\
+[Mount]
+Where=${mount_path}
+What=projects
+Type=9p
+Options=ro,access=client,trans=virtio
+"
+	basic_target_wants+=("${unit}")
+
+    fi
+
+    if [[ ${NAME} == thip ]]; then
+	p_file nspawn:test-br.nspawn "\
+[Exec]
+Boot=on
+#PrivateUsers=off
+
+[Network]
+Private=on
+#VirtualEthernet=on
+Port=tcp:2022:22
+Port=tcp:8888:8888
+#MACVLAN=eth0
+Zone=nspawn1
+
+[Files]
+Bind=/vol/bergenrabbit/srv:/vol/srv
+BindReadOnly=/run/projects/bergenrabbit:/vol/opt/2
+Bind=+/vol/compiled:/vol/opt/2/compiled
+"
+	multi_user_wants+=(systemd-nspawn@test-br.service)
+
+	# Prevent killing of containers after suspend
+	p_systemd_drop_in systemd-machined.service "\
+[Service]
+WatchdogSec=0
+"
+
+	p_systemd_drop_in systemd-nspawn@test-br.service "\
+[Service]
+WatchdogSec=0
+ExecStartPre=/run/projects/bergenrabbit/tools/prepare-test-br-machine
+"
     fi
 
     dec_log_level
@@ -875,17 +1032,6 @@ What=$docker_lib_dir
 setup_files() {
     if let kind_coreos; then
 	case $NAME in
-	bergenrabbit  )
-	    ensure_dir -m 0750 -g core /vol
-	    ensure_dir -m 0750 -g core /vol/bergenrabbit
-	    ensure_dir /vol/bergenrabbit/data
-
-	    ensure_dir /opt /opt/dpodctl "/opt/dpodctl/$NAME"
-	    write_file "/opt/dpodctl/$NAME/config.dpod" "\
-ImageName $NAME
-UseHostNetwork
-"
-	    ;;
 	r2 )
 	    ensure_dir /opt /opt/dpodctl "/opt/dpodctl/transdock"
 	    write_file "/opt/dpodctl/transdock/config.dpod" "\
@@ -896,22 +1042,30 @@ UseHostNetwork
 "
 	    ;;
 	thip )
-	    ensure_dir -m 0750 -g core /vol
-	    ensure_dir -m 0750 -g core /vol/bergenrabbit
-	    ensure_dir /vol/bergenrabbit/data
-
-	    ensure_dir -m 0775 -g "$primary_group" /vol/projects
+	    ensure_dir -m 0755 /vol
+	    ensure_dir -m 0750 /vol/bergenrabbit
+	    local test_br_owner
+	    test_br_owner="0:0"
+	    if test -d /var/lib/machines/test-br; then
+		test_br_owner="$(stat -c %u:%g /var/lib/machines/test-br)"
+	    fi
+	    local compiled_user compiled_group
+	    compiled_user="${test_br_owner%%:*}"
+	    compiled_group="${test_br_owner#*:}"
+	    : $((compiled_group+=1005))
+	    ensure_dir -m 0755 -u "${compiled_user}" -g "${compiled_group}" /vol/bergenrabbit/compiled
 	    ;;
 	esac
-    fi
-    if [[ $NAME == rhea ]]; then
-	ensure_dir /vol
-	ensure_dir -u "$primary_user" -g "$primary_group" /vol/projects
     fi
 }
 
 setup_accounts() {
     if let with_sudoless_docker; then
+	if [[ -z ${SUDO_USER-} ]]; then
+	    err "cannot determine the user for the docker command - SUDO_USER is not defined"
+	fi
+	local primary_user
+	primary_user="${SUDO_USER}"
 	local s
 	s="$(getent group docker 2>/dev/null || :)"
 	if [[ ! $s  ]]; then
@@ -920,6 +1074,45 @@ setup_accounts() {
 	if ! [[ $s =~ ^[^:]+:[^:]*:[^:]+:(.*,)?"$primary_user"(,|$) ]]; then
 	    cmd_log usermod -aG docker "$primary_user"
 	fi
+    fi
+}
+
+start_docker_container() {
+    local container dockerfile run_args cmd_arg
+    container="$1"
+    dockerfile="$2"
+    run_args="$3"
+    cmd_args="${4-}"
+
+    local image
+    image="local/${container}"
+    escape_for_shell "${image}"
+    run_args="${run_args} ${R}${cmd_args:+ }${cmd_args}"
+
+    local tag
+    escape_for_shell "${dockerfile}"
+    tag="$(printf '%s %s' "${R}" "${run_args}"| sha256sum)"
+    tag="${tag%% *}"
+
+    local s
+    s="$(docker inspect --type container \
+	-f  '{{.State.Running}} {{index .Config.Labels "local.tag"}}' \
+	"${container}" 2>/dev/null || :)"
+
+    local status current_tag
+    status="${s%% *}"
+    current_tag="${s#* }"
+    if test true != "${status}" -o "x${current_tag}" != "x${tag}"; then
+	log "Starting ${container} container"
+	if test true = "${status}"; then
+	    cmd_log docker stop "${container}" > /dev/null
+	fi
+	if test -n "${status}"; then
+	    cmd_log docker rm -v "${container}" > /dev/null
+	fi
+	printf %s "${dockerfile}" | cmd_log docker build -t "${image}" -
+	escape_for_shell cmd_log docker run -d --name "${container}" --label local.tag="${tag}"
+	eval "${R} ${run_args} > /dev/null"
     fi
 }
 
@@ -935,7 +1128,7 @@ setup_docker_services() {
 	local net_name="development"
 	local subnet_template
 	subnet_template='{{range .IPAM.Config}}{{if .Subnet}}{{.Subnet}}{{end}}{{end}}'
-	local subnet="$dev_docker_network_prefix.0/24"
+	local subnet="${dev_docker_network_prefix}.0/24"
 	local actual_subnet=
 	docker network inspect -f "$subnet_template" "$net_name" 2> /dev/null \
 	    | read -r actual_subnet || :
@@ -944,61 +1137,65 @@ setup_docker_services() {
 	    if [[ $actual_subnet ]]; then
 		cmd_log docker network rm "$net_name" > /dev/null
 	    fi
-	    cmd_log docker network create --subnet="$subnet" "$net_name" > /dev/null
+	    local eargs
+	    eargs=
+	    earg --subnet="${subnet}"
+	    earg --gateway="${dev_docker_network_prefix}.1"
+	    earg "${net_name}"
+
+	    eval "cmd_log docker network create ${eargs} > /dev/null"
 	fi
 
-	local extra_etc_hosts=()
-	if [[ $NAME == thip ]]; then
+	local extra_dnsmasq_eargs
+	extra_dnsmasq_eargs=
+	if test thip = "${NAME}"; then
 	    setup_development_dpodctl
 	fi
 
-	local http_proxy_port=8080
-	local container=http-proxy
-	local dockerfile
-	IFS= read -r -d '' dockerfile <<EOF || :
+	if test thip = "${NAME}"; then
+
+	    local host
+	    for host in ${bergenrabbit_dns}; do
+		add_dns_record_a "${host}" "${dev_vz_network_prefix}.100"
+	    done
+	    add_dns_record_a "boulder" "${dev_docker_network_prefix}.50"
+	    #add_dns_interface_name "boulder" "eth0"
+
+	    local container
+	    container=dnsmasq
+	    local dockerfile
+	    IFS= read -r -d '' dockerfile <<EOF || :
 FROM alpine:latest
-RUN apk update && apk add tinyproxy && rm -rf /var/cache/apk/*
-RUN sed -i \
-    -e 's|^Allow |# &|' \
-    -e 's|#LogFile .*|LogFile "/dev/stderr"|' \
-    -e 's|^Port .*|Port $http_proxy_port|' \
-    -e 's|^ConnectPort .*|# &|' \
-    /etc/tinyproxy/tinyproxy.conf
-USER tinyproxy
-CMD ["/usr/sbin/tinyproxy", "-d"]
+RUN apk update && apk --no-cache add dnsmasq && rm -rf /var/cache/apk/*
 EOF
-	local docker_args=(
-	    --restart=unless-stopped
-	    --net development
-	    -p "$http_proxy_port:$http_proxy_port"
-	    --cap-drop ALL
-	)
-	local i
-	for ((i=0; i<${#extra_etc_hosts[@]}; i+=2)); do
-	    local ip="${extra_etc_hosts[i]}"
-	    local hostname="${extra_etc_hosts[i+1]}"
-	    docker_args+=(--add-host "$hostname:$ip")
-	done
-	docker_args+=("local/$container")
+	    local eargs
+	    eargs=
+	    earg --restart=unless-stopped
+	    earg --net=host
+	    earg --cap-add=NET_ADMIN
+	    earg -v /run/systemd/resolve:/run/systemd/resolve
 
-	local tag
-	declare -p dockerfile docker_args | sha256sum | read -r tag _
+	    earg -v /dev/log:/dev/log
+	    earg --log-driver=syslog
+	    earg --log-opt syslog-facility=local1
+	    earg --log-opt tag="${container}"
 
-	local status= current_tag=
-	docker inspect --type container \
-	    -f  '{{.State.Running}} {{index .Config.Labels "local.tag"}}' \
-	    "$container" 2>/dev/null | read -r status current_tag || :
-	if [[ $status != true || $current_tag != "$tag" ]]; then
-	    log "Starting $container container"
-	    if [[ $status == true ]]; then
-		cmd_log docker stop "$container" > /dev/null
-	    fi
-	    if [[ $status ]]; then
-		cmd_log docker rm -v "$container" > /dev/null
-	    fi
-	    printf %s "$dockerfile" | cmd_log docker build -t "local/$container" -
-	    cmd_log docker run -d --name "$container" --label local.tag="$tag" \
-		    "${docker_args[@]}" > /dev/null
+	    local docker_run_eargs
+	    docker_run_eargs="${eargs}"
+
+	    eargs=
+	    earg -k
+	    earg --no-resolv --resolv-file=/run/systemd/resolve/resolv.conf
+	    earg  --localise-queries
+	    earg --dhcp-range="${dev_vz_network_prefix}.100,${dev_vz_network_prefix}.199"
+	    earg --dhcp-host="test-br,${dev_vz_network_prefix}.100"
+
+	    eargs="${eargs}${extra_dnsmasq_eargs}"
+
+	    start_docker_container "${container}" "${dockerfile}" \
+		"${docker_run_eargs}" "dnsmasq ${eargs}"
+
+	    write_file "/etc/resolv.conf" "nameserver 127.0.0.1${NL}"
 	fi
     fi
 }
@@ -1012,14 +1209,14 @@ setup_development_dpodctl() {
     local projects_root="/vol/projects"
 
     local i ip4_last_byte=10
-    for i in bergenrabbit transdock; do
-	local -a dns_aliases=()
+    for i in transdock; do
 	ensure_dir "$dir/$i"
 	local ipv4="$dev_docker_network_prefix.$ip4_last_byte"
 	: $((ip4_last_byte+=1))
 	case $i in
 	transdock )
-	    dns_aliases=(media.mir2.org test.media.mir2.org)
+	    add_dns_record_a media.mir2.org "${ipv4}"
+	    add_dns_record_a test.media.mir2.org "${ipv4}"
 	    write_file "$dir/$i/config.dpod" "\
 IncludeBuild $projects_root/$i/config.dpod
 DnsAlias media.mir2.org
@@ -1036,33 +1233,7 @@ Network $net_name
 NetworkIPv4 $ipv4
 "
 	    ;;
-	bergenrabbit )
-	    dns_aliases=(
-		www.bergenrabbit.net bergenrabbit.net
-		www.bergenrabbit.no bergenrabbit.no
-
-		www.hippyru.net hippyru.net lib.hippyru.net
-		www.hippy.ru hippy.ru
-
-		www.lubava.info lubava.info
-	    )
-	    local config="\
-development_mode
-docker_arg --net=$net_name
-docker_arg --ip=$ipv4
-"
-	    local dns_alias
-	    for dns_alias in "${dns_aliases[@]:+${dns_aliases[@]}}"; do
-		config+="docker_arg --net-alias=$dns_alias$NL"
-	    done
-	    write_file "/vol/$i.conf" "$config"
-	    ;;
 	esac
-
-	local dns_alias
-	for dns_alias in "${dns_aliases[@]:+${dns_aliases[@]}}"; do
-	    extra_etc_hosts+=("$ipv4" "$dns_alias")
-	done
     done
 }
 
@@ -1115,32 +1286,26 @@ get_host_options
 
 if [[ -n "$remote" ]]; then
     cmd=(run_remotely)
-    if [[ -n "$ssh_login_user" ]]; then
-	# Use sudo
-	cmd+=(-s "$ssh_login_user@$remote")
-    else
-	cmd+=("root@$remote")
+    if [[ ${machine_host} ]]; then
+	cmd+=(-m "${machine_host}")
     fi
-    "${cmd[@]}" -n "$remote"
+    if [[ ${ssh_login_user} ]]; then
+	cmd+=(-u "${ssh_login_user}")
+    fi
+    "${cmd[@]}" -- "$remote" -n "$remote"
 fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
-    exec sudo env SUDO_USER="$(id -un)" "$0" "$@"
+    exec sudo "$0" "$@"
 fi
 
 determine_os
 
-if [[ $SUDO_USER ]]; then
-    primary_user="$SUDO_USER"
-    primary_group="$(id -gn "$SUDO_USER")"
-else
-    [[ $primary_user && $primary_group ]] || \
-	err "primary_user and primary_group must be set when not using sudo"
-fi
-
 if let kind_fedora; then
     fedora_release="$(rpm -E %fedora)"
 fi
+
+setup_tliset
 
 if ! under_qubes; then
     setup_packages

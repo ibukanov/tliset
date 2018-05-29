@@ -26,29 +26,31 @@ get_config() {
     debian=
     centos=
     use_ssh_login_key=
+    data_vol_size=
 
     case "$VM" in
     thip )
         coreos=1
-        readonly vm_memory=2048M
-        readonly data_vol_size=145G
-        readonly ssh_host_port=2222
-        readonly http_proxy_host_port=2223
+        vm_memory=2048M
+        data_vol_size=145G
+        ssh_host_port=2222
+        http_proxy_host_port=2223
+        test_br_ssh_port=2224
+        test_br_http_proxy_port=2225
+
         ;;
-    debian )
+    test-br )
         debian=1
-        readonly vm_memory=1024M
-        data_vol_size=
-        readonly ssh_host_port=15022
-        readonly http_proxy_host_port=15023
+        vm_memory=1024M
+        ssh_host_port=15022
+        http_proxy_host_port=15023
         use_ssh_login_key=1
         ;;
     centos )
         centos=1
-        readonly vm_memory=1024M
-        data_vol_size=
-        readonly ssh_host_port=15122
-        readonly http_proxy_host_port=15123
+        vm_memory=1024M
+        ssh_host_port=15122
+        http_proxy_host_port=15123
         use_ssh_login_key=1
         ;;
 
@@ -57,10 +59,14 @@ get_config() {
 
     readonly centos coreos debian
     readonly use_ssh_login_key
+    readonly vm_memory
+    readonly data_vol_size
+    readonly ssh_host_port
+    readonly http_proxy_host_port
 
-    if test -n "${centos}"; then
+    if test -n "${coreos}"; then
         readonly channel=beta
-        readonly base_url="https://$channel.release.core-os.net/amd64-usr/current"
+        readonly base_url="https://${channel}.release.core-os.net/amd64-usr/current"
         readonly key_uid='CoreOS Buildbot (Offical Builds) <buildbot@coreos.com>'
         readonly key_url="https://coreos.com/security/image-signing-key/CoreOS_Image_Signing_Key.pem"
         readonly prefix="coreos_production_qemu"
@@ -75,7 +81,7 @@ get_config() {
         readonly ssh_user=core
     elif test -n "${debian}"; then
         readonly dir=/vol/vm/debian
-        readonly ssh_user=core
+        readonly ssh_user=root
     elif test -n "${centos}"; then
         readonly dir=/vol/vm/centos
         readonly ssh_user=root
@@ -83,8 +89,13 @@ get_config() {
 
     readonly rundir="${XDG_RUNTIME_DIR}/vm/${VM}"
 
-    readonly main_vol="${VM}-main.img"
-    readonly data_vol="${VM}-data.img"
+    main_vol="${VM}-main.img"
+    data_vol="${VM}-data.img"
+    if test -n "${debian}"; then
+        main_vol="${VM}-main.qcow2"
+    fi
+
+    readonly main_vol data_vol
 
     if test -n "${use_ssh_login_key}"; then
         export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR}/ssh-agent.socket"
@@ -93,18 +104,39 @@ get_config() {
     fi
 }
 
-add_args() {
-    local arg escaped before_quote
+is_vm() {
+    local name
+    name="$1"
+    test "x${name}" = "x${VM}"
+}
+
+# Set R to concatenation of arguments with spaces escaped if necessary.
+escape_for_shell() {
+    R=
+    local arg
     for arg in "$@"; do
-        escaped=
-        while : ; do
-            before_quote="${arg%%\'*}"
-            test "_${arg}" != "_${before_quote}" || break
-            escaped="${escaped}${before_quote}'\"'\"'"
-            arg="${arg#*\'}"
-        done
-        cmd="${cmd}${cmd:+ }'${escaped}${arg}'"
+        case "${arg}" in
+        *[!A-Z0-9a-z_./-]* )
+            local escaped before_quote
+            escaped=
+            while : ; do
+                before_quote="${arg%%\'*}"
+                if test "x${arg}" = "x${before_quote}"; then
+                    break
+                fi
+                escaped="${escaped}${before_quote}'\\''"
+                arg="${arg#*\'}"
+            done
+            arg="'$escaped$arg'"
+            ;;
+        esac
+        R="${R}${R:+ }${arg}"
     done
+}
+
+earg() {
+    escape_for_shell "$@"
+    eargs="${eargs}${eargs:+ }$R"
 }
 
 fetch_as_tmp_file() {
@@ -134,6 +166,9 @@ setup_vm_images() {
     fi
     if test -n "${coreos}"; then
         setup_coreos_images
+    fi
+    if test -n "${debian}"; then
+        setup_debian_images
     fi
 }
 
@@ -289,33 +324,33 @@ systemctl disable firewalld
         isoinfo -i "${dir}/${install_iso}" -x /isolinux/vmlinuz -R \
             > "${install_tmp}/vmlinuz"
 
-        local cmd
-        cmd=qemu-system-x86_64
+        local eargs
+        eargs=
 
-        add_args -name "${VM}" -machine accel=kvm
-        add_args -m "${vm_memory}" -cpu host -smp 2
+        earg -name "${VM}" -machine accel=kvm
+        earg -m "${vm_memory}" -cpu host -smp 2
 
-        add_args -net nic,vlan=0,model=virtio
-        add_args -net "user,vlan=0,hostname=${VM}"
+        earg -net nic,vlan=0,model=virtio
+        earg -net "user,vlan=0,hostname=${VM}"
 
-        add_args -drive if=virtio,index=0,file="${install_tmp}/${main_vol},format=qcow2"
-        add_args -drive if=virtio,index=1,file="${install_tmp}/kickstart.img,format=raw"
+        earg -drive if=virtio,index=0,file="${install_tmp}/${main_vol},format=qcow2"
+        earg -drive if=virtio,index=1,file="${install_tmp}/kickstart.img,format=raw"
 
-        add_args -cdrom "${dir}/${install_iso}"
+        earg -cdrom "${dir}/${install_iso}"
 
-        add_args -nographic
+        earg -nographic
 
-        #add_args -boot d
-        add_args -kernel "${install_tmp}/vmlinuz"
-        add_args -initrd "${install_tmp}/initrd.img"
+        #earg -boot d
+        earg -kernel "${install_tmp}/vmlinuz"
+        earg -initrd "${install_tmp}/initrd.img"
 
         local kernel_args
         kernel_cmdline='inst.stage2=hd:LABEL=CentOS\x207\x20x86_64'
         kernel_cmdline="${kernel_cmdline} ks=hd:vdb:/ks.cfg"
         kernel_cmdline="${kernel_cmdline} vga=off console=ttyS0,115200n8"
-        add_args -append "${kernel_cmdline}"
+        earg -append "${kernel_cmdline}"
 
-        eval "$cmd"
+        eval "qemu-system-x86_64 ${eargs}"
 
         mv "${install_tmp}/${main_vol}" "${dir}/${main_vol}"
         rm -rf "${install_tmp}"
@@ -344,7 +379,7 @@ setup_coreos_images() {
         mv "${main_vol}.tmp" "${main_vol}"
     fi
 
-    if ! test -f "${data_vol}"; then
+    if test -n "${data_vol_size}" -a ! -f "${data_vol}"; then
         log "Allocating ${data_vol} - ${data_vol_size}"
 
         # write zeros at the start to facilitate detection of filesystem absence
@@ -353,6 +388,167 @@ setup_coreos_images() {
         chmod 640 "${data_vol}.tmp"
         mv "${data_vol}.tmp" "${data_vol}"
     fi
+}
+
+setup_debian_images() {
+    local initial_vol
+    initial_vol="${main_vol%.qcow2}-initial.qcow2"
+
+    if ! test -f "${dir}/${initial_vol}.gz"; then
+        log "Downloading Debian installer"
+        rm -rf "${dir}/${VM}.tmp"
+        mkdir "${dir}/${VM}.tmp"
+        cd "${dir}/${VM}.tmp"
+
+        local mirror_host mirror_top_dir mirror_path
+        mirror_host=cdn-fastly.deb.debian.org
+        mirror_top_dir=debian
+        mirror_path=dists/stretch/main/installer-amd64/current/images
+        curl -O "http://${mirror_host}/${mirror_top_dir}/${mirror_path}/netboot/netboot.tar.gz"
+
+        # Download checksum from another host using https
+        curl -O "https://cdn-aws.deb.debian.org/debian/${mirror_path}/SHA256SUMS"
+
+        log "Checking installer checksum"
+        local s
+        s="$(egrep '^[0-9a-f]+  \./netboot/netboot\.tar\.gz$' SHA256SUMS || :)"
+        if test -z "${s}"; then
+            err "SHA256SUMS does not contain netboot/netboot.tar.gz entry"
+        fi
+        printf '%s\n' "${s%% *}  ./netboot.tar.gz" > SHA256SUMS.tmp
+        sha256sum -c SHA256SUMS.tmp
+
+        log "Generating preseeded initrd"
+
+        local end_install_script
+        end_install_script='
+mkdir -p -m 0700 /root/.ssh
+ln -s /run/ssh_authorized/root /root/.ssh/authorized_keys
+
+printf %s "\
+[Mount]
+Where=/run/ssh_authorized
+What=ssh_authorized
+Type=9p
+Options=ro,access=client,trans=virtio
+" > /etc/systemd/system/run-ssh_authorized.mount
+
+mkdir -p /etc/systemd/system/local-fs.target.wants
+ln -s /etc/systemd/system/run-ssh_authorized.mount /etc/systemd/system/local-fs.target.wants
+
+touch /.initialized
+'
+        end_install_script="$(printf %s "${end_install_script}" | gzip -9 | base64 -w0)"
+
+        local preseed
+        preseed="\
+#_preseed_V1
+d-i debian-installer/locale string en_US
+d-i keyboard-configuration/xkb-keymap select us
+
+d-i netcfg/choose_interface select auto
+# d-i netcfg/choose_interface select eth1
+
+d-i netcfg/get_hostname string unassigned-hostname
+d-i netcfg/get_domain string unassigned-domain
+d-i netcfg/hostname string ${VM}
+d-i netcfg/domain string
+
+d-i mirror/country string manual
+d-i mirror/http/hostname string ${mirror_host}
+d-i mirror/http/directory string /${mirror_top_dir}
+d-i mirror/http/proxy string
+
+d-i passwd/make-user boolean false
+d-i passwd/root-password password root
+d-i passwd/root-password-again password root
+
+d-i clock-setup/utc boolean true
+d-i time/zone string Etc/UTC
+d-i clock-setup/ntp boolean false
+
+d-i partman-auto/disk string /dev/vda
+d-i partman-auto/method string regular
+d-i partman-lvm/device_remove_lvm boolean true
+d-i partman-md/device_remove_md boolean true
+d-i partman-auto/choose_recipe select atomic
+
+d-i partman-md/confirm boolean true
+d-i partman-partitioning/confirm_write_new_label boolean true
+d-i partman/choose_partition select finish
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+
+d-i partman/mount_style select uuid
+
+d-i apt-setup/non-free boolean false
+d-i apt-setup/contrib boolean false
+d-i apt-setup/services-select multiselect security, updates
+d-i apt-setup/local0/source boolean true
+
+tasksel tasksel/first multiselect standard
+d-i pkgsel/include string openssh-server
+popularity-contest popularity-contest/participate boolean false
+
+d-i grub-installer/only_debian boolean true
+d-i grub-installer/with_other_os boolean true
+d-i grub-installer/bootdev  string /dev/vda
+d-i debian-installer/add-kernel-opts string vga=off console=ttyS0,115200n8
+
+d-i finish-install/reboot_in_progress note
+d-i debian-installer/exit/poweroff boolean true
+
+d-i preseed/late_command string in-target /bin/sh -c 'printf %s ${end_install_script} | base64 -d | gunzip | sh'
+"
+
+        tar -xzf netboot.tar.gz --strip-components=3 \
+            ./debian-installer/amd64/linux ./debian-installer/amd64/initrd.gz
+        gzip -d initrd.gz
+        printf %s "${preseed}" > preseed.cfg
+        printf '%s\n' preseed.cfg | cpio -H newc -o -A -F initrd
+        #gzip initrd
+
+        log "Creating new qcow2 volume"
+        qemu-img create -f qcow2 "${initial_vol}" 6G
+
+        log "Running the installer"
+        local eargs
+        eargs=
+        earg -net user -net nic,model=virtio -m 2G
+        earg -drive if=virtio,index=0,format=qcow2,file="${initial_vol}"
+        earg -kernel linux -initrd initrd
+        earg -nographic -append 'DEBIAN_FRONTEND=text vga=off console=ttyS0,115200n8 --- quiet'
+
+        eval "qemu-system-x86_64 ${eargs}"
+
+        mkdir root_fs
+        guestmount -a "${initial_vol}" -m /dev/sda1 root_fs
+        if ! test -f root_fs/.initialized ; then
+            fusermount -uz root_fs
+            err "Failed to find .initialized marker in the root filesystem"
+        fi
+        fusermount -uz root_fs
+
+        log "Compressing the volume with the new installation"
+        gzip -9 "${initial_vol}"
+        mv "${initial_vol}.gz" "${dir}/${initial_vol}.gz"
+
+        cd "${dir}"
+
+        rm -rf "${dir}/${VM}.tmp"
+    fi
+
+    exit 1
+
+    if ! test -f "${dir}/${main_vol}"; then
+        log "Creating new main volume from the compressed initial one"
+        gunzip -k "${dir}/${initial_vol}.gz"
+        qemu-img amend -p -o preallocation=falloc "${dir}/${initial_vol}"
+
+
+        mv "${dir}/${initial_vol}" "${dir}/${main_vol}"
+    fi
+
 }
 
 setup_vm_config() {
@@ -399,85 +595,50 @@ ForwardAgent yes
         ssh_keys_yaml="$(ssh-add -L | sed -e 's/^/  - /' || :)"
         test -n "${ssh_keys_yaml}" || err "ssh agent at ${SSH_AUTH_SOCK} has no identities"
 
-        local storage_script='#!/bin/sh
-set -e -u
-if ! test -d /vol; then
-    mkdir /vol
-fi
-
-if ! test -b /dev/vdb; then
-    echo "cannot mount /vol - /dev/vdb does not exist" >&2
-else
-    if ! mount -t ext4 /dev/vdb /vol 2>/dev/null; then
-        mkfs.ext4 /dev/vdb
-        mount -t ext4 /dev/vdb /vol
-    fi
-
-    if :; then
-        if ! test -d /vol/docker; then
-            mkdir -m 711 /vol/docker
-        fi
-
-        if ! test -e /var/lib/docker; then
-            mkdir -m 711 /var/lib/docker
-        fi
-
-        mount --bind /vol/docker /var/lib/docker
-    fi
-fi
-'
-        printf '%s' "$storage_script" > "${rundir}/configdrive/setup_storage"
-
-        printf %s "#cloud-config
-hostname: \"$VM\"
+        printf %s '#cloud-config
+hostname: "'"${VM}"'"
 ssh_authorized_keys:
-$ssh_keys_yaml
-
-coreos:
-  units:
-    - name: setup_storage.service
-      command: start
-      content: |
-        [Unit]
-        Before=docker.service
-        Before=sshd.socket
-        [Service]
-        Type=oneshot
-        RemainAfterExit=yes
-        ExecStart=/bin/sh /media/configvirtfs/setup_storage
-" > "${rundir}/configdrive/openstack/latest/user_data"
+'"${ssh_keys_yaml}"'
+' > "${rundir}/configdrive/openstack/latest/user_data"
     fi
 }
 
 start_vm() {
+    local net_opt
+    net_opt="user,vlan=0,hostname=$VM"
+    net_opt="${net_opt},net=10.0.2.0/24,host=10.0.2.2,dns=10.0.2.3"
+    net_opt="${net_opt},hostfwd=tcp:127.0.0.1:${ssh_host_port}-:22"
+    if is_vm thip; then
+        net_opt="${net_opt},hostfwd=tcp:127.0.0.1:${test_br_ssh_port}-:2022"
+        net_opt="${net_opt},hostfwd=tcp:127.0.0.1:${test_br_http_proxy_port}-:8888"
+    fi
 
-    local net_options
-    net_options="user,vlan=0,hostname=$VM"
-    net_options="${net_options},hostfwd=tcp:127.0.0.1:$ssh_host_port-:22"
-    net_options="${net_options},hostfwd=tcp:127.0.0.1:$http_proxy_host_port-:8080"
+    local eargs
+    eargs=
 
-    local cmd
-    cmd=qemu-system-x86_64
-
-    add_args -name "${VM}"
-    add_args -machine accel=kvm
-    add_args -m "${vm_memory}"
-    add_args -cpu host
-    add_args -smp 2
-    add_args -nographic
-    add_args -qmp "unix:${rundir}/qmp-sock,server,nowait"
-    add_args -net nic,vlan=0,model=virtio
-    add_args -net "${net_options}"
-    add_args -drive if=virtio,index=0,file="${dir}/${main_vol}"
+    earg -name "${VM}"
+    earg -machine accel=kvm
+    earg -m "${vm_memory}"
+    earg -cpu host
+    earg -smp 2
+    earg -nographic
+    earg -qmp "unix:${rundir}/qmp-sock,server,nowait"
+    earg -net nic,vlan=0,model=virtio,
+    earg -net "${net_opt}"
+    earg -drive if=virtio,index=0,file="${dir}/${main_vol}"
     if test -n "${data_vol_size}"; then
-        add_args -drive if=virtio,index=1,file="$dir/$data_vol",format=raw
+        earg -drive if=virtio,index=1,file="$dir/$data_vol",format=raw
     fi
-    if test -n "${coreos}"; then
-        add_args -fsdev local,id=conf,security_model=none,readonly,path="${rundir}/configdrive"
-        add_args -device virtio-9p-pci,fsdev=conf,mount_tag=config-2
+    if is_vm thip && test -d "${HOME}/p"; then
+        earg -fsdev local,id=projects,security_model=none,readonly,path="${HOME}/p"
+        earg -device virtio-9p-pci,fsdev=projects,mount_tag=projects
     fi
+    earg -fsdev local,id=conf,security_model=none,readonly,path="${rundir}/configdrive"
+    earg -device virtio-9p-pci,fsdev=conf,mount_tag=config-2
 
-    eval "${cmd}" < /dev/null > "${rundir}/log" 2>&1 &
+
+
+    eval "cmd_log qemu-system-x86_64 ${eargs}" < /dev/null > "${rundir}/log" 2>&1 &
     local qemu_pid
     qemu_pid="$!"
 
@@ -485,17 +646,17 @@ start_vm() {
     local i
     i=0
     while : ; do
-        sleep 0.5
-        local cmd
-        cmd=ssh
-        add_args -o StrictHostKeyChecking=no
-        add_args -o ExitOnForwardFailure=yes
-        add_args -o ControlMaster=yes
-        add_args -f -N "${VM}"
-        eval "${cmd}" && break
+        sleep 0.2
+        local eargs
+        eargs=
+        earg -o StrictHostKeyChecking=no
+        earg -o ExitOnForwardFailure=yes
+        earg -o ControlMaster=yes
+        earg -f -N "${VM}"
+        eval "ssh ${eargs}" && break
         kill -n 0 "${qemu_pid}" || err "unexpected qemu exit"
         : "$((i+=1))"
-        if test 60 -le "$((i+=1))"; then
+        if test 150 -le "$((i+=1))"; then
             log "failed to connect to ssh at ${VM}, shutting down"
             stop_vm "${qemu_pid}"
             exit 1
@@ -504,12 +665,14 @@ start_vm() {
     log "${VM} started and ssh is ready"
     echo "${qemu_pid}" > "${rundir}/pid"
 
+
     local lsyncd_config
     lsyncd_config="${self_dir}/lsyncd/${VM}.lsyncd"
     if test -f "${lsyncd_config}"; then
         # Use -nodaemon + & to disable logging to syslog
         /usr/bin/lsyncd -nodaemon "${lsyncd_config}" &
     fi
+
 }
 
 stop_vm() {

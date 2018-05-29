@@ -105,62 +105,52 @@ get_temp() {
 }
 
 ensure_dir() {
-    local OPTIND opt dir
-    local mode= group= user= create_parent=
+    local mode group user OPTIND opt dir
+    mode=
+    group=
+    user=
 
-    while getopts :g:m:u:Pp opt; do
-	case "$opt" in
-	    g ) group="$OPTARG";;
-	    m ) mode="$OPTARG";;
-	    u ) user="$OPTARG";;
-	    P ) user="$primary_user" group="$primary_group" ;;
-	    p ) create_parent=1;;
-	    * ) err "bad ensure_dir usage";;
-	esac
+    while getopts :g:m:u: opt; do
+    case "$opt" in
+    g ) group="$OPTARG";;
+    m ) mode="$OPTARG";;
+    u ) user="$OPTARG";;
+    * ) err "bad ensure_dir usage";;
+    esac
     done
     shift $(($OPTIND - 1))
 
-    if [[ -z $mode ]]; then
+    if test -z "${mode}"; then
 	mode=0755
     fi
-    if [[ -z $user ]]; then
+    if test -z "${user}"; then
 	user=root
     fi
-    if [[ -z $group ]]; then
-	group="$user"
+    if test -z "${group}"; then
+	group="${user}"
+    fi
+
+    if test $# -eq 0; then
+	return
     fi
 
     local dir
     for dir in "$@"; do
-	[[ $dir ]] || err "directory cannot be empty"
-	[[ $dir == "${dir%/}" ]] || err "directory must not end with slash - $dir"
-	[[ -z $create_parent || $dir =~ ^/ ]] || \
-	    err "directory must be absolute path when -p is given - $dir"
-	if [[ ! -d $dir ]]; then
-	    [[ -e $dir || -h $dir ]] && err "$dir exists and is not a directory"
-	    if [[ $create_parent ]]; then
-		local parent="${dir%/*}"
-		if [[ $parent ]]; then
-		    ensure_dir -m 0755 -g root -u root "$parent"
-		fi
-	    fi
-	    cmd_log mkdir -m "$mode" "$dir"
+	test -n "${dir}" || err "directory cannot be empty"
+	test "x${dir}" = "x${dir%/}" || err "directory must not end with slash - ${dir}"
+	test "x${dir}" != "x${dir#/}" || err "directory must be an absolute path - ${dir}"
+	if test ! -d "${dir}"; then
+	    test ! -e "${dir}" && ! -h "${dir}"  || err "${dir} exists and is not a directory"
+	    cmd_log mkdir -m "${mode}" "${dir}"
 	else
-	    [[ -h $dir ]] && err "$dir exists and is a symbilic link, not a directory"
+	    test ! -h "${dir}" || \
+		err "$path exists and is a symbilic link, not a directory - ${dir}"
 	fi
-	local -a find_cmd=(
-	    find "$dir"
-	    -maxdepth 0
-	    -perm "$mode"
-	    -user "$user"
-	    -group "$group"
-	    -printf 1
-	)
 	local s
-	s="$("${find_cmd[@]}")"
-	if [[ -z $s ]]; then
-	    cmd_log chmod "$mode" "$dir"
-	    cmd_log chown "$user:$group" "$dir"
+	s="$(find "${dir}" -maxdepth 0 -perm "${mode}" -user "${user}" -group "${group}")"
+	if test -z "${s}"; then
+	    cmd_log chmod "=${mode}" "${dir}"
+	    cmd_log chown "${user}:${group}" "${dir}"
 	fi
     done
 }
@@ -192,84 +182,93 @@ file_update=0
 file_update_count=0
 
 write_file() {
-    local user= group= mode= log_message="updating %s" exec_cmd=
-    local OPTIND opt path body dir
 
-    file_update=0
-    while getopts :eg:l:m:u:P opt; do
+    local user group mode OPTIND opt
+    user=
+    group=
+    mode=
+    while getopts :g:m:u: opt; do
 	case "$opt" in
-	    e ) exec_cmd=1;;
-	    g ) group="$OPTARG";;
-	    l ) log_message="$OPTARG";;
-	    m ) mode="$OPTARG";;
-	    u ) user="$OPTARG";;
-	    P ) user="$primary_user" group="$primary_group" ;;
-	    * ) err "bad write_file usage";;
+	g ) group="$OPTARG";;
+	m ) mode="$OPTARG";;
+	u ) user="$OPTARG";;
+	* ) err "bad write_file usage";;
 	esac
     done
 
-    shift $(($OPTIND - 1))
-    let "$#>=1" || err "write_file - missing path argument"
-    if [[ $exec_cmd ]]; then
-	let "$#>=2" || err "write_file - -e option requires command argument"
-    else
-	let "$#<=2" || err "write_file - too many arguments"
-    fi
+    shift $((${OPTIND} - 1))
+    test $# -eq 2 || err "write_file requires path and body arguments when $# argument was given"
 
-    [[ $user ]] || user=root
-    [[ $group ]] || group=root
-    [[ $mode ]] || mode=0644
-
+    local path body
     path="$1"
-    shift
-
-    # Use base64 to support arbitrary binary data
-    if let "$#==0"; then
-	body="$(base64 -w0)"
-    elif [[ $exec_cmd ]]; then
-	body="$("$@" | base64 -w0)"
-    else
-	body="$(printf %s "$1" | base64 -w0)"
+    body="$2"
+    if test -z "${user}"; then
+	user=root
+    fi
+    if test -z "${group}"; then
+	group="${user}"
+    fi
+    if test -z "${mode}"; then
+	mode=0644
     fi
 
-    while true; do
-	if [[ ! -f "$path" || -L "$path" ]]; then
+    local wanted_umask need_chmod
+    need_chmod=
+    case "${mode}" in
+    0644 ) wanted_umask=022 ;;
+    0640 ) wanted_umask=027 ;;
+    0600 ) wanted_umask=077 ;;
+    0660 ) wanted_umask=007 ;;
+    0755 ) wanted_umask=022 need_chmod=1 ;;
+    * ) err "unsupported mode - ${mode}" ;;
+    esac
+
+    while :; do
+	if test ! -f "${path}" -o -h "${path}"; then
+	    log "creating new ${path}"
 	    break;
 	fi
 	local s
 	s="$(find "$path" -maxdepth 0 -perm "$mode" -user "$user" -group "$group" -printf 1)"
-	if [[ -z $s ]]; then
+	if test -z "${s}"; then
+	    log "updating ${path} - permission changes"
 	    break;
 	fi
 
-	if [[ "$body" != "$(base64 -w0 "$path")" ]]; then
-	    break;
+	if printf %s "${body}" | cmp -s "${path}" -; then
+	    # Permissions and text matches
+	    file_update=
+	    return
 	fi
 
-	# No need to write anything
-	return
+	log "updating ${path} - content changes"
+	break
     done
 
-    if let ${#log_message}; then
-	log "$(printf "$log_message" "$path")"
+    # Use temporary to ensure atomic operation on filesystem
+    local tmp
+    tmp="${path}.tmp"
+    if test -f "${tmp}"; then
+	rm "${tmp}"
     fi
 
-    # Use temporary to ensure atomic operation on filesystem
-    get_temp "$path"
-    base64 -d <<< "$body" > "$tmp"
-    chmod "$mode" "$tmp"
-    chown "$user:$group" "$tmp"
-    mv -f "$tmp" "$path"
+    umask "${wanted_umask}"
+    printf %s "${body}" > "${tmp}"
+    if test -n "${need_chmod}"; then
+	chmod "${mode}" "${tmp}"
+    fi
+    chown "${user}:${group}" "${tmp}"
+    mv -fT "${tmp}" "${path}"
 
     file_update=1
-    let file_update_count+=1
+    : $((file_update_count+=1))
 }
 
 remove_file() {
     local log_message="removing %s"
     local OPTIND opt
 
-    file_update=0
+    file_update=
     while getopts l: opt; do
 	case "$opt" in
 	    l ) log_message="$OPTARG";;
@@ -294,37 +293,50 @@ remove_file() {
 
     rm "$path"
     file_update=1
-    let file_update_count+=1
+    : $((file_update_count+=1))
 }
 
 run_remotely() {
-    local OPTIND opt remote_sudo=0
-    while getopts :s opt; do
+    local OPTIND opt ssh_user machine_host
+    ssh_user=root
+    machine_host=
+    while getopts :m:u: opt; do
 	case "$opt" in
-	    s ) remote_sudo=1;;
-	    * ) getopts_err "$opt" "${OPTARG-}";;
+	m ) machine_host="${OPTARG}";;
+	u ) ssh_user="${OPTARG}";;
+	* ) getopts_err "$opt" "${OPTARG-}";;
 	esac
     done
     shift $(($OPTIND - 1))
 
-    local user_host="$1"
+    local target_host="$1"
     shift
 
     # I need to send the directory and allow to use terminal to ask
     # for password or secreets. So just emebedd the archive into the
     # command as base64 and ensure that ssh allocates tty.
-    local data=$(tar -C "$selfdir" --exclude .git --exclude README.md --exclude LICENSE -cf - . | gzip -9 | base64 -w0)
+    local data=$(tar -C "${selfdir}" --exclude .git --exclude README.md --exclude LICENSE -cf - . | gzip -9 | base64 -w0)
 
-    local i cmd=$(printf %q "/tmp/tliset/$(basename "$0")")
+    local i cmd
+    cmd=$(printf %q "/tmp/tliset/$(basename "$0")")
     for i in "$@"; do
 	cmd+=" $(printf %q "$i")"
     done
 
-    local remote_cmd="rm -rf /tmp/tliset && mkdir /tmp/tliset && printf %s $data | base64 -d | tar -C /tmp/tliset -xzf - && $cmd"
+    local cmd="rm -rf /tmp/tliset && mkdir /tmp/tliset && printf %s $data | base64 -d | tar -C /tmp/tliset -xzf - && $cmd"
 
-    if let remote_sudo; then
-	remote_cmd="sudo /bin/bash -c $(printf %q "$remote_cmd")"
+    local wrapped_cmd
+    if [[ ${machine_host} ]]; then
+	wrapped_cmd="systemd-run -M ${target_host} --quiet --tty --wait"
+	wrapped_cmd+=" /bin/bash -c $(printf %q "$cmd")"
+	if [[ ${ssh_user} != root ]]; then
+	    wrapped_cmd="sudo ${wrapped_cmd}"
+	fi
+	target_host="${machine_host}"
+    elif [[ ${ssh_user} != root ]]; then
+	wrapped_cmd="sudo /bin/bash -c $(printf %q "$cmd")"
+    else
+	wrapped_cmd="${cmd}"
     fi
-    ssh ${SSH_ARGS-} -t "$user_host" "$remote_cmd"
-    exit
+    exec ssh -t "${ssh_user}@${target_host}" "${wrapped_cmd}"
 }
