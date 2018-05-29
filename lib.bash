@@ -36,16 +36,6 @@ dzetacon_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBGPGP6D7o3E3cl3gwx8Wa3XTAW
 readonly ssh_kino_wrap="/run/tliset/ssh_kino_wrap"
 readonly kino_password_file="/var/lib/tliset/kino_password"
 
-tmp_files=()
-
-cleanup() {
-    if [[ ${#tmp_files[@]} -ge 1 ]]; then
-	rm -rf "${tmp_files[@]}"
-    fi
-}
-
-trap cleanup EXIT
-
 err() {
     printf '%s:%d:%s: %s\n' "${BASH_SOURCE[0]}" "${BASH_LINENO[0]}" "${FUNCNAME[0]}" "$*" >&2
     exit 1
@@ -156,29 +146,23 @@ ensure_dir() {
 }
 
 ensure_symlink() {
-    local target="$1"
-    local link_dir="$2"
-    [[ $target ]] || err "link target cannot be empty"
-    [[ -d "$link_dir" ]] || err "link directory $link_dir does not exist or is not a directory"
-
-    local link_name="${3-}"
-    if [[ -z $link_name ]]; then
-	link_name="${target##*/}"
-    fi
-    local link_location="$link_dir/$link_name"
-    if [[ -h "$link_location" ]]; then
+    local target path
+    target="$1"
+    path="$2"
+    if test -h "${path}"; then
 	local current_target
-	current_target="$(readlink -n "$link_location")"
-	[[ $current_target == "$target" ]] && return
+	current_target="$(readlink "${path}")"
+	if test "x${current_target}" = "x${target}"; then
+	    return 0
+	fi
+    elif test -d "${path}" ]]; then
+	cmd_log rmdir "${path}" || \
+	    err "remove symbolic link ${path} manually and run again"
     fi
-    if [[ -d "$link_location" ]]; then
-	cmd_log rmdir "$link_location" || \
-	    err "remove symbolic link location $link_location manually and run again"
-    fi
-    cmd_log ln -sfT "$target" "$link_location"
+    cmd_log ln -sfT "${target}" "${path}"
 }
 
-file_update=0
+file_update=
 file_update_count=0
 
 write_file() {
