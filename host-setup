@@ -983,25 +983,9 @@ Options=ro,access=client,trans=virtio
     fi
 
     if [[ ${NAME} == thip ]]; then
-	p_file nspawn:test-br.nspawn "\
-[Exec]
-Boot=on
-#PrivateUsers=off
-
-[Network]
-Private=on
-#VirtualEthernet=on
-Port=tcp:2022:22
-Port=tcp:8888:8888
-#MACVLAN=eth0
-Zone=nspawn1
-
-[Files]
-Bind=/vol/bergenrabbit/srv:/vol/srv
-BindReadOnly=/run/projects/bergenrabbit:/vol/opt/2
-Bind=+/vol/compiled:/vol/opt/2/compiled
-"
-	multi_user_wants+=(systemd-nspawn@test-br.service)
+	local private_users root_vol
+	private_users=1854865408
+	root_vol=/var/lib/machines/test-br
 
 	# Prevent killing of containers after suspend
 	p_systemd_drop_in systemd-machined.service "\
@@ -1012,41 +996,53 @@ WatchdogSec=0
 	p_systemd_drop_in systemd-nspawn@test-br.service "\
 [Service]
 WatchdogSec=0
-ExecStartPre=/run/projects/bergenrabbit/tools/prepare-test-br-machine
+#ExecStartPre=/usr/bin/install -o ${private_users} -g ${private_users} -m 0700 \\
+#    -d ${root_vol}/root/.ssh
+#ExecStartPre=/usr/bin/install -o ${private_users} -g ${private_users} -m 0600 \\
+#    -t ${root_vol}/root/.ssh /home/core/.ssh/authorized_keys
 "
+	p_file nspawn:test-br.nspawn "\
+[Exec]
+Boot=on
+PrivateUsers=${private_users}
+
+[Network]
+Private=on
+#VirtualEthernet=on
+Port=tcp:2022:22
+Port=tcp:8888:8888
+#MACVLAN=eth0
+Zone=nspawn1
+
+[Files]
+PrivateUsersChown=on
+Bind=/vol/bergenrabbit/srv:/vol/srv
+"
+	multi_user_wants+=(systemd-nspawn@test-br.service)
     fi
 
     dec_log_level
 }
 
 setup_files() {
-    if let kind_coreos; then
-	case $NAME in
-	r2 )
-	    ensure_dir /opt /opt/dpodctl "/opt/dpodctl/transdock"
-	    write_file "/opt/dpodctl/transdock/config.dpod" "\
+    case $NAME in
+    r2 )
+	ensure_dir /opt /opt/dpodctl "/opt/dpodctl/transdock"
+	write_file "/opt/dpodctl/transdock/config.dpod" "\
 ImageName local/transdock
 HostEnv TLS_HOSTS media.mir2.org
 HostEnv ACME_CONTACT mailto:igor@mir2.org
 UseHostNetwork
 "
-	    ;;
-	thip )
-	    ensure_dir -m 0755 /vol
-	    ensure_dir -m 0750 /vol/bergenrabbit
-	    local test_br_owner
-	    test_br_owner="0:0"
-	    if test -d /var/lib/machines/test-br; then
-		test_br_owner="$(stat -c %u:%g /var/lib/machines/test-br)"
-	    fi
-	    local compiled_user compiled_group
-	    compiled_user="${test_br_owner%%:*}"
-	    compiled_group="${test_br_owner#*:}"
-	    : $((compiled_group+=1005))
-	    ensure_dir -m 0755 -u "${compiled_user}" -g "${compiled_group}" /vol/bergenrabbit/compiled
-	    ;;
-	esac
-    fi
+	;;
+    thip )
+	ensure_dir -m 0755 /vol
+	ensure_dir -m 0750 /vol/bergenrabbit
+	ensure_dir -m 0770 -u root -g core /vol/projects
+
+	;;
+    esac
+
 }
 
 setup_accounts() {
@@ -1175,8 +1171,10 @@ EOF
 
 	    eargs=
 	    earg -k
-	    earg --no-resolv --resolv-file=/run/systemd/resolve/resolv.conf
-	    earg  --localise-queries
+	    earg --no-resolv
+	    #earg --resolv-file=/run/systemd/resolve/resolv.conf
+	    earg --server=10.0.2.3
+	    earg --localise-queries
 	    earg --dhcp-range="${dev_vz_network_prefix}.100,${dev_vz_network_prefix}.199"
 	    earg --dhcp-host="test-br,${dev_vz_network_prefix}.100"
 

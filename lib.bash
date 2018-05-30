@@ -130,7 +130,7 @@ ensure_dir() {
 	test "x${dir}" = "x${dir%/}" || err "directory must not end with slash - ${dir}"
 	test "x${dir}" != "x${dir#/}" || err "directory must be an absolute path - ${dir}"
 	if test ! -d "${dir}"; then
-	    test ! -e "${dir}" && ! -h "${dir}"  || err "${dir} exists and is not a directory"
+	    test ! -e "${dir}" -a ! -h "${dir}"  || err "${dir} exists and is not a directory"
 	    cmd_log mkdir -m "${mode}" "${dir}"
 	else
 	    test ! -h "${dir}" || \

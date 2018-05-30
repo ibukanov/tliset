@@ -34,23 +34,19 @@ get_config() {
         vm_memory=2048M
         data_vol_size=145G
         ssh_host_port=2222
-        http_proxy_host_port=2223
-        test_br_ssh_port=2224
-        test_br_http_proxy_port=2225
+        test_br_ssh_port=2223
 
         ;;
     test-br )
         debian=1
         vm_memory=1024M
         ssh_host_port=15022
-        http_proxy_host_port=15023
         use_ssh_login_key=1
         ;;
     centos )
         centos=1
         vm_memory=1024M
         ssh_host_port=15122
-        http_proxy_host_port=15123
         use_ssh_login_key=1
         ;;
 
@@ -62,7 +58,6 @@ get_config() {
     readonly vm_memory
     readonly data_vol_size
     readonly ssh_host_port
-    readonly http_proxy_host_port
 
     if test -n "${coreos}"; then
         readonly channel=beta
@@ -610,7 +605,6 @@ start_vm() {
     net_opt="${net_opt},hostfwd=tcp:127.0.0.1:${ssh_host_port}-:22"
     if is_vm thip; then
         net_opt="${net_opt},hostfwd=tcp:127.0.0.1:${test_br_ssh_port}-:2022"
-        net_opt="${net_opt},hostfwd=tcp:127.0.0.1:${test_br_http_proxy_port}-:8888"
     fi
 
     local eargs
@@ -721,9 +715,9 @@ PIDFile='"${rundir}/pid"'
 ' > "${user_unit_path}"
         systemctl --user daemon-reload
 
+        log "Starting ${VM} VM"
         systemctl --user start "${user_unit}"
     fi
-    log Done
 }
 
 self="$(realpath "$0")"

@@ -1,0 +1,58 @@
+#!/bin/bash
+
+# Use bash for better
+
+
+set -e -u
+
+self="$(realpath "$0")"
+
+if test --systemd-run != "${1-}"; then
+	exec systemd-run --user --tty --send-sighup --quiet --wait \
+		"${self}" --systemd-run "$@"
+fi
+shift
+
+self_dir="${self%/*}"
+
+"${self_dir}/thip"
+
+rdir="$XDG_RUNTIME_DIR/test-br"
+host="root@test-br"
+
+rm -rf "${rdir}"
+mkdir -p "${rdir}"
+
+start_lsyncd() {
+	local config
+	config="\
+settings {
+   insist = 1,
+   logfile = '${rdir}/lsyncd.log',
+}
+
+sync {
+   default.rsync,
+   source = '${HOME}/p/bergenrabbit',
+   target = '${host}:/vol/opt/2',
+   exclude = { '/compiled/' },
+   delay = 1,
+   rsync = {
+      perms = true,
+      owner = true,
+      group = true,
+      chown = 'root:root',
+      chmod = 'D2755,F644,Fugo+X',
+   }
+}
+"
+	printf %s "${config}" > "${rdir}/lsyncd.conf"
+	while :; do
+		lsyncd -nodaemon "${rdir}/lsyncd.conf" >/dev/null 2>&1 || :
+		sleep 1
+	done
+}
+
+start_lsyncd &
+
+exec u-title test-br ssh -M -D 2224 -A -o ProxyCommand=none root@test-br
