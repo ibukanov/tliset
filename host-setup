@@ -1,8 +1,13 @@
 #!/bin/bash
 
-source "$(dirname "$0")/lib.bash"
+set -u
+set -e
+set -o pipefail
+shopt -s lastpipe
 
-#set -x
+readonly NL=$'\n'
+selfdir="$(dirname "$0")"
+
 
 valid_host_names=(bergenrabbit r2 rhea thip test-br)
 
@@ -22,6 +27,7 @@ declare -i with_docker=0
 declare -i with_sudoless_docker=0
 declare -i with_docker_development_net=0
 declare -i with_http_proxy=0
+declare -i custom_user_watches_count=0
 
 declare bergenrabbit_backup_time=
 
@@ -50,6 +56,36 @@ bergenrabbit_dns="${bergenrabbit_dns} www.hippyru.net hippyru.net lib.hippyru.ne
 bergenrabbit_dns="${bergenrabbit_dns} www.hippy.ru hippy.ru"
 bergenrabbit_dns="${bergenrabbit_dns} www.lubava.info lubava.info"
 
+dserver_eth_wan=enp2s0
+dserver_eth_lan=enp4s0
+
+dserver_bridge=macvlan0
+
+mac_kino=52:54:00:54:6e:ef
+mac_macbook_air=8c:29:37:e8:0e:e2
+mac_tablet=34:23:ba:a4:0f:85
+
+ip_kino=192.168.2.9
+ip_drouter=192.168.2.8
+ip_tablet=192.168.2.20
+ip_macbook_air=192.168.2.21
+
+dserver_port_forwards=(
+    "tcp:9092:$ip_kino"
+    "tcp:51413:$ip_kino"
+    "udp:51413:$ip_kino"
+    "tcp:25565:$ip_macbook_air"
+    "udp:25565:$ip_macbook_air"
+)
+
+hippyru_www_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIeBgbo19/jj/VDoX3nOybsmrbN95lIBeQYQv+FAOs/z"
+media_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILTrJnFcAg4qiYW8o8E0ieXc+hhnxc7ozAXlUAz1JHT6"
+dzetacon_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBGPGP6D7o3E3cl3gwx8Wa3XTAWOWeNAvcj2ZKY/OhbT"
+
+readonly ssh_kino_wrap="/run/tliset/ssh_kino_wrap"
+readonly kino_password_file="/var/lib/tliset/kino_password"
+
+
 get_host_options() {
     case "$NAME" in
 	bergenrabbit )
@@ -66,11 +102,14 @@ get_host_options() {
 	    ;;
  	rhea )
 	    with_common_packages=1
-	    with_docker=1
-	    zram_size=8G
+	    #with_docker=1
+	    with_latex=1
+	    #zram_size=8G
+	    with_zswap=1
 
 	    # disable until user namespaces works
-	    with_sudoless_docker=0
+	    #with_sudoless_docker=0
+	    custom_user_watches_count=524288
 	    ;;
 	thip )
 	    ssh_login_user=core
@@ -85,6 +124,55 @@ get_host_options() {
 	    err "unknown '$NAME'"
 	    ;;
     esac
+}
+
+err() {
+    printf '%s:%d:%s: %s\n' "${BASH_SOURCE[0]}" "${BASH_LINENO[0]}" "${FUNCNAME[0]}" "$*" >&2
+    exit 1
+}
+
+usage_err() {
+    echo "$0: $@" 1>&2
+    echo "Try $0 -h for usage" 1>&2
+    exit 1
+}
+
+getopts_err() {
+    local name=$1 optarg=$2 msg
+    case "$name" in
+	: ) msg="$-optarg requires an argument" ;;
+	\? ) msg="unknown option -$optarg" ;;
+	* ) msg="-$name is listed in getopts arguments but not processed" ;;
+    esac
+    if let "${#FUNCNAME[@]} <= 2"; then
+	usage_err "$msg"
+    else
+	err "${FUNCNAME[1]} - $msg"
+    fi
+}
+
+log_indent_level=0
+
+log() {
+    local indent='' i
+    for ((i=0; i<log_indent_level; i+=1)); do
+	indent+='  '
+    done
+    printf '%s%s\n' "$indent" "$*" 1>&2
+}
+
+cmd_log() {
+    log "$*"
+    "$@"
+}
+
+inc_log_level() {
+    let log_indent_level+=1 || true
+}
+
+dec_log_level() {
+    [[ $log_indent_level -ge 1 ]] || err "dec_log_level without inc_log_level"
+    let log_indent_level-=1 || true
 }
 
 determine_os() {
@@ -130,6 +218,172 @@ is_valid_host_name() {
 	fi
     done
     return 1;
+}
+
+ensure_dir() {
+    local mode group user OPTIND opt dir
+    mode=
+    group=
+    user=
+
+    while getopts :g:m:u: opt; do
+    case "$opt" in
+    g ) group="$OPTARG";;
+    m ) mode="$OPTARG";;
+    u ) user="$OPTARG";;
+    * ) err "bad ensure_dir usage";;
+    esac
+    done
+    shift $(($OPTIND - 1))
+
+    if test -z "${mode}"; then
+	mode=0755
+    fi
+    if test -z "${user}"; then
+	user=root
+    fi
+    if test -z "${group}"; then
+	group="${user}"
+    fi
+
+    if test $# -eq 0; then
+	return
+    fi
+
+    local dir
+    for dir in "$@"; do
+	test -n "${dir}" || err "directory cannot be empty"
+	test "x${dir}" = "x${dir%/}" || err "directory must not end with slash - ${dir}"
+	test "x${dir}" != "x${dir#/}" || err "directory must be an absolute path - ${dir}"
+	if test ! -d "${dir}"; then
+	    test ! -e "${dir}" -a ! -h "${dir}"  || err "${dir} exists and is not a directory"
+	    cmd_log mkdir -m "${mode}" "${dir}"
+	else
+	    test ! -h "${dir}" || \
+		err "$path exists and is a symbilic link, not a directory - ${dir}"
+	fi
+	local s
+	s="$(find "${dir}" -maxdepth 0 -perm "${mode}" -user "${user}" -group "${group}")"
+	if test -z "${s}"; then
+	    cmd_log chmod "=${mode}" "${dir}"
+	    cmd_log chown "${user}:${group}" "${dir}"
+	fi
+	note_path "${dir}"
+    done
+}
+
+ensure_symlink() {
+    local target path
+    target="$1"
+    path="$2"
+    while :; do
+	if test -h "${path}"; then
+	    local current_target
+	    current_target="$(readlink "${path}")"
+	    if test "x${current_target}" = "x${target}"; then
+		break
+	    fi
+	elif test -d "${path}" ]]; then
+	    cmd_log rmdir "${path}" || \
+		err "remove symbolic link ${path} manually and run again"
+	fi
+	cmd_log ln -sfT "${target}" "${path}"
+	break
+    done
+    note_path "${path}"
+}
+
+file_update=
+file_update_count=0
+
+write_file() {
+
+    local user group mode OPTIND opt
+    user=
+    group=
+    mode=
+    while getopts :g:m:u: opt; do
+	case "$opt" in
+	g ) group="$OPTARG";;
+	m ) mode="$OPTARG";;
+	u ) user="$OPTARG";;
+	* ) err "bad write_file usage";;
+	esac
+    done
+
+    shift $((${OPTIND} - 1))
+    test $# -eq 2 || err "write_file requires path and body arguments when $# argument was given"
+
+    local path body
+    path="$1"
+    body="$2"
+    if test -z "${user}"; then
+	user=root
+    fi
+    if test -z "${group}"; then
+	group="${user}"
+    fi
+    if test -z "${mode}"; then
+	mode=0644
+    fi
+
+    local wanted_umask need_chmod
+    need_chmod=
+    case "${mode}" in
+    0644 ) wanted_umask=022 ;;
+    0640 ) wanted_umask=027 ;;
+    0600 ) wanted_umask=077 ;;
+    0660 ) wanted_umask=007 ;;
+    0755 ) wanted_umask=022 need_chmod=1 ;;
+    * ) err "unsupported mode - ${mode}" ;;
+    esac
+
+    local do_update
+    do_update=1
+    while :; do
+	if test ! -f "${path}" -o -h "${path}"; then
+	    log "creating new ${path}"
+	    break;
+	fi
+	local s
+	s="$(find "$path" -maxdepth 0 -perm "$mode" -user "$user" -group "$group" -printf 1)"
+	if test -z "${s}"; then
+	    log "updating ${path} - permission changes"
+	    break;
+	fi
+
+	if printf %s "${body}" | cmp -s "${path}" -; then
+	    # Permissions and text matches
+	    do_update=
+	    break
+	fi
+
+	log "updating ${path} - content changes"
+	break
+    done
+
+    if test -z "${do_update}"; then
+	file_update=
+    else
+	# Use temporary to ensure atomic operation on filesystem
+	local tmp
+	tmp="${path}.tmp"
+	if test -f "${tmp}"; then
+	    rm "${tmp}"
+	fi
+
+	umask "${wanted_umask}"
+	printf %s "${body}" > "${tmp}"
+	if test -n "${need_chmod}"; then
+	    chmod "${mode}" "${tmp}"
+	fi
+	chown "${user}:${group}" "${tmp}"
+	mv -fT "${tmp}" "${path}"
+
+	file_update=1
+	: $((file_update_count+=1))
+    fi
+    note_path "${path}"
 }
 
 read_tliset_name() {
@@ -178,9 +432,12 @@ fixup_transgui() {
 
 begin_tliset() {
     paths_file=/var/lib/tliset/paths.txt
+    can_note_paths=
     readonly paths_file
     ensure_dir /var/lib/tliset
     exec 9>>"${paths_file}.new"
+    can_note_paths=1
+    note_path /var/lib/tliset
 }
 
 end_tliset() {
@@ -220,7 +477,9 @@ filter_existing_paths() {
 note_path() {
     local path
     path="$1"
-    printf '%s\n' "${path}" 1>&9
+    if test -n "${can_note_paths}"; then
+	printf '%s\n' "${path}" 1>&9
+    fi
 }
 
 setup_packages() {
@@ -265,7 +524,7 @@ setup_fedora_packages() {
 	    autoconf automake gcc-c++ kernel-devel
 	    geany geany-plugins-spellcheck
 	    tigervnc
-	    dstat strace
+	    pcp-system-tools strace
 	    xclip xorg-x11-apps
 	    xpra
 	    xorg-x11-server-Xephyr
@@ -330,6 +589,7 @@ setup_fedora_packages() {
     let with_latex && list+=(
 	    texlive
 	    texlive-babel-norsk
+	    texlive-hyphen-norwegian
 	    texlive-babel-russian
 	    texlive-collection-langcyrillic
 	)
@@ -479,7 +739,7 @@ escape_for_shell() {
     local arg
     for arg in "$@"; do
         case "${arg}" in
-        *[!A-Z0-9a-z_./-]* )
+        "" | *[!A-Z0-9a-z_./-]* )
             local escaped before_quote
             escaped=
             while : ; do
@@ -548,7 +808,6 @@ p_file() {
     local path
     convert_kind_path "${file_kind_and_path}"
     path="${R}"
-    note_path "${path}"
 
     set --
     if test -n "${executable}"; then
@@ -567,9 +826,27 @@ p_dir() {
     dir="$1"
     convert_kind_path "${dir}"
     dir="${R}"
-    note_path "${dir}"
-
     ensure_dir "${dir}"
+}
+
+p_ensure_no_file() {
+    local file
+    file="$1"
+    convert_kind_path "${file}"
+    file="${R}"
+    if test -f "${file}"; then
+	cmd_log rm -f "${file}"
+    fi
+}
+
+p_ensure_no_dir() {
+    local dir
+    dir="$1"
+    convert_kind_path "${dir}"
+    dir="${R}"
+    if test -d "${dir}"; then
+	cmd_log rmdir "${file}"
+    fi
 }
 
 p_symlink() {
@@ -578,7 +855,6 @@ p_symlink() {
     path="$2"
     convert_kind_path "${path}"
     path="${R}"
-    note_path "${path}"
     ensure_symlink "${target}" "${path}"
 }
 
@@ -604,13 +880,13 @@ convert_kind_path() {
     service: ) dir='/etc/systemd/system' ;;
     net: ) dir='/etc/systemd/network' ;;
     scripts: ) dir="/var/lib/tliset" ;;
+    sysctl: ) dir="/etc/sysctl.d" ;;
     nspawn: )
 	dir='/etc/systemd/nspawn'
 	;;
     * ) err "Unknown file kind - ${file_kind_and_path}" ;;
     esac
     ensure_dir "${dir}"
-    note_path "${dir}"
 
     if test -z "${file_path}"; then
 	R="$dir"
@@ -640,6 +916,17 @@ RemainAfterExit=yes
 	basic_target_wants+=("${unit}")
     fi
     setup_zram
+
+    local sysctl
+    sysctl=""
+    if let custom_user_watches_count; then
+	sysctl+="fs/inotify/max_user_watches=${custom_user_watches_count}${NL}"
+    fi
+    if test -n "${sysctl}"; then
+	p_file sysctl:50-tliset.conf "${sysctl}"
+    else
+	p_ensure_no_file sysctl:50-tliset.conf
+    fi
 }
 
 setup_zram() {
@@ -966,20 +1253,6 @@ What=/dev/vdb
 Type=ext4
 "
 	basic_target_wants+=("${unit}")
-
-	local mount_path
-	mount_path=/run/projects
-	local unit
-	unit="$(systemd-escape -p "${mount_path}").mount"
-	p_file "service:${unit}" "\
-[Mount]
-Where=${mount_path}
-What=projects
-Type=9p
-Options=ro,access=client,trans=virtio
-"
-	basic_target_wants+=("${unit}")
-
     fi
 
     if [[ ${NAME} == thip ]]; then
@@ -1035,11 +1308,13 @@ HostEnv ACME_CONTACT mailto:igor@mir2.org
 UseHostNetwork
 "
 	;;
+    rhea )
+	ensure_dir -m 0755 /vol
+	;;
     thip )
 	ensure_dir -m 0755 /vol
 	ensure_dir -m 0750 /vol/bergenrabbit
 	ensure_dir -m 0770 -u root -g core /vol/projects
-
 	;;
     esac
 
@@ -1224,6 +1499,52 @@ NetworkIPv4 $ipv4
 	esac
     done
 }
+
+run_remotely() {
+    local OPTIND opt ssh_user machine_host
+    ssh_user=root
+    machine_host=
+    while getopts :m:u: opt; do
+	case "$opt" in
+	m ) machine_host="${OPTARG}";;
+	u ) ssh_user="${OPTARG}";;
+	* ) getopts_err "$opt" "${OPTARG-}";;
+	esac
+    done
+    shift $(($OPTIND - 1))
+
+    local target_host="$1"
+    shift
+
+    # I need to send the directory and allow to use terminal to ask
+    # for password or secreets. So just emebedd the archive into the
+    # command as base64 and ensure that ssh allocates tty.
+    local data=$(tar -C "${selfdir}" --exclude .git --exclude README.md --exclude LICENSE -cf - . | gzip -9 | base64 -w0)
+
+    local i cmd
+    cmd=$(printf %q "/tmp/tliset/$(basename "$0")")
+    for i in "$@"; do
+	cmd+=" $(printf %q "$i")"
+    done
+
+    local cmd="rm -rf /tmp/tliset && mkdir /tmp/tliset && printf %s $data | base64 -d | tar -C /tmp/tliset -xzf - && $cmd"
+
+    local wrapped_cmd
+    if [[ ${machine_host} ]]; then
+	wrapped_cmd="systemd-run -M ${target_host} --quiet --tty --wait"
+	wrapped_cmd+=" /bin/bash -c $(printf %q "$cmd")"
+	if [[ ${ssh_user} != root ]]; then
+	    wrapped_cmd="sudo ${wrapped_cmd}"
+	fi
+	target_host="${machine_host}"
+    elif [[ ${ssh_user} != root ]]; then
+	wrapped_cmd="sudo /bin/bash -c $(printf %q "$cmd")"
+    else
+	wrapped_cmd="${cmd}"
+    fi
+    exec ssh -t "${ssh_user}@${target_host}" "${wrapped_cmd}"
+}
+
 
 show_usage=""
 NAME=""
