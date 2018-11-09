@@ -1,6 +1,7 @@
 #!/bin/sh
 
 set -e -u
+#set -x
 
 umask 002
 
@@ -111,7 +112,7 @@ escape_for_shell() {
     local arg
     for arg in "$@"; do
         case "${arg}" in
-        *[!A-Z0-9a-z_./-]* )
+        "" | *[!A-Z0-9a-z_./-]* )
             local escaped before_quote
             escaped=
             while : ; do
@@ -151,7 +152,6 @@ check_gpg_signature() {
 }
 
 setup_vm_images() {
-
     if ! test -d "${dir}"; then
         mkdir -p "${dir}"
     fi
@@ -623,14 +623,8 @@ start_vm() {
     if test -n "${data_vol_size}"; then
         earg -drive if=virtio,index=1,file="$dir/$data_vol",format=raw
     fi
-    if is_vm thip && test -d "${HOME}/p"; then
-        earg -fsdev local,id=projects,security_model=none,readonly,path="${HOME}/p"
-        earg -device virtio-9p-pci,fsdev=projects,mount_tag=projects
-    fi
     earg -fsdev local,id=conf,security_model=none,readonly,path="${rundir}/configdrive"
     earg -device virtio-9p-pci,fsdev=conf,mount_tag=config-2
-
-
 
     eval "cmd_log qemu-system-x86_64 ${eargs}" < /dev/null > "${rundir}/log" 2>&1 &
     local qemu_pid
