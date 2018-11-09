@@ -42,7 +42,7 @@ sync {
       owner = true,
       group = true,
       chown = 'root:root',
-      chmod = 'D2755,F644,Fugo+X',
+      chmod = 'D755,Fg-w',
    }
 }
 "
