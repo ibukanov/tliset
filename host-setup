@@ -109,7 +109,7 @@ get_host_options() {
 
 	    # disable until user namespaces works
 	    #with_sudoless_docker=0
-	    custom_user_watches_count=524288
+	    custom_user_watches_count="$((768*1025))"
 	    ;;
 	thip )
 	    ssh_login_user=core
@@ -173,6 +173,10 @@ inc_log_level() {
 dec_log_level() {
     [[ $log_indent_level -ge 1 ]] || err "dec_log_level without inc_log_level"
     let log_indent_level-=1 || true
+}
+
+pl(){
+    lines="${lines} $*${NL}"
 }
 
 determine_os() {
@@ -534,7 +538,7 @@ setup_fedora_packages() {
 	    udftools inotify-tools fdupes fslint mtools
 
 	    # encryption and backup
-	    apg duplicity perl-Digest-Bcrypt
+	    apg duplicity perl-Digest-Bcrypt lzip
 
 	    # Recovery tools
 	    ddrescue foremost scalpel testdisk
@@ -601,6 +605,10 @@ setup_fedora_packages() {
 	list+=(
 	    docker
 	)
+    fi
+
+    if test rhea = "${NAME}"; then
+	list+=(libguestfs-tools)
     fi
 
     for i in "${list[@]}"; do
@@ -1008,7 +1016,7 @@ UseDomains=true
 "
     fi
 
-    if [[ ${NAME} == thip ]]; then
+    if [[ ${NAME} == rhea ]]; then
 	p_file "net:40-nspawn1.network" "\
 [Match]
 Name=*-nspawn1
@@ -1243,57 +1251,6 @@ What=$docker_lib_dir
 	fi
     fi
 
-    if [[ ${NAME} == thip ]]; then
-	local unit
-	unit="$(systemd-escape -p "/vol").mount"
-	p_file "service:${unit}" "\
-[Mount]
-Where=/vol
-What=/dev/vdb
-Type=ext4
-"
-	basic_target_wants+=("${unit}")
-    fi
-
-    if [[ ${NAME} == thip ]]; then
-	local private_users root_vol
-	private_users=1854865408
-	root_vol=/var/lib/machines/test-br
-
-	# Prevent killing of containers after suspend
-	p_systemd_drop_in systemd-machined.service "\
-[Service]
-WatchdogSec=0
-"
-
-	p_systemd_drop_in systemd-nspawn@test-br.service "\
-[Service]
-WatchdogSec=0
-#ExecStartPre=/usr/bin/install -o ${private_users} -g ${private_users} -m 0700 \\
-#    -d ${root_vol}/root/.ssh
-#ExecStartPre=/usr/bin/install -o ${private_users} -g ${private_users} -m 0600 \\
-#    -t ${root_vol}/root/.ssh /home/core/.ssh/authorized_keys
-"
-	p_file nspawn:test-br.nspawn "\
-[Exec]
-Boot=on
-PrivateUsers=${private_users}
-
-[Network]
-Private=on
-#VirtualEthernet=on
-Port=tcp:2022:22
-Port=tcp:8888:8888
-#MACVLAN=eth0
-Zone=nspawn1
-
-[Files]
-PrivateUsersChown=on
-Bind=/vol/bergenrabbit/srv:/vol/srv
-"
-	multi_user_wants+=(systemd-nspawn@test-br.service)
-    fi
-
     dec_log_level
 }
 
@@ -1313,7 +1270,6 @@ UseHostNetwork
 	;;
     thip )
 	ensure_dir -m 0755 /vol
-	ensure_dir -m 0750 /vol/bergenrabbit
 	ensure_dir -m 0770 -u root -g core /vol/projects
 	;;
     esac
