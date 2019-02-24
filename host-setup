@@ -29,6 +29,8 @@ declare -i with_docker_development_net=0
 declare -i with_http_proxy=0
 declare -i custom_user_watches_count=0
 
+ssh_agent_service=
+
 declare bergenrabbit_backup_time=
 
 declare ssh_login_user=
@@ -85,7 +87,6 @@ dzetacon_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBGPGP6D7o3E3cl3gwx8Wa3XTAW
 readonly ssh_kino_wrap="/run/tliset/ssh_kino_wrap"
 readonly kino_password_file="/var/lib/tliset/kino_password"
 
-
 get_host_options() {
     case "$NAME" in
 	bergenrabbit )
@@ -104,12 +105,13 @@ get_host_options() {
 	    with_common_packages=1
 	    #with_docker=1
 	    with_latex=1
-	    #zram_size=8G
-	    with_zswap=1
+	    zram_size=28G
+	    #with_zswap=1
 
 	    # disable until user namespaces works
 	    #with_sudoless_docker=0
 	    custom_user_watches_count="$((768*1025))"
+	    ssh_agent_service=ssh-agent
 	    ;;
 	thip )
 	    ssh_login_user=core
@@ -525,7 +527,7 @@ setup_fedora_packages() {
 	    git lsyncd
 	    quilt mercurial subversion
 	    livecd-tools
-	    autoconf automake gcc-c++ kernel-devel
+	    autoconf automake gcc-c++ kernel-devel chrpath
 	    geany geany-plugins-spellcheck
 	    tigervnc
 	    pcp-system-tools strace
@@ -889,9 +891,8 @@ convert_kind_path() {
     net: ) dir='/etc/systemd/network' ;;
     scripts: ) dir="/var/lib/tliset" ;;
     sysctl: ) dir="/etc/sysctl.d" ;;
-    nspawn: )
-	dir='/etc/systemd/nspawn'
-	;;
+    nspawn: ) dir="/etc/systemd/nspawn" ;;
+    NetworkManager: ) dir="/etc/NetworkManager/conf.d" ;;
     * ) err "Unknown file kind - ${file_kind_and_path}" ;;
     esac
     ensure_dir "${dir}"
@@ -917,7 +918,7 @@ setup_kernel_parameters() {
 	p_file "service:${unit}" '
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c "printf 1 > /sys/module/zswap/parameters/enabled"
+ExecStart=/bin/sh -c "cd /sys/module/zswap/parameters && printf 1 > enabled && printf 30 > max_pool_percent && printf z3fold > zpool"
 ExecStop=/bin/sh -c "printf 0 > /sys/module/zswap/parameters/enabled"
 RemainAfterExit=yes
 '
@@ -928,8 +929,9 @@ RemainAfterExit=yes
     local sysctl
     sysctl=""
     if let custom_user_watches_count; then
-	sysctl+="fs/inotify/max_user_watches=${custom_user_watches_count}${NL}"
+	sysctl+="fs.inotify.max_user_watches=${custom_user_watches_count}${NL}"
     fi
+
     if test -n "${sysctl}"; then
 	p_file sysctl:50-tliset.conf "${sysctl}"
     else
@@ -942,42 +944,7 @@ setup_zram() {
 
     log "Checking zram"
 
-    p_file -x scripts:zram-enable.sh '
-#!/bin/sh
-set -e -u
-
-SWAP_SIZE='"$zram_size"'
-
-num_cpus=$(grep -c processor /proc/cpuinfo)
-if test 0 -eq "${num_cpus}"; then
-    num_cpus=1
-fi
-
-rm -f /run/tliset-zram-device
-device="$(zramctl --find --size "${SWAP_SIZE}" -t "${num_cpus}")"
-printf "%s\\n" "${device}" > /run/tliset-zram-device
-
-/sbin/mkswap "${device}"
-/sbin/swapon -p 100 "${device}"
-'
-
-    p_file scripts:zram-disable.sh "$(cat <<'EOF'
-#!/bin/sh
-set -e -u
-
-device=
-test -f /run/tliset-zram-device || exit 0
-read -r device < /run/tliset-zram-device || :
-test -n "${device}" || exit 0
-if grep -q "^${device}\\s" /proc/swaps; then
-    /sbin/swapoff "${device}"
-fi
-zramctl --reset "${device}"
-rm /run/tliset-zram-device
-EOF
-)"
-
-    p_file service:tliset-zram.service "\
+    p_file service:tliset-zram.service '
 [Unit]
 Description=Service enabling RAM compression using zRam
 
@@ -986,11 +953,31 @@ WantedBy=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/modprobe zram num_devices=1
-ExecStart=/bin/sh /var/lib/tliset/zram-enable.sh
-ExecStop=/bin/sh /var/lib/tliset/zram-disable.sh
+Environment=SWAP_SIZE='"${zram_size}"'
+EnvironmentFile=-/run/tliset-zram-state
+ExecStart=/bin/sh -c '\''\
+set -e -u; \
+printf "" > /run/tliset-zram-state; \
+/sbin/modprobe zram num_devices=1; \
+device="$(zramctl --find --size "$${SWAP_SIZE}" --algorithm lz4hc)"; \
+echo "ZRAM_DEVICE=$${device}" >> /run/tliset-zram-state; \
+/sbin/mkswap "$${device}"; \
+/sbin/swapon -p 100 "$${device}"; \
+echo "AFTER_SWAPON=1" >> /run/tliset-zram-state; \
+swappiness=; \
+read swappiness < /sys/fs/cgroup/memory/memory.swappiness; \
+echo "ORIGINAL_SWAPINESS=$${swappiness}" >> /run/tliset-zram-state; \
+printf 100 > /sys/fs/cgroup/memory/memory.swappiness'\''
+
+ExecStopPost=/bin/sh -c '\''\
+test -n "$${ORIGINAL_SWAPINESS-}" && \
+  printf %%s "$${ORIGINAL_SWAPINESS}" > /sys/fs/cgroup/memory/memory.swappiness; \
+test -n "$${AFTER_SWAPON-}" && /sbin/swapoff "$${ZRAM_DEVICE}"; \
+test -n "$${ZRAM_DEVICE-}" && zramctl --reset "$${ZRAM_DEVICE}"; \
+rm /run/tliset-zram-state'\''
+
 RemainAfterExit=yes
-"
+'
     multi_user_wants+=(tliset-zram.service)
 
 }
@@ -1017,7 +1004,13 @@ UseDomains=true
     fi
 
     if [[ ${NAME} == rhea ]]; then
-	p_file "net:40-nspawn1.network" "\
+	p_file NetworkManager:tliset.conf "\
+[main]
+dns=dnsmasq
+rc-manager=symlink
+"
+
+	: || p_file "net:40-nspawn1.network" "\
 [Match]
 Name=*-nspawn1
 
@@ -1251,7 +1244,67 @@ What=$docker_lib_dir
 	fi
     fi
 
+    if test -n "${ssh_agent_service}"; then
+	local primary_user
+	primary_user="${SUDO_USER}"
+	local s
+	s="$(getent passwd "${ssh_agent_service}" 2>/dev/null || :)"
+	if test -z "${s}"; then
+	    cmd_log useradd "${ssh_agent_service}"
+	fi
+	local d
+	d="/home/${ssh_agent_service}/keys/common"
+	if test -d "${d}"; then
+	    setup_ssh_agent_service '' "/home/${ssh_agent_service}/keys/common"
+	else
+	    log "directory for ssh keys does not exist - ${d}"
+	fi
+	for d in "/home/${ssh_agent_service}/keys/set-"*; do
+	    if test -f "${d}"; then
+		setup_ssh_agent_service "${d##*/set-}" "${d}"
+	    fi
+	done
+    fi
+
     dec_log_level
+}
+
+setup_ssh_agent_service() {
+    local key_set_name key_dir service_name sock_file
+    key_set_name="$1"
+    key_dir="$2"
+    set -- "${key_dir}/"*_key
+    if test ! -f "$1"; then
+	log "directory for ssh keys has no *_key files - ${key_dir}"
+	return
+    fi
+    service_name="tliset-${ssh_agent_service}"
+    sock_file="common.sock"
+    if test -n "${key_set_name}"; then
+	service_name="${service_name}-${key_set_name}"
+	sock_file="set-${key_set_name}.sock"
+    fi
+    p_file "service:${service_name}.socket" "\
+[Socket]
+ListenStream=/run/tliset-${ssh_agent_service}/${sock_file}
+SocketUser=root
+SocketGroup=${primary_user}
+SocketMode=0060
+"
+    p_file "service:${service_name}.service" '
+[Unit]
+Requires='"${service_name}"'.socket
+After='"${service_name}"'.socket
+
+[Service]
+ExecStart=/usr/bin/ssh-agent -a /tmp/agent.sock \
+  sh -c '\''ssh-add "'"${key_dir}"'"/*_key < /dev/null > /dev/null && \
+    exec /usr/lib/systemd/systemd-socket-proxyd /tmp/agent.sock'\''
+PrivateTmp=yes
+User='"${ssh_agent_service}"'
+'
+    multi_user_wants+=("${service_name}.socket")
+
 }
 
 setup_files() {
