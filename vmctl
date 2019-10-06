@@ -69,7 +69,7 @@ sync {
     data_vol_reserved_percent=1
     ssh_host_port=15022
     ssh_proxy_port=15080
-    ssh_custom_agent=bergenrabbit
+    ssh_custom_agent=/run/tliset-ssh-agent/set-bergenrabbit.sock
     ssh_forward_agent=1
     boot_script_custom='
 cmd_log mkdir -p -m 0755 /br
@@ -80,14 +80,24 @@ sync {
    default.rsync,
    source = '${HOME}/p/bergenrabbit',
    target = 'root@${VM}:/br/opt/2',
-   exclude = { '/compiled/' },
+   exclude = { '/compiled', '/gosrc' },
    delay = 1,
    rsync = {
       perms = true,
       owner = true,
       group = true,
       chown = 'root:root',
-      chmod = 'D755,Fg-w',
+      chmod = 'D755,F+rX,Fg-w',
+   }
+}
+sync {
+   default.rsync,
+   source = '${HOME}/p/bergenrabbit/gosrc',
+   target = 'br-build@${VM}:/br/opt/2/gosrc',
+   delay = 1,
+   rsync = {
+      perms = true,
+      chmod = 'D2775,F+rX'
    }
 }
 "
@@ -140,10 +150,10 @@ sync {
 
   readonly main_vol data_vol_path
 
-  local ssh_agent_socket_name
-  ssh_agent_socket_name="ssh-agent${ssh_custom_agent:+-}${ssh_custom_agent}.socket"
-  SSH_AUTH_SOCK="${XDG_RUNTIME_DIR}/${ssh_agent_socket_name}"
-  export SSH_AUTH_SOCK
+  if test -n "${ssh_custom_agent}"; then
+    SSH_AUTH_SOCK="${ssh_custom_agent}";
+    export SSH_AUTH_SOCK
+  fi
 }
 
 is_vm() {
@@ -588,7 +598,7 @@ d-i preseed/late_command string in-target /bin/sh -c 'printf %s ${end_install_sc
 
       log "Creating new qcow2 volume"
       rm -f "${initial_vol}.tmp"
-      qemu-img create -f qcow2 "${initial_vol}.tmp" 6G
+      qemu-img create -f qcow2 "${initial_vol}.tmp" 8G
 
       log "Running the installer"
       local ecmd
