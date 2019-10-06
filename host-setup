@@ -9,17 +9,17 @@ readonly NL=$'\n'
 selfdir="$(dirname "$0")"
 
 
-valid_host_names=(bergenrabbit r2 rhea thip test-br)
+valid_host_names=(bergenrabbit.net r2 r3.mir2.org r4.mir2.org rhea thip test-br)
 
-declare -i kind_coreos=0
-declare -i kind_fedora=0
-declare -i kind_ubuntu=0
-declare -i kind_debian=0
+kind_coreos=
+kind_fedora=
+kind_ubuntu=
+kind_debian=
 
 declare zram_size=
+declare zram_algorithm=
 declare -i with_zswap=0
 declare -i with_latex=0
-declare -i with_transgui=0
 declare -i with_common_packages=0
 declare -i with_include_rpmfusion=1
 
@@ -31,7 +31,14 @@ declare -i custom_user_watches_count=0
 
 ssh_agent_service=
 
-declare bergenrabbit_backup_time=
+with_custom_sshd=
+with_setuidless_sshd=
+
+with_nginx=
+tormed_host=
+
+bergenrabbit_archive_time=
+bergenrabbit_archive_root=
 
 declare ssh_login_user=
 declare machine_host=
@@ -42,6 +49,8 @@ declare primary_user=
 declare extra_system_users=()
 
 declare -a explicit_ipv6=()
+
+webserver_certificate_domains=
 
 # Replace lables/uids with real devices in fstab/grub for security
 # when allowing untrusted VM to access the whole disk.
@@ -57,55 +66,42 @@ bergenrabbit_dns="${bergenrabbit_dns} www.bergenrabbit.no bergenrabbit.no"
 bergenrabbit_dns="${bergenrabbit_dns} www.hippyru.net hippyru.net lib.hippyru.net"
 bergenrabbit_dns="${bergenrabbit_dns} www.hippy.ru hippy.ru"
 bergenrabbit_dns="${bergenrabbit_dns} www.lubava.info lubava.info"
-
-dserver_eth_wan=enp2s0
-dserver_eth_lan=enp4s0
-
-dserver_bridge=macvlan0
-
-mac_kino=52:54:00:54:6e:ef
-mac_macbook_air=8c:29:37:e8:0e:e2
-mac_tablet=34:23:ba:a4:0f:85
-
-ip_kino=192.168.2.9
-ip_drouter=192.168.2.8
-ip_tablet=192.168.2.20
-ip_macbook_air=192.168.2.21
-
-dserver_port_forwards=(
-    "tcp:9092:$ip_kino"
-    "tcp:51413:$ip_kino"
-    "udp:51413:$ip_kino"
-    "tcp:25565:$ip_macbook_air"
-    "udp:25565:$ip_macbook_air"
-)
-
-hippyru_www_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIeBgbo19/jj/VDoX3nOybsmrbN95lIBeQYQv+FAOs/z"
-media_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILTrJnFcAg4qiYW8o8E0ieXc+hhnxc7ozAXlUAz1JHT6"
-dzetacon_pubkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBGPGP6D7o3E3cl3gwx8Wa3XTAWOWeNAvcj2ZKY/OhbT"
-
-readonly ssh_kino_wrap="/run/tliset/ssh_kino_wrap"
-readonly kino_password_file="/var/lib/tliset/kino_password"
+bergenrabbit_dns="${bergenrabbit_dns} www.wmmsk.com wmmsk.com femicid.net"
 
 get_host_options() {
     case "$NAME" in
-	bergenrabbit )
-	    ssh_login_user=core
-	    with_docker=1
-	    zram_size=512M
+	bergenrabbit.net )
+	    zram_size=1024M
+	    zram_algorithm=lz4
 	    ;;
  	r2 )
-	    bergenrabbit_backup_time=03:00:02
+	    bergenrabbit_archive_time=03:00:02
+	    bergenrabbit_archive_root=/area/backup
 	    explicit_ipv6=(2001:41d0:e:696::1/64 2001:41d0:e:6ff:ff:ff:ff:ff)
 	    ssh_login_user=core
 	    with_docker=1
 	    zram_size=512M
+	    ;;
+ 	r3.mir2.org | r4.mir2.org )
+	    zram_size=8192M
+	    zram_algorithm=lz4hc
+	    with_custom_sshd=1
+	    with_setuidless_sshd=1
+	    with_nginx=1
+	    if test r3.mir2.org = "${NAME}"; then
+		enable_tormed media3.mir2.org
+	    fi
+	    if test r4.mir2.org = "${NAME}"; then
+		bergenrabbit_archive_time=02:40:02
+		bergenrabbit_archive_root=/data2/br-archive
+	    fi
 	    ;;
  	rhea )
 	    with_common_packages=1
 	    #with_docker=1
 	    with_latex=1
 	    zram_size=28G
+	    zram_algorithm=lz4hc
 	    #with_zswap=1
 
 	    # disable until user namespaces works
@@ -269,7 +265,7 @@ ensure_dir() {
 		err "$path exists and is a symbilic link, not a directory - ${dir}"
 	fi
 	local s
-	s="$(find "${dir}" -maxdepth 0 -perm "${mode}" -user "${user}" -group "${group}")"
+	s="$(find "${dir}" -maxdepth 0 -perm "${mode}" -user "${user}" -group "${group}" 2>/dev/null || :)"
 	if test -z "${s}"; then
 	    cmd_log chmod "=${mode}" "${dir}"
 	    cmd_log chown "${user}:${group}" "${dir}"
@@ -282,6 +278,7 @@ ensure_symlink() {
     local target path
     target="$1"
     path="$2"
+    file_update=
     while :; do
 	if test -h "${path}"; then
 	    local current_target
@@ -289,11 +286,12 @@ ensure_symlink() {
 	    if test "x${current_target}" = "x${target}"; then
 		break
 	    fi
-	elif test -d "${path}" ]]; then
+	elif test -d "${path}"; then
 	    cmd_log rmdir "${path}" || \
 		err "remove symbolic link ${path} manually and run again"
 	fi
 	cmd_log ln -sfT "${target}" "${path}"
+	file_update=1
 	break
     done
     note_path "${path}"
@@ -318,7 +316,7 @@ write_file() {
     done
 
     shift $((${OPTIND} - 1))
-    test $# -eq 2 || err "write_file requires path and body arguments when $# argument was given"
+    test $# -eq 2 || err "write_file requires path and body arguments when $# arguments were given"
 
     local path body
     path="$1"
@@ -392,6 +390,53 @@ write_file() {
     note_path "${path}"
 }
 
+ensure_user() {
+    local user home_path groups
+    user="$1"
+    home_path="$2"
+    groups="${3-}"
+
+    # TODO update HOME and groups on mismatch
+    local s
+    s="$(getent passwd "${user}" 2>/dev/null || :)"
+    if test -z "${s}"; then
+	set -- -M -d "${home_path}"
+	if test -n "${groups}"; then
+	    set -- "$@" -G "${groups}"
+	fi
+	cmd_log useradd "$@" "${user}"
+    fi
+}
+
+ensure_group_member() {
+    local group user
+    group="$1"
+    user="$2"
+    file_update=
+    local s
+    s="$(getent group "${group}")"
+    if test -z "${s}"; then
+	err "group ${group} doesn't exist"
+    fi
+    s="${s##*:}"
+    while test -n "${s}"; do
+	local member
+	member="${s%%,*}"
+	if test "x${member}" = "x${user}"; then
+	    break
+	fi
+	if test "x${member}" = "x${s}"; then
+	    s=
+	else
+	    s="${s#*,}"
+	fi
+    done
+    if test -z "${s}"; then
+	cmd_log usermod -aG "${group}" "${user}"
+	file_update=1
+    fi
+}
+
 read_tliset_name() {
     R=''
     local path=/etc/tliset.name name
@@ -405,6 +450,13 @@ read_tliset_name() {
     [[ $name =~ $name_pattern ]] || \
 	err "$path content does not match $name_pattern - '$name'"
     R="$name"
+}
+
+enable_tormed() {
+    local name
+    name="$1"
+    webserver_certificate_domains="${webserver_certificate_domains}${webserver_certificate_domains:+ }${name}"
+    tormed_host="${name}"
 }
 
 add_dns_record_a() {
@@ -442,8 +494,10 @@ begin_tliset() {
     readonly paths_file
     ensure_dir /var/lib/tliset
     exec 9>>"${paths_file}.new"
+
     can_note_paths=1
     note_path /var/lib/tliset
+    ensure_dir /usr/lib/tliset
 }
 
 end_tliset() {
@@ -489,12 +543,12 @@ note_path() {
 }
 
 setup_packages() {
-    let kind_fedora || let kind_ubuntu || return 0
+    test -n "${kind_fedora}" -o -n "${kind_debian}" || return 0
 
     log "Checking packages"
     inc_log_level
-    let kind_fedora && setup_fedora_packages
-    let kind_ubuntu && setup_ubuntu_packages
+    test -n "${kind_fedora}" && setup_fedora_packages
+    test -n "${kind_debian}" && setup_debian_packages
     dec_log_level
     return 0
 }
@@ -523,7 +577,7 @@ setup_fedora_packages() {
     local list=()
     if let with_common_packages; then
 	list+=(
-	    tmux
+	    tmux terminus-fonts-console
 	    git lsyncd
 	    quilt mercurial subversion
 	    livecd-tools
@@ -540,7 +594,7 @@ setup_fedora_packages() {
 	    udftools inotify-tools fdupes fslint mtools
 
 	    # encryption and backup
-	    apg duplicity perl-Digest-Bcrypt lzip
+	    apg duplicity perl-Digest-Bcrypt lzip ccrypt pv
 
 	    # Recovery tools
 	    ddrescue foremost scalpel testdisk
@@ -588,7 +642,6 @@ setup_fedora_packages() {
 	list+=(
 	    gnome-tweaks
 	    gnome-terminal-nautilus
-	    gnome-shell-extension-alternate-tab
 	)
     fi
 
@@ -599,7 +652,6 @@ setup_fedora_packages() {
 	    texlive-babel-russian
 	    texlive-collection-langcyrillic
 	)
-    let with_transgui && list+=(transgui openssl-devel)
 
     list+=(gcc kernel-devel)
 
@@ -624,9 +676,6 @@ setup_fedora_packages() {
 
     local remove_list=()
 
-    if let with_transgui; then
-	remove_list+=(transmission-gtk transmission-remote-gtk)
-    fi
     if let ${#remove_list[@]}; then
 	local status=0
 	rpm -q --quiet "${remove_list[@]}" || status=$?
@@ -639,74 +688,97 @@ setup_fedora_packages() {
     write_file /etc/tmux.conf "new-session${NL}"
 }
 
-setup_ubuntu_packages() {
-    local -a install_list=() remove_list=()
-    install_list+=(
-	build-essential make-doc gcc g++ pkgconf
-	git git-man liberror-perl
-	emacs24 emacs24-el xterm xfonts-base
-	xtightvncviewer xclip
-	lsyncd apg apt-file libdigest-bcrypt-perl duplicity
-    )
+setup_debian_packages() {
+    local eargs
+    eargs=
+    earg apt-file
+    earg man-db
+    earg lzip zip unzip
+    earg ccrypt
+    earg pv
+    earg apg
+    earg screen tmux
+    earg git
+
+    if test -n "${with_nginx}"; then
+	earg nginx-full
+	earg dehydrated ssl-cert
+    fi
+    if test -n "${tormed_host}"; then
+	earg whois
+	earg transmission-daemon
+	earg jq
+
+	# Make sure that the default transmission-daemon never starts
+	ensure_symlink /dev/null /etc/systemd/system/transmission-daemon.service
+	if test -n "${file_update}"; then
+	    systemd_unit_update=1
+	fi
+    fi
 
     if let with_common_packages; then
-	install_list+=(
-	    dstat
-	    libreoffice
-	    gvfs-bin
-	    libglib2.0-dev
-	    libgnome-keyring-dev
-	    ffmpeg
-	    firejail
-	    xpra
-	    xephyr
-	)
+	earg dstat
+	earg libreoffice
+	earg gvfs-bin
+	earg libglib2.0-dev
+	earg libgnome-keyring-dev
+	earg ffmpeg
+	earg firejail
+	earg xpra
+	earg xephyr
     fi
-
-    let with_transgui && install_list+=(transgui)
-    remove_list+=(transmission-common)
 
     if let with_latex; then
-	install_list+=(
-	    texlive
-	    texlive-lang-cyrillic
-	    texlive-lang-european
-	)
+	earg texlive
+	earg texlive-lang-cyrillic
+	earg texlive-lang-european
     fi
 
-    remove_list+=(
-	resolvconf
-    )
+    local escaped_install_list
+    escaped_install_list="${eargs}"
 
-    local -A package_status_map=()
+    # Remove list
 
-    local -a apt_action_list=()
-    fill_apt_action_list install "${install_list[@]:+${install_list[@]}}"
-    if [[ ${#apt_action_list[@]} -ne 0 ]]; then
+    eargs=
+    earg resolvconf
+
+    local escaped_remove_list
+    escaped_remove_list="${eargs}"
+
+    local escaped_apt_action_list
+    escaped_apt_action_list=
+    eval "fill_apt_action_list install ${escaped_install_list}"
+    if test -n "${escaped_apt_action_list}"; then
 	log "Installing missing packages"
-	DEBIAN_FRONTEND=noninteractive cmd_log apt-get install -y "${apt_action_list[@]}"
+	eval "DEBIAN_FRONTEND=noninteractive \
+	    cmd_log apt-get install -y ${escaped_apt_action_list}"
     fi
 
-    local -a apt_action_list=()
-    fill_apt_action_list uninstall "${remove_list[@]:+${remove_list[@]}}"
-    if [[ ${#apt_action_list[@]} -ne 0 ]]; then
+    escaped_apt_action_list=
+    eval "fill_apt_action_list uninstall ${escaped_remove_list}"
+    if test -n "${escaped_apt_action_list}"; then
 	log "Purging unnecessary packages ${remove_list[*]}"
-	DEBIAN_FRONTEND=noninteractive apt-get purge -y "${apt_action_list[@]}"
+	eval "DEBIAN_FRONTEND=noninteractive \
+	    apt-get purge -y ${escaped_apt_action_list}"
     fi
 }
 
 fill_apt_action_list() {
-    local action="$1"
+    local action
+    action="$1"
     shift
-    [[ $# -ne 0 ]] || return 0
+    test $# -ne 0 || return 0
 
     # Complication: for unknown packages dpkg-query reports an error,
     # so parse both stdout and stderr.
-    local status_package_re='^#stdout ([^ ]+)  ([^ ]+)$'
-    local unknown_package_message_re='^dpkg-query: no packages found matching ([^ ]+)$'
+    local status_package_re
+    status_package_re='^#stdout ([^ ]+)  ([^ ]+)$'
+    local unknown_package_message_re
+    unknown_package_message_re='^dpkg-query: no packages found matching ([^ ]+)$'
     local output
-    output="$(dpkg-query -W --showformat '#stdout ${db:Status-Abbrev} ${Package}\n' "$@"  2>&1 || :)"
-    if [[ $output ]]; then
+    output="$(dpkg-query -W --showformat \
+	'#stdout ${db:Status-Abbrev} ${Package}\n' "$@"  2>&1 || :)"
+    if test -n "${output}"; then
 	local -a lines
 	mapfile -t lines <<< "$output"
 	local line
@@ -722,7 +794,6 @@ fill_apt_action_list() {
 		    un ) status=uninstalled ;;
 		    * ) err "unexpected dpkg-query status '$status': $line" ;;
 		esac
-		package_status_map[$package]="$status"
 	    else
 		err "unexpected dpkg-query output: $line"
 	    fi
@@ -738,7 +809,8 @@ fill_apt_action_list() {
 	    else
 		err "bad action: $action"
 	    fi
-	    apt_action_list+=("$package")
+	    escape_for_shell "$package"
+	    escaped_apt_action_list="${escaped_apt_action_list} ${R}"
 	done
     fi
 }
@@ -777,6 +849,9 @@ start_generator_write() {
     sockets_wants=()
     basic_target_wants=()
     systemd_unit_update=
+    service_try_restart_list=
+    service_restart_list=
+    service_reload_list=
 }
 
 print_wants_list() {
@@ -799,6 +874,15 @@ finish_generator_write() {
 
     if test -n "${systemd_unit_update}"; then
 	cmd_log systemctl daemon-reload
+    fi
+    if test -n "${service_restart_list}"; then
+	eval "cmd_log systemctl restart${service_restart_list}"
+    fi
+    if test -n "${service_try_restart_list}"; then
+	eval "cmd_log systemctl try-restart${service_try_restart_list}"
+    fi
+    if test -n "${service_reload_list}"; then
+	eval "cmd_log systemctl reload${service_reload_list}"
     fi
 }
 
@@ -844,8 +928,10 @@ p_ensure_no_file() {
     file="$1"
     convert_kind_path "${file}"
     file="${R}"
+    file_update=
     if test -f "${file}"; then
 	cmd_log rm -f "${file}"
+	file_update=1
     fi
 }
 
@@ -887,11 +973,14 @@ convert_kind_path() {
     fi
     local dir
     case "$file_kind" in
-    service: ) dir='/etc/systemd/system' ;;
+    module: ) dir='/etc/modules-load.d' ;;
     net: ) dir='/etc/systemd/network' ;;
-    scripts: ) dir="/var/lib/tliset" ;;
-    sysctl: ) dir="/etc/sysctl.d" ;;
     nspawn: ) dir="/etc/systemd/nspawn" ;;
+    nginx-site: ) dir="/etc/nginx/sites-enabled" ;;
+    nginx-config: ) dir="/etc/nginx/conf.d" ;;
+    service: ) dir='/etc/systemd/system' ;;
+    scripts: ) dir="/usr/lib/tliset" ;;
+    sysctl: ) dir="/etc/sysctl.d" ;;
     NetworkManager: ) dir="/etc/NetworkManager/conf.d" ;;
     * ) err "Unknown file kind - ${file_kind_and_path}" ;;
     esac
@@ -944,6 +1033,16 @@ setup_zram() {
 
     log "Checking zram"
 
+    local alg_arg
+    alg_arg=
+    if test -n "${zram_algorithm}"; then
+	alg_arg=" --algorithm ${zram_algorithm}"
+    fi
+
+    p_file module:tliset-zram.conf "\
+zram
+"
+
     p_file service:tliset-zram.service '
 [Unit]
 Description=Service enabling RAM compression using zRam
@@ -958,8 +1057,7 @@ EnvironmentFile=-/run/tliset-zram-state
 ExecStart=/bin/sh -c '\''\
 set -e -u; \
 printf "" > /run/tliset-zram-state; \
-/sbin/modprobe zram num_devices=1; \
-device="$(zramctl --find --size "$${SWAP_SIZE}" --algorithm lz4hc)"; \
+device="$(zramctl --find --size "$${SWAP_SIZE}"'"${alg_arg}"')"; \
 echo "ZRAM_DEVICE=$${device}" >> /run/tliset-zram-state; \
 /sbin/mkswap "$${device}"; \
 /sbin/swapon -p 100 "$${device}"; \
@@ -987,7 +1085,7 @@ setup_network() {
     inc_log_level
 
     if [[ ${#explicit_ipv6[@]} -ne 0 ]]; then
-	let kind_coreos || err "unsupported configuration"
+	test -n "${kind_coreos}" || err "unsupported configuration"
 	local ipv6_address="${explicit_ipv6[0]}"
 	local ipv6_gateway="${explicit_ipv6[1]}"
 	p_file net:zz-default.network "\
@@ -1038,44 +1136,57 @@ ensure_root_ssh_key() {
     ssh_key_file="$file"
 }
 
-setup_bergenrabbit_backup() {
-    [[ $bergenrabbit_backup_time ]] || return 0
+setup_bergenrabbit_archive() {
+    [[ $bergenrabbit_archive_time ]] || return 0
 
     local ssh_key_file=
     ensure_root_ssh_key bergenrabbit-www-backup
 
-    if [[ $bergenrabbit_backup_time == manual ]]; then
+    if [[ $bergenrabbit_archive_time == manual ]]; then
 	return 0
     fi
 
-    [[ $bergenrabbit_backup_time =~ ^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$ ]] || \
-	err "Invalid backup time spec in bergenrabbit_backup_time - '${bergenrabbit_backup_time}'"
+    [[ $bergenrabbit_archive_time =~ ^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$ ]] || \
+	err "Invalid backup time spec in bergenrabbit_archive_time - '${bergenrabbit_archive_time}'"
 
-    p_file service:tliset-bergenrabbit-backup.timer "\
+    ensure_user tliset-br-archive "${bergenrabbit_archive_root}"
+    ensure_dir -m 0770 -g tliset-br-archive "${bergenrabbit_archive_root}"
+
+    p_file service:tliset-br-archive.timer "\
 [Unit]
 After=network-online.target
 Wants=network-online.target
 
 [Timer]
 Persistent=true
-OnCalendar=${bergenrabbit_backup_time}
+OnCalendar=${bergenrabbit_archive_time}
 "
-    p_file service:tliset-bergenrabbit-backup.service "\
+    p_file service:tliset-br-archive.service '
 [Unit]
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/bin/bash /var/lib/tliset/bergenrabbit-backup.bash
+User=tliset-br-archive
+ExecStart=/usr/lib/tliset/br-archive
 StandardError=journal
 StandardOutput=journal
 Type=oneshot
-"
-    multi_user_wants+=("tliset-bergenrabbit-backup.timer")
+
+ReadWritePaths='"${bergenrabbit_archive_root}"'
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectSystem=strict
+'
+    multi_user_wants+=("tliset-br-archive.timer")
 
     # Script source with condition code
     local s
-    s='#!/usr/bin/bash
+    s='#!/bin/bash
 set -e -u -o pipefail
 
 # Number of days to keep old backups in the changed dir
@@ -1085,7 +1196,7 @@ max_keep_changed_days=90
     # On fedora change SELinux context for rsync so it is treated as
     # a binary, not a service. As an update can reset it, do it each
     # time we are about to run it.
-    if let kind_fedora; then
+    if test -n "${kind_fedora}"; then
 	s+='
 se_context=$(stat -c %C /usr/bin/rsync)
 if [[ $se_context =~ ^[^:]*:[^:]*:([^:]*):[^:]*$ ]]; then
@@ -1098,7 +1209,7 @@ fi
     fi
     s+='
 
-readonly backup_root="/area/backup"
+readonly backup_root="'"${bergenrabbit_archive_root}"'"
 
 remove_list=()
 
@@ -1165,9 +1276,9 @@ fi
 
 '
 
-    p_file scripts:bergenrabbit-backup.bash "$s"
+    write_file -m 0755 "/usr/lib/tliset/br-archive" "${s}"
 
-    if let kind_fedora; then
+    if test -n "${kind_fedora}"; then
 	setsebool rsync_client 1
     fi
 }
@@ -1176,7 +1287,7 @@ setup_services() {
     log "Checking services"
     inc_log_level
 
-    setup_bergenrabbit_backup
+    setup_bergenrabbit_archive
 
     if let with_docker; then
 	# Make sure that docker starts. On CoreOS docker is
@@ -1208,7 +1319,7 @@ What=$docker_lib_dir
 	    )
 	fi
 
-	if let kind_fedora; then
+	if test -n "${kind_fedora}"; then
 	    p_mask_service docker-storage-setup.service
 	    local exec_start=(
 		/usr/bin/dockerd-current
@@ -1244,29 +1355,551 @@ What=$docker_lib_dir
 	fi
     fi
 
+    setup_ssh_service
+    setup_nginx_service
+    setup_tormed_service
+
     if test -n "${ssh_agent_service}"; then
 	local primary_user
 	primary_user="${SUDO_USER}"
-	local s
-	s="$(getent passwd "${ssh_agent_service}" 2>/dev/null || :)"
-	if test -z "${s}"; then
-	    cmd_log useradd "${ssh_agent_service}"
-	fi
+	ensure_user "${ssh_agent_service}" "/home/${ssh_agent_service}"
 	local d
-	d="/home/${ssh_agent_service}/keys/common"
-	if test -d "${d}"; then
-	    setup_ssh_agent_service '' "/home/${ssh_agent_service}/keys/common"
-	else
+	d="/home/${ssh_agent_service}/keys"
+	if test ! -d "${d}"; then
 	    log "directory for ssh keys does not exist - ${d}"
-	fi
-	for d in "/home/${ssh_agent_service}/keys/set-"*; do
-	    if test -f "${d}"; then
-		setup_ssh_agent_service "${d##*/set-}" "${d}"
+	else
+	    if test -d "${d}/common"; then
+		setup_ssh_agent_service '' "${d}/common"
 	    fi
-	done
+	    local set_dir
+	    for set_dir in "${d}/set-"*; do
+		if test -d "${set_dir}"; then
+		    setup_ssh_agent_service "${set_dir##*/set-}" "${set_dir}"
+		fi
+	    done
+	fi
     fi
 
     dec_log_level
+}
+
+
+setup_ssh_service() {
+
+    test -n "${with_custom_sshd}" || return 0
+
+    local sshd_config
+    sshd_config="\
+
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+UsePAM yes
+
+X11Forwarding yes
+PrintMotd no
+
+#AcceptEnv LANG LC_*
+
+Subsystem	sftp	/usr/lib/openssh/sftp-server
+"
+    if test -n "${tormed_host}"; then
+	sshd_config="${sshd_config}
+Match User tormed-files
+  ChrootDirectory /var/lib/tormed/files-root
+  ForceCommand internal-sftp -u 0007
+  AllowTcpForwarding local
+  PermitOpen 127.0.0.1:9091 127.0.0.1:9093
+  PasswordAuthentication yes
+"
+    fi
+
+    write_file /etc/ssh/sshd_config "${sshd_config}"
+    if test -n "${file_update}"; then
+	escape_for_shell ssh.service
+	service_reload_list="${service_reload_list} ${R}"
+    fi
+
+    if test -n "${with_setuidless_sshd}"; then
+	local ssh_drop_in
+	ssh_drop_in="\
+[Service]
+NoNewPrivileges=yes
+"
+	p_systemd_drop_in ssh.service "${ssh_drop_in}"
+    fi
+}
+
+setup_nginx_service() {
+    test -n "${with_nginx}" || return 0
+
+    local reload_nginx
+    reload_nginx=
+    write_nginx_configs
+
+    local nginx_cmd
+    nginx_cmd="/usr/sbin/nginx"
+    nginx_cmd="${nginx_cmd} -g '"
+    nginx_cmd="${nginx_cmd} daemon on;"
+    nginx_cmd="${nginx_cmd} master_process on;"
+    nginx_cmd="${nginx_cmd} pid /run/nginx/nginx.pid;"
+    nginx_cmd="${nginx_cmd}'"
+
+    local unit_fragment
+    unit_fragment='
+[Service]
+PIDFile=/run/nginx/nginx.pid
+User=www-data
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+Restart=on-failure
+RestartSec=2s
+
+ExecStartPre=
+ExecStart=
+ExecStart='"${nginx_cmd}"'
+ExecStop=
+
+KillSignal=SIGQUIT
+ExecReload=
+ExecReload=/bin/kill -s HUP $MAINPID
+
+RuntimeDirectory=nginx
+RuntimeDirectoryMode=0700
+ReadWritePaths=/var/log/nginx /var/lib/nginx
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectSystem=strict
+'
+
+    p_systemd_drop_in nginx.service "${unit_fragment}"
+    if test -n "${file_update}"; then
+	escape_for_shell nginx.service
+	service_try_restart_list="${service_try_restart_list} ${R}"
+    elif test -n "${reload_nginx}"; then
+	escape_for_shell nginx.service
+	service_reload_list="${service_reload_list} ${R}"
+    fi
+
+    setup_letsencrypt
+}
+
+write_nginx_configs() {
+
+    local s
+    if grep -q '^user www-data;$' /etc/nginx/nginx.conf; then
+	log "Patching /etc/nginx/nginx.conf"
+	s='s/^\(user www-data\|worker_processes auto\|pid \/run\/nginx.pid\);/#&/g'
+	sed -i -e "${s}" /etc/nginx/nginx.conf
+	reload_nginx=1
+    fi
+
+    s=
+    if test -n "${tormed_host}"; then
+	s="${s}"'
+
+limit_req_zone $binary_remote_addr zone=tormed:1m rate=5r/s;
+
+upstream transmission {
+	server 127.0.0.1:9091;
+	keepalive 4;
+}
+
+upstream transmission2 {
+	server 127.0.0.1:9093;
+	keepalive 4;
+}
+
+server {
+	server_name '"${tormed_host}"';
+	listen 80;
+	listen [::]:80;
+
+	access_log off;
+
+	location /.well-known/acme-challenge/ {
+		alias /run/acme-challenge/;
+	}
+	location / {
+		return 301 https://'"${tormed_host}"'$request_uri;
+	}
+}
+
+server {
+	server_name '"${tormed_host}"';
+	listen 443 ssl http2;
+	listen [::]:443 ssl http2;
+
+	ssl_certificate /var/lib/dehydrated/certs/host/fullchain.pem;
+	ssl_certificate_key /var/lib/dehydrated/certs/host/privkey.pem;
+	ssl_protocols TLSv1.2;
+
+	limit_req zone=tormed burst=25;
+	access_log off;
+
+	auth_basic "Restricted";
+	auth_basic_user_file /etc/tormed/htpassword/htpassword;
+
+	location / {
+		root /usr/lib/tormed/www;
+		try_files $uri $uri/ =404;
+		index index.html index.htm;
+	}
+
+	location /files/ {
+		alias /var/lib/tormed/files-root/files/;
+
+		directio 4m;
+		output_buffers 1 1m;
+
+		dav_methods PUT DELETE MKCOL COPY MOVE;
+		dav_access group:rw;
+
+		# This is for directory listing
+		dav_ext_methods PROPFIND OPTIONS;
+
+		autoindex on;
+		autoindex_exact_size off;
+		autoindex_localtime on;
+		charset utf-8;
+
+		try_files $uri $uri/ =404;
+	}
+
+	# Serve static files from the Tranmission web interface itself
+	location /transmission/web/ {
+		alias /usr/share/transmission/web/;
+		index index.html index.htm;
+	}
+
+	location /transmission2/web/ {
+		alias /usr/share/transmission/web/;
+		index index.html index.htm;
+	}
+	location /transmission/ {
+		proxy_pass          http://transmission;
+		proxy_http_version  1.1;
+		proxy_redirect      off;
+		proxy_buffering     off;
+		proxy_set_header    Host            $host;
+		proxy_set_header    X-Real-IP       $remote_addr;
+		proxy_set_header    Connection      "";
+		proxy_pass_header   X-Transmission-Session-Id;
+	}
+
+	location /transmission2/ {
+		proxy_pass          http://transmission2/transmission/;
+		proxy_http_version  1.1;
+		proxy_redirect      off;
+		proxy_buffering     off;
+		proxy_set_header    Host            $host;
+		proxy_set_header    X-Real-IP       $remote_addr;
+		proxy_set_header    Connection      "";
+		proxy_pass_header   X-Transmission-Session-Id;
+	}
+}
+'
+    fi
+
+    if test -n "${s}"; then
+	p_file "nginx-site:tliset" "${s}"
+	if test -n "${file_update}"; then
+	    reload_nginx=1
+	fi
+    fi
+
+    p_ensure_no_file nginx-site:default
+    if test -n "${file_update}"; then
+	reload_nginx=1
+    fi
+}
+
+setup_tormed_service() {
+    test -n "${tormed_host}" || return 0
+
+    ensure_dir /var/lib/tormed
+
+    local home_path
+    home_path="/var/lib/tormed/files-root/files"
+    ensure_user tormed-files "${home_path}"
+    ensure_dir /var/lib/tormed/files-root
+    ensure_dir -m 02770 -g tormed-files "${home_path}"
+
+    ensure_group_member tormed-files www-data
+    if test -n "${file_update}"; then
+	# Restart nginx so the process gets the group membership
+	escape_for_shell nginx.service
+	service_try_restart_list="${service_try_restart_list} ${R}"
+    fi
+
+    local short_user full_user
+    for short_user in service service2; do
+	full_user="tormed-${short_user}"
+	home_path="/var/lib/tormed/${short_user}"
+	ensure_user "${full_user}" "${home_path}" tormed-files
+	ensure_dir -m 0700 -u "${full_user}" -g "${full_user}" "${home_path}"
+    done
+
+    ensure_dir /etc/tormed
+    ensure_dir -m 0750 -g www-data "/etc/tormed/htpassword"
+
+    ensure_dir /usr/lib/tormed
+    ensure_dir /usr/lib/tormed/www
+
+    write_file -m 0755 "/usr/lib/tormed/update-password" '#!/bin/sh
+set -e -u
+
+err() {
+    printf "%s\\n" "$*" >&2
+    exit 1
+}
+
+if :; then
+    test -t 0 -a -t 1 || err "both stdin and stdout must be tty"
+    stty_orig="$(stty -g)"
+    stty -echo echonl
+    IFS= read -r -p "Enter new tormed password: " password || :
+    stty "${stty_orig}"
+    if test -z "${password}"; then
+	err "Password cannot be empty"
+    fi
+    stty -echo echonl
+    IFS= read -r -p "Confirm password: " password2 || :
+    stty "${stty_orig}"
+    if test "x${password}" != "x${password2}"; then
+	err "Passwords mismatches."
+    fi
+fi
+
+salt="$(dd if=/dev/urandom bs=12 count=1 status=none | base64 -w0 | tr + .)"
+test 16 -eq ${#salt} || \
+    err "unexpected salt length ${#salt} when 16 was expected"
+
+hash="$(printf %s "$password" | mkpasswd -s -m sha-512 -R 5000 -S "$salt")"
+test 118 -eq ${#hash} || \
+    err "unexpected password hash length ${#hash} when 118 was expected"
+
+printf "%s:%s\\n" user "$hash" > /etc/tormed/htpassword/htpassword
+chmod 644 /etc/tormed/htpassword/htpassword
+
+usermod -p "${hash}" tormed-files
+'
+
+    write_file "/usr/lib/tormed/www/index.html" \
+'<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+</head>
+<body>
+<h3><a href="files/">Files</a></h3>
+<h3><a href="transmission/web/">Tranmission web interface</a></h3>
+</body>
+</html>
+'
+
+    for short_user in service service2; do
+	full_user="tormed-${short_user}"
+	home_path="/var/lib/tormed/${short_user}"
+	service_name="${tliset-tormed-${short_user}}"
+	p_file "service:${service_name}.service" '
+[Service]
+Type=simple
+User='"${full_user}"'
+
+Restart=on-failure
+
+ExecStart=/usr/lib/tliset/tormed-start-transmission
+
+WorkingDirectory='"${home_path}"'
+ReadWritePaths='"${home_path}"' /var/lib/tormed/files-root/files
+BindPaths=/var/lib/tormed/files-root/files:/files
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectSystem=strict
+'
+	multi_user_wants+=("service:${service_name}.service")
+	escape_for_shell "${service_name}.service"
+	service_restart_list="${service_restart_list} ${R}"
+    done
+
+    local start_source
+    start_source="$(print_tormed_start_tranmission)"
+    write_file -m 0755 "/usr/lib/tliset/tormed-start-transmission" "${start_source}"
+}
+
+print_tormed_start_tranmission() {
+    cat <<'EOF'
+#!/bin/sh
+
+set -e -u
+
+user="$(id -un)"
+case "${user}" in
+tormed-service )
+    suffix=
+    peer_port="25602"
+    rpc_port="9091"
+    ;;
+tormed-service2 )
+    suffix=2
+    peer_port="51412"
+    rpc_port="9093"
+    ;;
+esac
+
+settings_file=settings.json
+
+# Transmission only uses the umask for directories in the config dir.
+# It uses the file mode 600 for the state management files and 660/770
+# for downloaded files and directories.
+umask 002
+
+if test ! -s "${settings_file}"; then
+    echo "Creating defaults tranmission options in ${settings_file}" >&2
+
+    default_settings='{
+    "blocklist-enabled": false,
+    "download-dir": "/files",
+    "incomplete-dir": "/files/incomplete'"${suffix}"'",
+    "incomplete-dir-enabled": false,
+    "encryption": 1,
+    "max-peers-global": 200,
+    "pex-enabled": 1,
+    "port-forwarding-enabled": false,
+    "ratio-limit": 2,
+    "ratio-limit-enabled": true,
+    "speed-limit-down": 2000,
+    "speed-limit-down-enabled": true,
+    "speed-limit-up": 500,
+    "speed-limit-up-enabled": true,
+    "umask": 2
+}
+'
+    ( umask 077 && printf %s "${default_settings}" > "${settings_file}" )
+fi
+
+jq_filter='.
+| .["peer-port"] = '"${peer_port}"'
+| .["rpc-authentication-required"] = false
+| .["rpc-bind-address"] = "127.0.0.1"
+| .["rpc-enabled"] = true
+| .["rpc-host-whitelist-enabled"] = false
+| .["rpc-port"] = '"${rpc_port}"'
+| .["rpc-username"] = ""
+| .["rpc-password"] = ""
+| .["rpc-whitelist-enabled"] = false
+| .["umask"] = 7
+'
+
+settings="$(jq "${jq_filter}" "${settings_file}")"
+printf %s "${settings}" > "${settings_file}"
+
+exec /usr/bin/transmission-daemon -f --log-error -g .
+#exec /usr/bin/transmission-daemon -f --log-debug -g .
+EOF
+
+}
+
+setup_letsencrypt() {
+    test -n "${webserver_certificate_domains}" || return 0
+
+    ensure_dir /var/lib/dehydrated
+    ensure_dir -g www-data -m 0770 /var/lib/dehydrated/accounts
+    ensure_dir -g www-data -m 0770 /var/lib/dehydrated/certs
+    ensure_dir -u www-data -g www-data -m 0755 /var/lib/dehydrated/certs/host
+    ensure_dir -g www-data -m 0770 /var/lib/dehydrated/state
+
+    local cert_dir
+    cert_dir="/var/lib/dehydrated/certs/host"
+    if test ! -s "${cert_dir}/fullchain.pem" ; then
+	cmd_log cp /etc/ssl/private/ssl-cert-snakeoil.key \
+	    "${cert_dir}/privkey.pem"
+	cmd_log cp /etc/ssl/certs/ssl-cert-snakeoil.pem \
+	    "${cert_dir}/fullchain.pem.tmp"
+	cmd_log chown www-data:www-data \
+	    "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem.tmp"
+	cmd_log mv "${cert_dir}/fullchain.pem.tmp" "${cert_dir}/fullchain.pem"
+    fi
+
+    local s
+    s='
+CA=https://acme-v02.api.letsencrypt.org/directory
+# Staging
+#CA=https://acme-staging-v02.api.letsencrypt.org/directory
+BASEDIR=/var/lib/dehydrated/state
+DOMAINS_TXT="/etc/dehydrated/domains.txt"
+WELLKNOWN=/run/acme-challenge
+CERTDIR="/var/lib/dehydrated/certs"
+ACCOUNTDIR="/var/lib/dehydrated/accounts"
+
+# Workaround for a bug in older dehydrated
+CURL_OPTS=--http1.1
+'
+    write_file /etc/dehydrated/config "${s}"
+    write_file /etc/dehydrated/domains.txt \
+	"${webserver_certificate_domains} > host"
+
+    s='
+set -e -u
+
+dehydrated --account --accept-terms
+dehydrated --cron --force
+echo "sending NGINX signal to reload its config" >&2
+read -r nginx_pid < /run/nginx/nginx.pid
+kill -s HUP "${nginx_pid}"
+echo "all OK" >&2
+'
+
+    write_file -m 0755 /usr/lib/tliset/dehydrated-renew "${s}"
+
+    p_file service:tliset-dehydrated.service '
+[Service]
+Type=simple
+User=www-data
+
+Restart=on-failure
+
+# Try twice a day until success
+RestartSec=43200
+
+ExecStart=/usr/lib/tliset/dehydrated-renew
+
+RuntimeDirectory=acme-challenge
+RuntimeDirectoryMode=0700
+ReadWritePaths=/var/lib/dehydrated
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectSystem=strict
+'
+
+    p_file service:tliset-dehydrated.timer '
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+Persistent=true
+OnCalendar=*-*-7 03:00:00
+RandomizedDelaySec=86400
+'
+    if test -n "${file_update}"; then
+	escape_for_shell tliset-dehydrated.timer
+	service_restart_list="${service_restart_list} ${R}"
+    fi
+    multi_user_wants+=("service:tliset-dehydrated.timer")
+
 }
 
 setup_ssh_agent_service() {
@@ -1284,12 +1917,16 @@ setup_ssh_agent_service() {
 	service_name="${service_name}-${key_set_name}"
 	sock_file="set-${key_set_name}.sock"
     fi
+
+    # ssh-agent insists that the client must have the same user id as the agent
+    # process. So use systemd-socket-proxyd both to support lazy loading and set
+    # custom permissions on the socket file.
     p_file "service:${service_name}.socket" "\
 [Socket]
 ListenStream=/run/tliset-${ssh_agent_service}/${sock_file}
 SocketUser=root
 SocketGroup=${primary_user}
-SocketMode=0060
+SocketMode=0660
 "
     p_file "service:${service_name}.service" '
 [Unit]
@@ -1304,7 +1941,6 @@ PrivateTmp=yes
 User='"${ssh_agent_service}"'
 '
     multi_user_wants+=("${service_name}.socket")
-
 }
 
 setup_files() {
@@ -1619,17 +2255,17 @@ fi
 
 determine_os
 
-if let kind_fedora; then
+if test -n "${kind_fedora}"; then
     fedora_release="$(rpm -E %fedora)"
 fi
 
 begin_tliset
 
+start_generator_write
+
 if ! under_qubes; then
     setup_packages
 fi
-
-start_generator_write
 
 setup_kernel_parameters
 setup_network
