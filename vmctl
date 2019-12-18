@@ -598,7 +598,7 @@ d-i preseed/late_command string in-target /bin/sh -c 'printf %s ${end_install_sc
 
       log "Creating new qcow2 volume"
       rm -f "${initial_vol}.tmp"
-      qemu-img create -f qcow2 "${initial_vol}.tmp" 8G
+      qemu-img create -f qcow2 "${initial_vol}.tmp" 9G
 
       log "Running the installer"
       local ecmd
