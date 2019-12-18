@@ -94,6 +94,7 @@ get_host_options() {
 	    if test r4.mir2.org = "${NAME}"; then
 		bergenrabbit_archive_time=02:40:02
 		bergenrabbit_archive_root=/data2/br-archive
+		enable_tormed media.mir2.org
 	    fi
 	    ;;
  	rhea )
@@ -111,8 +112,8 @@ get_host_options() {
 	    ;;
 	thip )
 	    ssh_login_user=core
-	    with_docker=1
-	    with_docker_development_net=1
+	    #with_docker=1
+	    #with_docker_development_net=1
 	    ;;
 	test-br )
 	    ssh_login_user=core
@@ -691,7 +692,7 @@ setup_fedora_packages() {
 setup_debian_packages() {
     local eargs
     eargs=
-    earg apt-file
+    earg file apt-file
     earg man-db
     earg lzip zip unzip
     earg ccrypt
@@ -1063,13 +1064,13 @@ echo "ZRAM_DEVICE=$${device}" >> /run/tliset-zram-state; \
 /sbin/swapon -p 100 "$${device}"; \
 echo "AFTER_SWAPON=1" >> /run/tliset-zram-state; \
 swappiness=; \
-read swappiness < /sys/fs/cgroup/memory/memory.swappiness; \
+read swappiness < /proc/sys/vm/swappiness; \
 echo "ORIGINAL_SWAPINESS=$${swappiness}" >> /run/tliset-zram-state; \
-printf 100 > /sys/fs/cgroup/memory/memory.swappiness'\''
+printf 100 > /proc/sys/vm/swappiness'\''
 
 ExecStopPost=/bin/sh -c '\''\
 test -n "$${ORIGINAL_SWAPINESS-}" && \
-  printf %%s "$${ORIGINAL_SWAPINESS}" > /sys/fs/cgroup/memory/memory.swappiness; \
+  printf %%s "$${ORIGINAL_SWAPINESS}" > /proc/sys/vm/swappiness; \
 test -n "$${AFTER_SWAPON-}" && /sbin/swapoff "$${ZRAM_DEVICE}"; \
 test -n "$${ZRAM_DEVICE-}" && zramctl --reset "$${ZRAM_DEVICE}"; \
 rm /run/tliset-zram-state'\''
@@ -1226,7 +1227,7 @@ backup_from_host() {
     done
 
     local -a ssh_cmd=(
-        ssh -l br-backup -i ~/.ssh/bergenrabbit-www-backup-ed25519
+        ssh -l br-backup
         -o Ciphers=aes128-gcm@openssh.com
         -o StrictHostKeyChecking=no
     )
@@ -1409,6 +1410,13 @@ Match User tormed-files
   ForceCommand internal-sftp -u 0007
   AllowTcpForwarding local
   PermitOpen 127.0.0.1:9091 127.0.0.1:9093
+  PasswordAuthentication yes
+
+Match User tormed-rsync
+  ForceCommand /usr/lib/tliset/tormed-rsyncd
+  AllowAgentForwarding no
+  AllowTcpForwarding no
+  AllowStreamLocalForwarding no
   PasswordAuthentication yes
 "
     fi
@@ -1628,6 +1636,8 @@ setup_tormed_service() {
     ensure_dir /var/lib/tormed/files-root
     ensure_dir -m 02770 -g tormed-files "${home_path}"
 
+    ensure_user tormed-rsync "${home_path}" tormed-files
+
     ensure_group_member tormed-files www-data
     if test -n "${file_update}"; then
 	# Restart nginx so the process gets the group membership
@@ -1649,7 +1659,7 @@ setup_tormed_service() {
     ensure_dir /usr/lib/tormed
     ensure_dir /usr/lib/tormed/www
 
-    write_file -m 0755 "/usr/lib/tormed/update-password" '#!/bin/sh
+    write_file -m 0755 "/usr/lib/tliset/tormed-update-password" '#!/bin/sh
 set -e -u
 
 err() {
@@ -1704,7 +1714,7 @@ usermod -p "${hash}" tormed-files
     for short_user in service service2; do
 	full_user="tormed-${short_user}"
 	home_path="/var/lib/tormed/${short_user}"
-	service_name="${tliset-tormed-${short_user}}"
+	service_name="tormed-${short_user}"
 	p_file "service:${service_name}.service" '
 [Service]
 Type=simple
@@ -1725,9 +1735,11 @@ ProtectKernelTunables=yes
 ProtectControlGroups=yes
 ProtectSystem=strict
 '
-	multi_user_wants+=("service:${service_name}.service")
-	escape_for_shell "${service_name}.service"
-	service_restart_list="${service_restart_list} ${R}"
+	if test -n "${file_update}"; then
+	    escape_for_shell "${service_name}.service"
+	    service_restart_list="${service_restart_list} ${R}"
+	fi
+	multi_user_wants+=("${service_name}.service")
     done
 
     local start_source
@@ -1847,7 +1859,7 @@ CURL_OPTS=--http1.1
     write_file /etc/dehydrated/domains.txt \
 	"${webserver_certificate_domains} > host"
 
-    s='
+    s='#!/bin/sh
 set -e -u
 
 dehydrated --account --accept-terms
@@ -1898,7 +1910,7 @@ RandomizedDelaySec=86400
 	escape_for_shell tliset-dehydrated.timer
 	service_restart_list="${service_restart_list} ${R}"
     fi
-    multi_user_wants+=("service:tliset-dehydrated.timer")
+    multi_user_wants+=("tliset-dehydrated.timer")
 
 }
 
