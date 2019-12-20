@@ -26,11 +26,15 @@ with_latex=
 with_common_packages=
 with_include_rpmfusion=
 
+# Main user - must be when needed
+unset main_user
+
 with_docker=
 with_sudoless_docker=
 with_docker_development_net=
 custom_user_watches_count=
 
+# The user name for running ssh-agent separately from the main user account
 ssh_agent_service=
 
 with_custom_sshd=
@@ -45,8 +49,6 @@ bergenrabbit_archive_root=
 
 ssh_login_user=
 machine_host=
-
-declare primary_user=
 
 with_forced_networkd=
 with_networkd_dhcp_ipv4=
@@ -100,6 +102,7 @@ get_host_options() {
 		fi
 		;;
  	oberon )
+		main_user=igor
 		with_common_packages=1
 		#with_docker=1
 		with_latex=1
@@ -110,7 +113,7 @@ get_host_options() {
 		# disable until user namespaces works
 		#with_sudoless_docker=
 		custom_user_watches_count="$((768*1024))"
-		#ssh_agent_service=ssh-agent
+		ssh_agent_service=ssh-agent
 		with_custom_sshd=1
 		with_setuidless_sshd=1
 		with_dracut_sshd=1
@@ -119,6 +122,7 @@ get_host_options() {
 		with_networkd_dhcp_ipv4=1
 	    ;;
  	rhea )
+		main_user=igor
 		with_common_packages=1
 		#with_docker=1
 		with_latex=1
@@ -130,6 +134,8 @@ get_host_options() {
 		#with_sudoless_docker=
 		custom_user_watches_count="$((768*1025))"
 		ssh_agent_service=ssh-agent
+
+		with_ubuntu_dev_chroot=1
 		;;
 	thip )
 		ssh_login_user=core
@@ -241,37 +247,37 @@ is_valid_host_name() {
 }
 
 ensure_dir() {
-    local mode group user OPTIND opt dir
-    mode=
-    group=
-    user=
+	local mode group user OPTIND opt dir
+	mode=
+	group=
+	user=
 
-    while getopts :g:m:u: opt; do
-    case "$opt" in
-    g ) group="$OPTARG";;
-    m ) mode="$OPTARG";;
-    u ) user="$OPTARG";;
-    * ) err "bad ensure_dir usage";;
-    esac
-    done
-    shift $(($OPTIND - 1))
+	while getopts :g:m:u: opt; do
+	case "$opt" in
+	g ) group="$OPTARG";;
+	m ) mode="$OPTARG";;
+	u ) user="$OPTARG";;
+	* ) err "bad ensure_dir usage";;
+	esac
+	done
+	shift $(($OPTIND - 1))
 
-    if test -z "${mode}"; then
+	if test -z "${mode}"; then
 	mode=0755
-    fi
-    if test -z "${user}"; then
+	fi
+	if test -z "${user}"; then
 	user=root
-    fi
-    if test -z "${group}"; then
+	fi
+	if test -z "${group}"; then
 	group="${user}"
-    fi
+	fi
 
-    if test $# -eq 0; then
+	if test $# -eq 0; then
 	return
-    fi
+	fi
 
-    local dir
-    for dir in "$@"; do
+	local dir
+	for dir in "$@"; do
 	test -n "${dir}" || err "directory cannot be empty"
 	test "x${dir}" = "x${dir%/}" || err "directory must not end with slash - ${dir}"
 	test "x${dir}" != "x${dir#/}" || err "directory must be an absolute path - ${dir}"
@@ -289,7 +295,7 @@ ensure_dir() {
 	    cmd_log chown "${user}:${group}" "${dir}"
 	fi
 	note_path "${dir}"
-    done
+	done
 }
 
 ensure_symlink() {
@@ -320,49 +326,49 @@ file_update_count=0
 
 write_file() {
 
-    local user group mode OPTIND opt
-    user=
-    group=
-    mode=
-    while getopts :g:m:u: opt; do
+	local user group mode OPTIND opt
+	user=
+	group=
+	mode=
+	while getopts :g:m:u: opt; do
 	case "$opt" in
 	g ) group="$OPTARG";;
 	m ) mode="$OPTARG";;
 	u ) user="$OPTARG";;
 	* ) err "bad write_file usage";;
 	esac
-    done
+	done
 
-    shift $((${OPTIND} - 1))
-    test $# -eq 2 || err "write_file requires path and body arguments when $# arguments were given"
+	shift $((${OPTIND} - 1))
+	test $# -eq 2 || err "write_file requires path and body arguments when $# arguments were given"
 
-    local path body
-    path="$1"
-    body="$2"
-    if test -z "${user}"; then
+	local path body
+	path="$1"
+	body="$2"
+	if test -z "${user}"; then
 	user=root
-    fi
-    if test -z "${group}"; then
+	fi
+	if test -z "${group}"; then
 	group="${user}"
-    fi
-    if test -z "${mode}"; then
+	fi
+	if test -z "${mode}"; then
 	mode=0644
-    fi
+	fi
 
-    local wanted_umask need_chmod
-    need_chmod=
-    case "${mode}" in
-    0644 ) wanted_umask=022 ;;
-    0640 ) wanted_umask=027 ;;
-    0600 ) wanted_umask=077 ;;
-    0660 ) wanted_umask=007 ;;
-    0755 ) wanted_umask=022 need_chmod=1 ;;
-    * ) err "unsupported mode - ${mode}" ;;
-    esac
+	local wanted_umask need_chmod
+	need_chmod=
+	case "${mode}" in
+	0644 ) wanted_umask=022 ;;
+	0640 ) wanted_umask=027 ;;
+	0600 ) wanted_umask=077 ;;
+	0660 ) wanted_umask=007 ;;
+	0755 ) wanted_umask=022 need_chmod=1 ;;
+	* ) err "unsupported mode - ${mode}" ;;
+	esac
 
-    local do_update
-    do_update=1
-    while :; do
+	local do_update
+	do_update=1
+	while :; do
 	if test ! -f "${path}" -o -h "${path}"; then
 	    log "creating new ${path}"
 	    break;
@@ -382,11 +388,11 @@ write_file() {
 
 	log "updating ${path} - content changes"
 	break
-    done
+	done
 
-    if test -z "${do_update}"; then
+	if test -z "${do_update}"; then
 	file_update=
-    else
+	else
 	# Use temporary to ensure atomic operation on filesystem
 	local tmp
 	tmp="${path}.tmp"
@@ -404,40 +410,40 @@ write_file() {
 
 	file_update=1
 	: $((file_update_count+=1))
-    fi
-    note_path "${path}"
+	fi
+	note_path "${path}"
 }
 
 ensure_user() {
-    local user home_path groups
-    user="$1"
-    home_path="$2"
-    groups="${3-}"
+	local user home_path groups
+	user="$1"
+	home_path="$2"
+	groups="${3-}"
 
-    # TODO update HOME and groups on mismatch
-    local s
-    s="$(getent passwd "${user}" 2>/dev/null || :)"
-    if test -z "${s}"; then
+	# TODO update HOME and groups on mismatch
+	local s
+	s="$(getent passwd "${user}" 2>/dev/null || :)"
+	if test -z "${s}"; then
 	set -- -M -d "${home_path}"
 	if test -n "${groups}"; then
 	    set -- "$@" -G "${groups}"
 	fi
 	cmd_log useradd "$@" "${user}"
-    fi
+	fi
 }
 
 ensure_group_member() {
-    local group user
-    group="$1"
-    user="$2"
-    file_update=
-    local s
-    s="$(getent group "${group}")"
-    if test -z "${s}"; then
+	local group user
+	group="$1"
+	user="$2"
+	file_update=
+	local s
+	s="$(getent group "${group}")"
+	if test -z "${s}"; then
 	err "group ${group} doesn't exist"
-    fi
-    s="${s##*:}"
-    while test -n "${s}"; do
+	fi
+	s="${s##*:}"
+	while test -n "${s}"; do
 	local member
 	member="${s%%,*}"
 	if test "x${member}" = "x${user}"; then
@@ -448,87 +454,92 @@ ensure_group_member() {
 	else
 	    s="${s#*,}"
 	fi
-    done
-    if test -z "${s}"; then
+	done
+	if test -z "${s}"; then
 	cmd_log usermod -aG "${group}" "${user}"
 	file_update=1
-    fi
+	fi
 }
 
 read_tliset_name() {
-    R=''
-    local path=/etc/tliset.name name
-    if test -n "${under_qubes}"; then
-	path="/usr/local$path"
-    fi
-    [[ -s "$path" ]] || \
-	err "$path does not exist or empty. Initilize it with a valid name and try again."
-    IFS='' read -r name < "$path"
-    local name_pattern='^[a-z0-9]+$'
-    [[ $name =~ $name_pattern ]] || \
-	err "$path content does not match $name_pattern - '$name'"
-    R="$name"
+	R=''
+	local path
+	path=/etc/tliset.name
+	if test -n "${under_qubes}"; then
+		path="/usr/local${path}"
+	fi
+	if test ! -s "${path}"; then
+		err "${path} does not exist or empty. Initilize it with a valid name and try again."
+	fi
+	local name
+	IFS='' read -r name < "${path}"
+	case "${name}" in
+	"" | *[!0-9a-z]* )
+		err "the first line in ${path} must contain only lowcase letters and digits - '${name}'"
+		;;
+	esac
+	R="$name"
 }
 
 enable_tormed() {
-    local name
-    name="$1"
-    webserver_certificate_domains="${webserver_certificate_domains}${webserver_certificate_domains:+ }${name}"
-    tormed_host="${name}"
+	local name
+	name="$1"
+	webserver_certificate_domains="${webserver_certificate_domains}${webserver_certificate_domains:+ }${name}"
+	tormed_host="${name}"
 }
 
 add_dns_record_a() {
-    local host ipv4
-    host="$1"
-    ipv4="$2"
-    escape_for_shell "--host-record=${host},${ipv4}"
-    extra_dnsmasq_eargs="${extra_dnsmasq_eargs} ${R}"
+	local host ipv4
+	host="$1"
+	ipv4="$2"
+	escape_for_shell "--host-record=${host},${ipv4}"
+	extra_dnsmasq_eargs="${extra_dnsmasq_eargs} ${R}"
 }
 
 add_dns_interface_name() {
-    local host interface
-    host="$1"
-    interface="$2"
-    escape_for_shell "--interface-name=${host},${interface}"
-    extra_dnsmasq_eargs="${extra_dnsmasq_eargs} ${R}"
+	local host interface
+	host="$1"
+	interface="$2"
+	escape_for_shell "--interface-name=${host},${interface}"
+	extra_dnsmasq_eargs="${extra_dnsmasq_eargs} ${R}"
 }
 
 fixup_transgui() {
-    local path=/usr/share/applications/transgui.desktop
-    local line='MimeType=application/x-bittorrent;x-scheme-handler/magnet;'
-    if ! grep -q "^$line\$" "$path" ; then
+	local path=/usr/share/applications/transgui.desktop
+	local line='MimeType=application/x-bittorrent;x-scheme-handler/magnet;'
+	if ! grep -q "^$line\$" "$path" ; then
 	log "fixing $path"
 	local data
 	data="$(grep -v '^MimeType=' ${path})"
 	printf '%s\n%s\n' "$data" "$line" > "${path}.tmp"
 	chmod 644 "${path}.tmp"
 	mv "${path}.tmp" "${path}"
-    fi
+	fi
 }
 
 begin_tliset() {
-    paths_file=/var/lib/tliset/paths.txt
-    can_note_paths=
-    readonly paths_file
-    ensure_dir /var/lib/tliset
-    exec 9>>"${paths_file}.new"
+	paths_file=/var/lib/tliset/paths.txt
+	can_note_paths=
+	readonly paths_file
+	ensure_dir /var/lib/tliset
+	exec 9>>"${paths_file}.new"
 
-    can_note_paths=1
-    note_path /var/lib/tliset
-    ensure_dir /usr/lib/tliset
+	can_note_paths=1
+	note_path /var/lib/tliset
+	ensure_dir /usr/lib/tliset
 }
 
 end_tliset() {
-    exec 9>&-
-    local sorted
-    sort "${paths_file}.new" > "${paths_file}.tmp"
-    mv "${paths_file}.tmp" "${paths_file}.new"
+	exec 9>&-
+	local sorted
+	sort "${paths_file}.new" > "${paths_file}.tmp"
+	mv "${paths_file}.tmp" "${paths_file}.new"
 
-    # Duplicates happens when tliset runs again after a failure
-    uniq "${paths_file}.new" > "${paths_file}.tmp"
-    mv "${paths_file}.tmp" "${paths_file}.new"
+	# Duplicates happens when tliset runs again after a failure
+	uniq "${paths_file}.new" > "${paths_file}.tmp"
+	mv "${paths_file}.tmp" "${paths_file}.new"
 
-    if test -f "${paths_file}"; then
+	if test -f "${paths_file}"; then
 	comm -23 "${paths_file}" "${paths_file}.new" > "${paths_file}.unknown"
 	filter_existing_paths < "${paths_file}.unknown" > "${paths_file}.tmp"
 	mv "${paths_file}.tmp" "${paths_file}.unknown"
@@ -538,42 +549,42 @@ end_tliset() {
 	fi
 	sort "${paths_file}.new" "${paths_file}.unknown" > "${paths_file}.tmp"
 	mv "${paths_file}.tmp" "${paths_file}.new"
-    fi
+	fi
 
-    mv "${paths_file}.new" "${paths_file}"
+	mv "${paths_file}.new" "${paths_file}"
 }
 
 filter_existing_paths() {
-    local line
-    while IFS= read -r line; do
+	local line
+	while IFS= read -r line; do
 	if test -e "${line}" -o -h "${line}"; then
 	    printf '%s\n' "${line}"
 	fi
-    done
+	done
 }
 
 note_path() {
-    local path
-    path="$1"
-    if test -n "${can_note_paths}"; then
+	local path
+	path="$1"
+	if test -n "${can_note_paths}"; then
 	printf '%s\n' "${path}" 1>&9
-    fi
+	fi
 }
 
 setup_packages() {
-    test -n "${kind_fedora}" -o -n "${kind_debian}" || return 0
+	test -n "${kind_fedora}" -o -n "${kind_debian}" || return 0
 
-    log "Checking packages"
-    inc_log_level
-    test -n "${kind_fedora}" && setup_fedora_packages
-    test -n "${kind_debian}" && setup_debian_packages
-    dec_log_level
-    return 0
+	log "Checking packages"
+	inc_log_level
+	test -n "${kind_fedora}" && setup_fedora_packages
+	test -n "${kind_debian}" && setup_debian_packages
+	dec_log_level
+	return 0
 }
 
 
 setup_fedora_packages() {
-    if test -n "${with_common_packages}" -a -n "${with_include_rpmfusion}"; then
+	if test -n "${with_common_packages}" -a -n "${with_include_rpmfusion}"; then
 	local rpmfusion_kinds=(
 	    free
 	    nonfree
@@ -591,9 +602,9 @@ setup_fedora_packages() {
 	    done
 	    dnf install -y --nogpgcheck "${urls[@]}" || true
 	fi
-    fi
-    local list=()
-    if test -n "${with_common_packages}"; then
+	fi
+	local list=()
+	if test -n "${with_common_packages}"; then
 	list+=(
 	    tmux terminus-fonts-console
 	    git lsyncd
@@ -661,9 +672,9 @@ setup_fedora_packages() {
 	    gnome-tweaks
 	    gnome-terminal-nautilus
 	)
-    fi
+	fi
 
-    test -n "${with_latex}" && list+=(
+	test -n "${with_latex}" && list+=(
 	    texlive
 	    texlive-babel-norsk
 	    texlive-hyphen-norwegian
@@ -671,58 +682,58 @@ setup_fedora_packages() {
 	    texlive-collection-langcyrillic
 	)
 
-    list+=(gcc kernel-devel)
+	list+=(gcc kernel-devel)
 
-    if test -n "${with_docker}"; then
+	if test -n "${with_docker}"; then
 	list+=(
 	    docker
 	)
-    fi
+	fi
 
-    if test rhea = "${NAME}"; then
+	if test rhea = "${NAME}"; then
 	list+=(libguestfs-tools)
-    fi
+	fi
 
-    for i in "${list[@]}"; do
+	for i in "${list[@]}"; do
 	rpm -q --quiet "$i" || echo "Missed: $i"
-    done
+	done
 
-    if ! rpm -q --quiet "${list[@]}" ; then
+	if ! rpm -q --quiet "${list[@]}" ; then
 	log "Installing missing packages"
 	dnf install -y "${list[@]}"
-    fi
+	fi
 
-    local remove_list=()
+	local remove_list=()
 
-    if let ${#remove_list[@]}; then
+	if let ${#remove_list[@]}; then
 	local status=0
 	rpm -q --quiet "${remove_list[@]}" || status=$?
 	if let "status < ${#remove_list[@]}"; then
 	    cmd_log dnf remove -y "${remove_list[@]}"
 	fi
 	fixup_transgui
-    fi
+	fi
 
-    write_file /etc/tmux.conf "new-session${NL}"
+	write_file /etc/tmux.conf "new-session${NL}"
 }
 
 setup_debian_packages() {
-    local eargs
-    eargs=
-    earg file apt-file
-    earg man-db
-    earg lzip zip unzip
-    earg ccrypt
-    earg pv
-    earg apg
-    earg screen tmux
-    earg git
+	local eargs
+	eargs=
+	earg file apt-file
+	earg man-db
+	earg lzip zip unzip
+	earg ccrypt
+	earg pv
+	earg apg
+	earg screen tmux
+	earg git
 
-    if test -n "${with_nginx}"; then
+	if test -n "${with_nginx}"; then
 	earg nginx-full
 	earg dehydrated ssl-cert
-    fi
-    if test -n "${tormed_host}"; then
+	fi
+	if test -n "${tormed_host}"; then
 	earg whois
 	earg transmission-daemon
 	earg jq
@@ -732,9 +743,9 @@ setup_debian_packages() {
 	if test -n "${file_update}"; then
 	    systemd_unit_update=1
 	fi
-    fi
+	fi
 
-    if test -n "${with_common_packages}"; then
+	if test -n "${with_common_packages}"; then
 	earg dstat
 	earg libreoffice
 	earg gvfs-bin
@@ -744,59 +755,59 @@ setup_debian_packages() {
 	earg firejail
 	earg xpra
 	earg xephyr
-    fi
+	fi
 
-    if test -n "${with_latex}"; then
+	if test -n "${with_latex}"; then
 	earg texlive
 	earg texlive-lang-cyrillic
 	earg texlive-lang-european
-    fi
+	fi
 
-    local escaped_install_list
-    escaped_install_list="${eargs}"
+	local escaped_install_list
+	escaped_install_list="${eargs}"
 
-    # Remove list
+	# Remove list
 
-    eargs=
-    earg resolvconf
+	eargs=
+	earg resolvconf
 
-    local escaped_remove_list
-    escaped_remove_list="${eargs}"
+	local escaped_remove_list
+	escaped_remove_list="${eargs}"
 
-    local escaped_apt_action_list
-    escaped_apt_action_list=
-    eval "fill_apt_action_list install ${escaped_install_list}"
-    if test -n "${escaped_apt_action_list}"; then
+	local escaped_apt_action_list
+	escaped_apt_action_list=
+	eval "fill_apt_action_list install ${escaped_install_list}"
+	if test -n "${escaped_apt_action_list}"; then
 	log "Installing missing packages"
 	eval "DEBIAN_FRONTEND=noninteractive \
 	    cmd_log apt-get install -y ${escaped_apt_action_list}"
-    fi
+	fi
 
-    escaped_apt_action_list=
-    eval "fill_apt_action_list uninstall ${escaped_remove_list}"
-    if test -n "${escaped_apt_action_list}"; then
+	escaped_apt_action_list=
+	eval "fill_apt_action_list uninstall ${escaped_remove_list}"
+	if test -n "${escaped_apt_action_list}"; then
 	log "Purging unnecessary packages ${remove_list[*]}"
 	eval "DEBIAN_FRONTEND=noninteractive \
 	    apt-get purge -y ${escaped_apt_action_list}"
-    fi
+	fi
 }
 
 fill_apt_action_list() {
-    local action
-    action="$1"
-    shift
-    test $# -ne 0 || return 0
+	local action
+	action="$1"
+	shift
+	test $# -ne 0 || return 0
 
-    # Complication: for unknown packages dpkg-query reports an error,
-    # so parse both stdout and stderr.
-    local status_package_re
-    status_package_re='^#stdout ([^ ]+)  ([^ ]+)$'
-    local unknown_package_message_re
-    unknown_package_message_re='^dpkg-query: no packages found matching ([^ ]+)$'
-    local output
-    output="$(dpkg-query -W --showformat \
+	# Complication: for unknown packages dpkg-query reports an error,
+	# so parse both stdout and stderr.
+	local status_package_re
+	status_package_re='^#stdout ([^ ]+)  ([^ ]+)$'
+	local unknown_package_message_re
+	unknown_package_message_re='^dpkg-query: no packages found matching ([^ ]+)$'
+	local output
+	output="$(dpkg-query -W --showformat \
 	'#stdout ${db:Status-Abbrev} ${Package}\n' "$@"  2>&1 || :)"
-    if test -n "${output}"; then
+	if test -n "${output}"; then
 	local -a lines
 	mapfile -t lines <<< "$output"
 	local line
@@ -830,78 +841,78 @@ fill_apt_action_list() {
 	    escape_for_shell "$package"
 	    escaped_apt_action_list="${escaped_apt_action_list} ${R}"
 	done
-    fi
+	fi
 }
 
 # Set R to concatenation of arguments with spaces escaped if necessary.
 escape_for_shell() {
-    R=
-    local arg
-    for arg in "$@"; do
-        case "${arg}" in
-        "" | *[!A-Z0-9a-z_./-]* )
-            local escaped before_quote
-            escaped=
-            while : ; do
-                before_quote="${arg%%\'*}"
-                if test "x${arg}" = "x${before_quote}"; then
-                    break
-                fi
-                escaped="${escaped}${before_quote}'\\''"
-                arg="${arg#*\'}"
-            done
-            arg="'$escaped$arg'"
-            ;;
-        esac
-        R="${R}${R:+ }${arg}"
-    done
+	R=
+	local arg
+	for arg in "$@"; do
+		case "${arg}" in
+		"" | *[!A-Z0-9a-z_./-]* )
+			local escaped before_quote
+			escaped=
+			while : ; do
+				before_quote="${arg%%\'*}"
+				if test "x${arg}" = "x${before_quote}"; then
+					break
+				fi
+				escaped="${escaped}${before_quote}'\\''"
+				arg="${arg#*\'}"
+			done
+			arg="'$escaped$arg'"
+			;;
+		esac
+		R="${R}${R:+ }${arg}"
+	done
 }
 
 earg() {
-    escape_for_shell "$@"
-    eargs="${eargs}${eargs:+ }$R"
+	escape_for_shell "$@"
+	eargs="${eargs}${eargs:+ }$R"
 }
 
 start_generator_write() {
-    multi_user_wants=()
-    sockets_wants=()
-    basic_target_wants=()
-    systemd_unit_update=
-    service_try_restart_list=
-    service_restart_list=
-    service_reload_list=
+	multi_user_wants=()
+	sockets_wants=()
+	basic_target_wants=()
+	systemd_unit_update=
+	service_try_restart_list=
+	service_restart_list=
+	service_reload_list=
 }
 
 print_wants_list() {
-    local target
-    target="$1"
-    shift
-    test $# -ne 0 || return 0
-    local i wants_body
-    wants_body="[Unit]${NL}"
-    for i in "$@"; do
+	local target
+	target="$1"
+	shift
+	test $# -ne 0 || return 0
+	local i wants_body
+	wants_body="[Unit]${NL}"
+	for i in "$@"; do
 	wants_body="${wants_body}Wants=${i}${NL}"
-    done
-    p_systemd_drop_in "${target}" "${wants_body}"
+	done
+	p_systemd_drop_in "${target}" "${wants_body}"
 }
 
 finish_generator_write() {
-    print_wants_list multi-user.target "${multi_user_wants[@]:+${multi_user_wants[@]}}"
-    print_wants_list sockets.target "${socket_wants[@]:+${socket_wants[@]}}"
-    print_wants_list basic.target "${basic_target_wants[@]:+${basic_target_wants[@]}}"
+	print_wants_list multi-user.target "${multi_user_wants[@]:+${multi_user_wants[@]}}"
+	print_wants_list sockets.target "${socket_wants[@]:+${socket_wants[@]}}"
+	print_wants_list basic.target "${basic_target_wants[@]:+${basic_target_wants[@]}}"
 
-    if test -n "${systemd_unit_update}"; then
+	if test -n "${systemd_unit_update}"; then
 	cmd_log systemctl daemon-reload
-    fi
-    if test -n "${service_restart_list}"; then
+	fi
+	if test -n "${service_restart_list}"; then
 	eval "cmd_log systemctl restart${service_restart_list}"
-    fi
-    if test -n "${service_try_restart_list}"; then
+	fi
+	if test -n "${service_try_restart_list}"; then
 	eval "cmd_log systemctl try-restart${service_try_restart_list}"
-    fi
-    if test -n "${service_reload_list}"; then
+	fi
+	if test -n "${service_reload_list}"; then
 	eval "cmd_log systemctl reload${service_reload_list}"
-    fi
+	fi
 }
 
 # The first argument is <kind>:<subpath> where kind specifies
@@ -909,117 +920,117 @@ finish_generator_write() {
 # text that should be written into the file at that path. Option -x
 # indicattes that file must be executable.
 p_file() {
-    local executable
-    executable=
-    case "$1" in
-    -x ) shift; executable=1 ;;
-    esac
-    local file_kind_and_path body
-    file_kind_and_path="$1"
-    body="$2"
-    local path
-    convert_kind_path "${file_kind_and_path}"
-    path="${R}"
+	local executable
+	executable=
+	case "$1" in
+	-x ) shift; executable=1 ;;
+	esac
+	local file_kind_and_path body
+	file_kind_and_path="$1"
+	body="$2"
+	local path
+	convert_kind_path "${file_kind_and_path}"
+	path="${R}"
 
-    set --
-    if test -n "${executable}"; then
+	set --
+	if test -n "${executable}"; then
 	set -- "$@" -m 0755
-    fi
-    write_file "$@" "${path}" "${body}"
-    if test -n "${file_update}"; then
+	fi
+	write_file "$@" "${path}" "${body}"
+	if test -n "${file_update}"; then
 	case "${file_kind_and_path}" in
 	service:* ) systemd_unit_update=1 ;;
 	esac
-    fi
+	fi
 }
 
 p_dir() {
-    local dir
-    dir="$1"
-    convert_kind_path "${dir}"
-    dir="${R}"
-    ensure_dir "${dir}"
+	local dir
+	dir="$1"
+	convert_kind_path "${dir}"
+	dir="${R}"
+	ensure_dir "${dir}"
 }
 
 p_ensure_no_file() {
-    local file
-    file="$1"
-    convert_kind_path "${file}"
-    file="${R}"
-    file_update=
-    if test -f "${file}"; then
+	local file
+	file="$1"
+	convert_kind_path "${file}"
+	file="${R}"
+	file_update=
+	if test -f "${file}"; then
 	cmd_log rm -f "${file}"
 	file_update=1
-    fi
+	fi
 }
 
 p_ensure_no_dir() {
-    local dir
-    dir="$1"
-    convert_kind_path "${dir}"
-    dir="${R}"
-    if test -d "${dir}"; then
+	local dir
+	dir="$1"
+	convert_kind_path "${dir}"
+	dir="${R}"
+	if test -d "${dir}"; then
 	cmd_log rmdir "${file}"
-    fi
+	fi
 }
 
 p_symlink() {
-    local target path
-    target="$1"
-    path="$2"
-    convert_kind_path "${path}"
-    path="${R}"
-    ensure_symlink "${target}" "${path}"
+	local target path
+	target="$1"
+	path="$2"
+	convert_kind_path "${path}"
+	path="${R}"
+	ensure_symlink "${target}" "${path}"
 }
 
 p_systemd_drop_in() {
-    local unit_name drop_in
-    unit_name="$1"
-    drop_in_text="$2"
+	local unit_name drop_in
+	unit_name="$1"
+	drop_in_text="$2"
 
-    p_dir "service:${unit_name}.d"
-    p_file "service:${unit_name}.d/tliset.conf" "${drop_in_text}"
+	p_dir "service:${unit_name}.d"
+	p_file "service:${unit_name}.d/tliset.conf" "${drop_in_text}"
 }
 
 convert_kind_path() {
-    local file_kind_and_path file_kind file_path
-    file_kind_and_path="$1"
-    file_kind="${file_kind_and_path%%:*}:"
-    file_path="${file_kind_and_path#*:}"
-    if test "x${file_path}" = "x${file_kind_and_path}"; then
+	local file_kind_and_path file_kind file_path
+	file_kind_and_path="$1"
+	file_kind="${file_kind_and_path%%:*}:"
+	file_path="${file_kind_and_path#*:}"
+	if test "x${file_path}" = "x${file_kind_and_path}"; then
 	err "the argument must start with <kind>: prefix - ${file_kind_and_path}"
-    fi
-    local dir
-    case "$file_kind" in
-    module: ) dir='/etc/modules-load.d' ;;
-    net: ) dir='/etc/systemd/network' ;;
-    nspawn: ) dir="/etc/systemd/nspawn" ;;
-    nginx-site: ) dir="/etc/nginx/sites-enabled" ;;
-    nginx-config: ) dir="/etc/nginx/conf.d" ;;
-    service: ) dir='/etc/systemd/system' ;;
-    scripts: ) dir="/usr/lib/tliset" ;;
-    sysctl: ) dir="/etc/sysctl.d" ;;
-    NetworkManager: ) dir="/etc/NetworkManager/conf.d" ;;
-    * ) err "Unknown file kind - ${file_kind_and_path}" ;;
-    esac
-    ensure_dir "${dir}"
+	fi
+	local dir
+	case "$file_kind" in
+	module: ) dir='/etc/modules-load.d' ;;
+	net: ) dir='/etc/systemd/network' ;;
+	nspawn: ) dir="/etc/systemd/nspawn" ;;
+	nginx-site: ) dir="/etc/nginx/sites-enabled" ;;
+	nginx-config: ) dir="/etc/nginx/conf.d" ;;
+	service: ) dir='/etc/systemd/system' ;;
+	scripts: ) dir="/usr/lib/tliset" ;;
+	sysctl: ) dir="/etc/sysctl.d" ;;
+	NetworkManager: ) dir="/etc/NetworkManager/conf.d" ;;
+	* ) err "Unknown file kind - ${file_kind_and_path}" ;;
+	esac
+	ensure_dir "${dir}"
 
-    if test -z "${file_path}"; then
+	if test -z "${file_path}"; then
 	R="$dir"
 	return 0
-    fi
-    case "${file_path}" in
+	fi
+	case "${file_path}" in
 	/* ) err "the path part must be a relative path: ${file_kind_and_path}" ;;
-    esac
-    R="${dir}/${file_path}"
+	esac
+	R="${dir}/${file_path}"
 }
 
 p_mask_service() {
-    p_symlink /dev/null "service:$1"
+	p_symlink /dev/null "service:$1"
 }
 
 setup_kernel_parameters() {
-    if test -n "${with_zswap}"; then
+	if test -n "${with_zswap}"; then
 	local unit
 	unit=tliset-zswap.service
 	p_file "service:${unit}" '
@@ -1030,38 +1041,38 @@ ExecStop=/bin/sh -c "printf 0 > /sys/module/zswap/parameters/enabled"
 RemainAfterExit=yes
 '
 	basic_target_wants+=("${unit}")
-    fi
-    setup_zram
+	fi
+	setup_zram
 
-    local sysctl
-    sysctl=""
-    if test -n "${custom_user_watches_count}"; then
+	local sysctl
+	sysctl=""
+	if test -n "${custom_user_watches_count}"; then
 	sysctl+="fs.inotify.max_user_watches=${custom_user_watches_count}${NL}"
-    fi
+	fi
 
-    if test -n "${sysctl}"; then
+	if test -n "${sysctl}"; then
 	p_file sysctl:50-tliset.conf "${sysctl}"
-    else
+	else
 	p_ensure_no_file sysctl:50-tliset.conf
-    fi
+	fi
 }
 
 setup_zram() {
-    test -n "${zram_size}" || return 0
+	test -n "${zram_size}" || return 0
 
-    log "Checking zram"
+	log "Checking zram"
 
-    local alg_arg
-    alg_arg=
-    if test -n "${zram_algorithm}"; then
+	local alg_arg
+	alg_arg=
+	if test -n "${zram_algorithm}"; then
 	alg_arg=" --algorithm ${zram_algorithm}"
-    fi
+	fi
 
-    p_file module:tliset-zram.conf "\
+	p_file module:tliset-zram.conf "\
 zram
 "
 
-    p_file service:tliset-zram.service '
+	p_file service:tliset-zram.service '
 [Unit]
 Description=Service enabling RAM compression using zRam
 
@@ -1094,7 +1105,7 @@ rm /run/tliset-zram-state'\''
 
 RemainAfterExit=yes
 '
-    multi_user_wants+=(tliset-zram.service)
+	multi_user_wants+=(tliset-zram.service)
 
 }
 
@@ -1181,32 +1192,32 @@ EmitLLDP=customer-bridge
 }
 
 ensure_root_ssh_key() {
-    local prefix=$1
-    local file=/root/.ssh/$prefix-ed25519
-    if [[ ! -s "$file" ]]; then
+	local prefix=$1
+	local file=/root/.ssh/$prefix-ed25519
+	if [[ ! -s "$file" ]]; then
 	cmd_log mkdir -p -m 0700 /root/.ssh
 	cmd_log ssh-keygen -t ed25519 -N '' -f "$file"
-    fi
-    ssh_key_file="$file"
+	fi
+	ssh_key_file="$file"
 }
 
 setup_bergenrabbit_archive() {
-    [[ $bergenrabbit_archive_time ]] || return 0
+	[[ $bergenrabbit_archive_time ]] || return 0
 
-    local ssh_key_file=
-    ensure_root_ssh_key bergenrabbit-www-backup
+	local ssh_key_file=
+	ensure_root_ssh_key bergenrabbit-www-backup
 
-    if [[ $bergenrabbit_archive_time == manual ]]; then
+	if [[ $bergenrabbit_archive_time == manual ]]; then
 	return 0
-    fi
+	fi
 
-    [[ $bergenrabbit_archive_time =~ ^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$ ]] || \
+	[[ $bergenrabbit_archive_time =~ ^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$ ]] || \
 	err "Invalid backup time spec in bergenrabbit_archive_time - '${bergenrabbit_archive_time}'"
 
-    ensure_user tliset-br-archive "${bergenrabbit_archive_root}"
-    ensure_dir -m 0770 -g tliset-br-archive "${bergenrabbit_archive_root}"
+	ensure_user tliset-br-archive "${bergenrabbit_archive_root}"
+	ensure_dir -m 0770 -g tliset-br-archive "${bergenrabbit_archive_root}"
 
-    p_file service:tliset-br-archive.timer "\
+	p_file service:tliset-br-archive.timer "\
 [Unit]
 After=network-online.target
 Wants=network-online.target
@@ -1215,7 +1226,7 @@ Wants=network-online.target
 Persistent=true
 OnCalendar=${bergenrabbit_archive_time}
 "
-    p_file service:tliset-br-archive.service '
+	p_file service:tliset-br-archive.service '
 [Unit]
 After=network-online.target
 Wants=network-online.target
@@ -1236,76 +1247,76 @@ ProtectKernelTunables=yes
 ProtectControlGroups=yes
 ProtectSystem=strict
 '
-    multi_user_wants+=("tliset-br-archive.timer")
+	multi_user_wants+=("tliset-br-archive.timer")
 
-    # Script source with condition code
-    local s
-    s='#!/bin/bash
+	# Script source with condition code
+	local s
+	s='#!/bin/bash
 set -e -u -o pipefail
 
 # Number of days to keep old backups in the changed dir
 max_keep_changed_days=90
 
 '
-    # On fedora change SELinux context for rsync so it is treated as
-    # a binary, not a service. As an update can reset it, do it each
-    # time we are about to run it.
-    if test -n "${kind_fedora}"; then
+	# On fedora change SELinux context for rsync so it is treated as
+	# a binary, not a service. As an update can reset it, do it each
+	# time we are about to run it.
+	if test -n "${kind_fedora}"; then
 	s+='
 se_context=$(stat -c %C /usr/bin/rsync)
 if [[ $se_context =~ ^[^:]*:[^:]*:([^:]*):[^:]*$ ]]; then
-    if [[ ${BASH_REMATCH[1]} != bin_t ]]; then
-        echo "Changing SE context for /usr/bin/rsync from ${BASH_REMATCH[1]} to bin_t" 1>&2
-        chcon -t bin_t /usr/bin/rsync
-    fi
+	if [[ ${BASH_REMATCH[1]} != bin_t ]]; then
+		echo "Changing SE context for /usr/bin/rsync from ${BASH_REMATCH[1]} to bin_t" 1>&2
+		chcon -t bin_t /usr/bin/rsync
+	fi
 fi
 '
-    fi
-    s+='
+	fi
+	s+='
 
 readonly backup_root="'"${bergenrabbit_archive_root}"'"
 
 remove_list=()
 
 backup_from_host() {
-    local pod_name="$1" host_name="$2"
-    local data="$backup_root/$pod_name"
-    local changes="$backup_root/changes/$pod_name"
-    local partial="$backup_root/rsync-partial/$pod_name"
-    local dir
-    for dir in "$data" "$changes" "$partial"; do
-        if [[ ! -d "$dir" ]]; then
-            mkdir -p "$dir"
-        fi
-    done
+	local pod_name="$1" host_name="$2"
+	local data="$backup_root/$pod_name"
+	local changes="$backup_root/changes/$pod_name"
+	local partial="$backup_root/rsync-partial/$pod_name"
+	local dir
+	for dir in "$data" "$changes" "$partial"; do
+		if [[ ! -d "$dir" ]]; then
+			mkdir -p "$dir"
+		fi
+	done
 
-    local -a ssh_cmd=(
-        ssh -l br-backup
-        -o Ciphers=aes128-gcm@openssh.com
-        -o StrictHostKeyChecking=no
-    )
+	local -a ssh_cmd=(
+		ssh -l br-backup
+		-o Ciphers=aes128-gcm@openssh.com
+		-o StrictHostKeyChecking=no
+	)
 
-    local -a rsync_args=(
-        -rlpt
-        --no-owner --no-group --omit-dir-times --omit-link-times
-        --partial-dir="$partial" --delete-after
-        --info=NAME
-        --rsh="${ssh_cmd[*]}"
-    )
+	local -a rsync_args=(
+		-rlpt
+		--no-owner --no-group --omit-dir-times --omit-link-times
+		--partial-dir="$partial" --delete-after
+		--info=NAME
+		--rsh="${ssh_cmd[*]}"
+	)
 
-    local too_old_backup="$changes/$(date --date="-20 days" +%Y-%m-%d)"
-    rm -rf "$too_old_backup"
-    local changed_files
-    changed_files="$changes/$(date +%Y-%m-%d)"
-    mkdir -p "${changed_files}.srv" "${changed_files}.opt"
+	local too_old_backup="$changes/$(date --date="-20 days" +%Y-%m-%d)"
+	rm -rf "$too_old_backup"
+	local changed_files
+	changed_files="$changes/$(date +%Y-%m-%d)"
+	mkdir -p "${changed_files}.srv" "${changed_files}.opt"
 
-    echo "Backing up $pod_name" >&2
-    local ok=1
-    rsync "${rsync_args[@]}" --backup --backup-dir="${changed_files}.srv" \
-        "rsync://$host_name/srv/" "$data/srv/" || ok=
-    rsync "${rsync_args[@]}" --backup --backup-dir="${changed_files}.opt" \
-        "rsync://$host_name/opt/" "$data/opt/" || ok=
-    if [[ $ok ]]; then
+	echo "Backing up $pod_name" >&2
+	local ok=1
+	rsync "${rsync_args[@]}" --backup --backup-dir="${changed_files}.srv" \
+		"rsync://$host_name/srv/" "$data/srv/" || ok=
+	rsync "${rsync_args[@]}" --backup --backup-dir="${changed_files}.opt" \
+		"rsync://$host_name/opt/" "$data/opt/" || ok=
+	if [[ $ok ]]; then
 	local i cur_time
 	cur_time="$(date +%s)"
 	for i in "$changes"/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].*; do
@@ -1316,126 +1327,127 @@ backup_from_host() {
 		remove_list+=("$i")
 	    fi
 	done
-    fi
+	fi
 
 }
 
 backup_from_host bergenrabbit bergenrabbit.net
 
 if [[ ${#remove_list[@]} -ne 0 ]]; then
-    printf -v s "\\n\\t%s" "${remove_list[@]}"
-    echo "removing older changes created more than $max_keep_changed_days days ago:$s"
-    rm -rf "${remove_list[@]}"
+	printf -v s "\\n\\t%s" "${remove_list[@]}"
+	echo "removing older changes created more than $max_keep_changed_days days ago:$s"
+	rm -rf "${remove_list[@]}"
 fi
 
 '
 
-    write_file -m 0755 "/usr/lib/tliset/br-archive" "${s}"
+	write_file -m 0755 "/usr/lib/tliset/br-archive" "${s}"
 
-    if test -n "${kind_fedora}"; then
+	if test -n "${kind_fedora}"; then
 	setsebool rsync_client 1
-    fi
+	fi
 }
 
 setup_services() {
-    log "Checking services"
-    inc_log_level
+	log "Checking services"
+	inc_log_level
 
-    setup_bergenrabbit_archive
+	setup_bergenrabbit_archive
 
-    if test -n "${with_docker}"; then
-	# Make sure that docker starts. On CoreOS docker is
-	# socket-activated by default which breaks restarting
-	# containers on boot unless a docker client runs
-	if test -n "${kind_coreos}"; then
-	    multi_user_wants+=(docker.service)
-	fi
+	if test -n "${with_docker}"; then
+		# Make sure that docker starts. On CoreOS docker is
+		# socket-activated by default which breaks restarting
+		# containers on boot unless a docker client runs
+		if test -n "${kind_coreos}"; then
+			multi_user_wants+=(docker.service)
+		fi
 
-	local docker_lib_dir=
-	if test -n "${under_qubes}"; then
-	    docker_lib_dir=/rw/varlib/docker
-	fi
-	local docker_service_lines=()
-	if [[ $docker_lib_dir ]]; then
-	    local unit
-	    unit="$(systemd-escape -p "/var/lib/docker").mount"
-	    p_file "service:$unit" "\
+		local docker_lib_dir=
+		if test -n "${under_qubes}"; then
+			docker_lib_dir=/rw/varlib/docker
+		fi
+		local docker_service_lines=()
+		if [[ $docker_lib_dir ]]; then
+			local unit
+			unit="$(systemd-escape -p "/var/lib/docker").mount"
+			p_file "service:$unit" "\
 [Mount]
 Where=/var/lib/docker
 Type=none
 Options=bind
 What=$docker_lib_dir
 "
-	    docker_service_lines+=(
-		"[Unit]"
-		"BindsTo=$unit"
-		"After=$unit"
-	    )
-	fi
-
-	if test -n "${kind_fedora}"; then
-	    p_mask_service docker-storage-setup.service
-	    local exec_start=(
-		/usr/bin/dockerd-current
-		--add-runtime oci=/usr/libexec/docker/docker-runc-current
-		--default-runtime=oci
-		--containerd /run/containerd.sock
-		--exec-opt native.cgroupdriver=systemd
-		--userland-proxy=false
-		--log-driver=journald
-		--storage-driver=overlay2
-	    )
-	    docker_service_lines+=(
-		"[Service]"
-		"ExecStart="
-		"ExecStart=${exec_start[*]}"
-	    )
-	fi
-
-	if [[ $NAME == r2 ]]; then
-	    docker_service_lines+=(
-		"[Service]"
-		"Environment=DOCKER_OPTS=--userland-proxy=false"
-		"[Unit]"
-		"[]"
-	    )
-
-	fi
-
-	if [[ ${#docker_service_lines[@]} -ne 0 ]]; then
-	    local text
-	    printf -v text '%s\n' "${docker_service_lines[@]}"
-	    p_systemd_drop_in docker.service "$text"
-	fi
-    fi
-
-    setup_ssh_service
-    setup_nginx_service
-    setup_tormed_service
-    setup_dracut
-
-    if test -n "${ssh_agent_service}"; then
-	local primary_user
-	primary_user="${SUDO_USER}"
-	ensure_user "${ssh_agent_service}" "/home/${ssh_agent_service}"
-	local d
-	d="/home/${ssh_agent_service}/keys"
-	if test ! -d "${d}"; then
-	    log "directory for ssh keys does not exist - ${d}"
-	else
-	    if test -d "${d}/common"; then
-		setup_ssh_agent_service '' "${d}/common"
-	    fi
-	    local set_dir
-	    for set_dir in "${d}/set-"*; do
-		if test -d "${set_dir}"; then
-		    setup_ssh_agent_service "${set_dir##*/set-}" "${set_dir}"
+			docker_service_lines+=(
+				"[Unit]"
+				"BindsTo=$unit"
+				"After=$unit"
+			)
 		fi
-	    done
-	fi
-    fi
 
-    dec_log_level
+		if test -n "${kind_fedora}"; then
+			p_mask_service docker-storage-setup.service
+			local exec_start=(
+				/usr/bin/dockerd-current
+				--add-runtime oci=/usr/libexec/docker/docker-runc-current
+				--default-runtime=oci
+				--containerd /run/containerd.sock
+				--exec-opt native.cgroupdriver=systemd
+				--userland-proxy=false
+				--log-driver=journald
+				--storage-driver=overlay2
+			)
+			docker_service_lines+=(
+				"[Service]"
+				"ExecStart="
+				"ExecStart=${exec_start[*]}"
+			)
+		fi
+
+		if [[ $NAME == r2 ]]; then
+			docker_service_lines+=(
+				"[Service]"
+				"Environment=DOCKER_OPTS=--userland-proxy=false"
+				"[Unit]"
+				"[]"
+			)
+
+		fi
+
+		if [[ ${#docker_service_lines[@]} -ne 0 ]]; then
+			local text
+			printf -v text '%s\n' "${docker_service_lines[@]}"
+			p_systemd_drop_in docker.service "$text"
+		fi
+	fi
+
+	setup_ssh_service
+	setup_nginx_service
+	setup_tormed_service
+	setup_dracut
+
+	if test -n "${ssh_agent_service}"; then
+		ensure_user "${ssh_agent_service}" "/home/${ssh_agent_service}"
+		ensure_dir -g "${ssh_agent_service}" -u "${ssh_agent_service}" \
+			-m 0700 "/home/${ssh_agent_service}"
+		local d
+		d="/home/${ssh_agent_service}/keys"
+		if test ! -d "${d}"; then
+			log "directory for ssh keys does not exist - ${d}"
+		else
+			if test -d "${d}/common"; then
+				setup_ssh_agent_service '' "${d}/common"
+			fi
+			local set_dir
+			for set_dir in "${d}/set-"*; do
+				if test -d "${set_dir}"; then
+					setup_ssh_agent_service \
+						"${set_dir##*/set-}" "${set_dir}"
+				fi
+			done
+		fi
+	fi
+
+	dec_log_level
 }
 
 
@@ -1524,22 +1536,22 @@ NoNewPrivileges=yes
 }
 
 setup_nginx_service() {
-    test -n "${with_nginx}" || return 0
+	test -n "${with_nginx}" || return 0
 
-    local reload_nginx
-    reload_nginx=
-    write_nginx_configs
+	local reload_nginx
+	reload_nginx=
+	write_nginx_configs
 
-    local nginx_cmd
-    nginx_cmd="/usr/sbin/nginx"
-    nginx_cmd="${nginx_cmd} -g '"
-    nginx_cmd="${nginx_cmd} daemon on;"
-    nginx_cmd="${nginx_cmd} master_process on;"
-    nginx_cmd="${nginx_cmd} pid /run/nginx/nginx.pid;"
-    nginx_cmd="${nginx_cmd}'"
+	local nginx_cmd
+	nginx_cmd="/usr/sbin/nginx"
+	nginx_cmd="${nginx_cmd} -g '"
+	nginx_cmd="${nginx_cmd} daemon on;"
+	nginx_cmd="${nginx_cmd} master_process on;"
+	nginx_cmd="${nginx_cmd} pid /run/nginx/nginx.pid;"
+	nginx_cmd="${nginx_cmd}'"
 
-    local unit_fragment
-    unit_fragment='
+	local unit_fragment
+	unit_fragment='
 [Service]
 PIDFile=/run/nginx/nginx.pid
 User=www-data
@@ -1569,30 +1581,30 @@ ProtectControlGroups=yes
 ProtectSystem=strict
 '
 
-    p_systemd_drop_in nginx.service "${unit_fragment}"
-    if test -n "${file_update}"; then
+	p_systemd_drop_in nginx.service "${unit_fragment}"
+	if test -n "${file_update}"; then
 	escape_for_shell nginx.service
 	service_try_restart_list="${service_try_restart_list} ${R}"
-    elif test -n "${reload_nginx}"; then
+	elif test -n "${reload_nginx}"; then
 	escape_for_shell nginx.service
 	service_reload_list="${service_reload_list} ${R}"
-    fi
+	fi
 
-    setup_letsencrypt
+	setup_letsencrypt
 }
 
 write_nginx_configs() {
 
-    local s
-    if grep -q '^user www-data;$' /etc/nginx/nginx.conf; then
+	local s
+	if grep -q '^user www-data;$' /etc/nginx/nginx.conf; then
 	log "Patching /etc/nginx/nginx.conf"
 	s='s/^\(user www-data\|worker_processes auto\|pid \/run\/nginx.pid\);/#&/g'
 	sed -i -e "${s}" /etc/nginx/nginx.conf
 	reload_nginx=1
-    fi
+	fi
 
-    s=
-    if test -n "${tormed_host}"; then
+	s=
+	if test -n "${tormed_host}"; then
 	s="${s}"'
 
 limit_req_zone $binary_remote_addr zone=tormed:1m rate=5r/s;
@@ -1696,87 +1708,87 @@ server {
 	}
 }
 '
-    fi
+	fi
 
-    if test -n "${s}"; then
+	if test -n "${s}"; then
 	p_file "nginx-site:tliset" "${s}"
 	if test -n "${file_update}"; then
 	    reload_nginx=1
 	fi
-    fi
+	fi
 
-    p_ensure_no_file nginx-site:default
-    if test -n "${file_update}"; then
+	p_ensure_no_file nginx-site:default
+	if test -n "${file_update}"; then
 	reload_nginx=1
-    fi
+	fi
 }
 
 setup_tormed_service() {
-    test -n "${tormed_host}" || return 0
+	test -n "${tormed_host}" || return 0
 
-    ensure_dir /var/lib/tormed
+	ensure_dir /var/lib/tormed
 
-    local home_path
-    home_path="/var/lib/tormed/files-root/files"
-    ensure_user tormed-files "${home_path}"
-    ensure_dir /var/lib/tormed/files-root
-    ensure_dir -m 02770 -g tormed-files "${home_path}"
+	local home_path
+	home_path="/var/lib/tormed/files-root/files"
+	ensure_user tormed-files "${home_path}"
+	ensure_dir /var/lib/tormed/files-root
+	ensure_dir -m 02770 -g tormed-files "${home_path}"
 
-    ensure_user tormed-rsync "${home_path}" tormed-files
+	ensure_user tormed-rsync "${home_path}" tormed-files
 
-    ensure_group_member tormed-files www-data
-    if test -n "${file_update}"; then
+	ensure_group_member tormed-files www-data
+	if test -n "${file_update}"; then
 	# Restart nginx so the process gets the group membership
 	escape_for_shell nginx.service
 	service_try_restart_list="${service_try_restart_list} ${R}"
-    fi
+	fi
 
-    local short_user full_user
-    for short_user in service service2; do
+	local short_user full_user
+	for short_user in service service2; do
 	full_user="tormed-${short_user}"
 	home_path="/var/lib/tormed/${short_user}"
 	ensure_user "${full_user}" "${home_path}" tormed-files
 	ensure_dir -m 0700 -u "${full_user}" -g "${full_user}" "${home_path}"
-    done
+	done
 
-    ensure_dir /etc/tormed
-    ensure_dir -m 0750 -g www-data "/etc/tormed/htpassword"
+	ensure_dir /etc/tormed
+	ensure_dir -m 0750 -g www-data "/etc/tormed/htpassword"
 
-    ensure_dir /usr/lib/tormed
-    ensure_dir /usr/lib/tormed/www
+	ensure_dir /usr/lib/tormed
+	ensure_dir /usr/lib/tormed/www
 
-    write_file -m 0755 "/usr/lib/tliset/tormed-update-password" '#!/bin/sh
+	write_file -m 0755 "/usr/lib/tliset/tormed-update-password" '#!/bin/sh
 set -e -u
 
 err() {
-    printf "%s\\n" "$*" >&2
-    exit 1
+	printf "%s\\n" "$*" >&2
+	exit 1
 }
 
 if :; then
-    test -t 0 -a -t 1 || err "both stdin and stdout must be tty"
-    stty_orig="$(stty -g)"
-    stty -echo echonl
-    IFS= read -r -p "Enter new tormed password: " password || :
-    stty "${stty_orig}"
-    if test -z "${password}"; then
+	test -t 0 -a -t 1 || err "both stdin and stdout must be tty"
+	stty_orig="$(stty -g)"
+	stty -echo echonl
+	IFS= read -r -p "Enter new tormed password: " password || :
+	stty "${stty_orig}"
+	if test -z "${password}"; then
 	err "Password cannot be empty"
-    fi
-    stty -echo echonl
-    IFS= read -r -p "Confirm password: " password2 || :
-    stty "${stty_orig}"
-    if test "x${password}" != "x${password2}"; then
+	fi
+	stty -echo echonl
+	IFS= read -r -p "Confirm password: " password2 || :
+	stty "${stty_orig}"
+	if test "x${password}" != "x${password2}"; then
 	err "Passwords mismatches."
-    fi
+	fi
 fi
 
 salt="$(dd if=/dev/urandom bs=12 count=1 status=none | base64 -w0 | tr + .)"
 test 16 -eq ${#salt} || \
-    err "unexpected salt length ${#salt} when 16 was expected"
+	err "unexpected salt length ${#salt} when 16 was expected"
 
 hash="$(printf %s "$password" | mkpasswd -s -m sha-512 -R 5000 -S "$salt")"
 test 118 -eq ${#hash} || \
-    err "unexpected password hash length ${#hash} when 118 was expected"
+	err "unexpected password hash length ${#hash} when 118 was expected"
 
 printf "%s:%s\\n" user "$hash" > /etc/tormed/htpassword/htpassword
 chmod 644 /etc/tormed/htpassword/htpassword
@@ -1784,7 +1796,7 @@ chmod 644 /etc/tormed/htpassword/htpassword
 usermod -p "${hash}" tormed-files
 '
 
-    write_file "/usr/lib/tormed/www/index.html" \
+	write_file "/usr/lib/tormed/www/index.html" \
 '<!DOCTYPE html>
 <html>
 <head>
@@ -1797,7 +1809,7 @@ usermod -p "${hash}" tormed-files
 </html>
 '
 
-    for short_user in service service2; do
+	for short_user in service service2; do
 	full_user="tormed-${short_user}"
 	home_path="/var/lib/tormed/${short_user}"
 	service_name="tormed-${short_user}"
@@ -1826,15 +1838,15 @@ ProtectSystem=strict
 	    service_restart_list="${service_restart_list} ${R}"
 	fi
 	multi_user_wants+=("${service_name}.service")
-    done
+	done
 
-    local start_source
-    start_source="$(print_tormed_start_tranmission)"
-    write_file -m 0755 "/usr/lib/tliset/tormed-start-transmission" "${start_source}"
+	local start_source
+	start_source="$(print_tormed_start_tranmission)"
+	write_file -m 0755 "/usr/lib/tliset/tormed-start-transmission" "${start_source}"
 }
 
 print_tormed_start_tranmission() {
-    cat <<'EOF'
+	cat <<'EOF'
 #!/bin/sh
 
 set -e -u
@@ -1842,15 +1854,15 @@ set -e -u
 user="$(id -un)"
 case "${user}" in
 tormed-service )
-    suffix=
-    peer_port="25602"
-    rpc_port="9091"
-    ;;
+	suffix=
+	peer_port="25602"
+	rpc_port="9091"
+	;;
 tormed-service2 )
-    suffix=2
-    peer_port="51412"
-    rpc_port="9093"
-    ;;
+	suffix=2
+	peer_port="51412"
+	rpc_port="9093"
+	;;
 esac
 
 settings_file=settings.json
@@ -1861,27 +1873,27 @@ settings_file=settings.json
 umask 002
 
 if test ! -s "${settings_file}"; then
-    echo "Creating defaults tranmission options in ${settings_file}" >&2
+	echo "Creating defaults tranmission options in ${settings_file}" >&2
 
-    default_settings='{
-    "blocklist-enabled": false,
-    "download-dir": "/files",
-    "incomplete-dir": "/files/incomplete'"${suffix}"'",
-    "incomplete-dir-enabled": false,
-    "encryption": 1,
-    "max-peers-global": 200,
-    "pex-enabled": 1,
-    "port-forwarding-enabled": false,
-    "ratio-limit": 2,
-    "ratio-limit-enabled": true,
-    "speed-limit-down": 2000,
-    "speed-limit-down-enabled": true,
-    "speed-limit-up": 500,
-    "speed-limit-up-enabled": true,
-    "umask": 2
+	default_settings='{
+	"blocklist-enabled": false,
+	"download-dir": "/files",
+	"incomplete-dir": "/files/incomplete'"${suffix}"'",
+	"incomplete-dir-enabled": false,
+	"encryption": 1,
+	"max-peers-global": 200,
+	"pex-enabled": 1,
+	"port-forwarding-enabled": false,
+	"ratio-limit": 2,
+	"ratio-limit-enabled": true,
+	"speed-limit-down": 2000,
+	"speed-limit-down-enabled": true,
+	"speed-limit-up": 500,
+	"speed-limit-up-enabled": true,
+	"umask": 2
 }
 '
-    ( umask 077 && printf %s "${default_settings}" > "${settings_file}" )
+	( umask 077 && printf %s "${default_settings}" > "${settings_file}" )
 fi
 
 jq_filter='.
@@ -1907,17 +1919,17 @@ EOF
 }
 
 setup_letsencrypt() {
-    test -n "${webserver_certificate_domains}" || return 0
+	test -n "${webserver_certificate_domains}" || return 0
 
-    ensure_dir /var/lib/dehydrated
-    ensure_dir -g www-data -m 0770 /var/lib/dehydrated/accounts
-    ensure_dir -g www-data -m 0770 /var/lib/dehydrated/certs
-    ensure_dir -u www-data -g www-data -m 0755 /var/lib/dehydrated/certs/host
-    ensure_dir -g www-data -m 0770 /var/lib/dehydrated/state
+	ensure_dir /var/lib/dehydrated
+	ensure_dir -g www-data -m 0770 /var/lib/dehydrated/accounts
+	ensure_dir -g www-data -m 0770 /var/lib/dehydrated/certs
+	ensure_dir -u www-data -g www-data -m 0755 /var/lib/dehydrated/certs/host
+	ensure_dir -g www-data -m 0770 /var/lib/dehydrated/state
 
-    local cert_dir
-    cert_dir="/var/lib/dehydrated/certs/host"
-    if test ! -s "${cert_dir}/fullchain.pem" ; then
+	local cert_dir
+	cert_dir="/var/lib/dehydrated/certs/host"
+	if test ! -s "${cert_dir}/fullchain.pem" ; then
 	cmd_log cp /etc/ssl/private/ssl-cert-snakeoil.key \
 	    "${cert_dir}/privkey.pem"
 	cmd_log cp /etc/ssl/certs/ssl-cert-snakeoil.pem \
@@ -1925,10 +1937,10 @@ setup_letsencrypt() {
 	cmd_log chown www-data:www-data \
 	    "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem.tmp"
 	cmd_log mv "${cert_dir}/fullchain.pem.tmp" "${cert_dir}/fullchain.pem"
-    fi
+	fi
 
-    local s
-    s='
+	local s
+	s='
 CA=https://acme-v02.api.letsencrypt.org/directory
 # Staging
 #CA=https://acme-staging-v02.api.letsencrypt.org/directory
@@ -1941,11 +1953,11 @@ ACCOUNTDIR="/var/lib/dehydrated/accounts"
 # Workaround for a bug in older dehydrated
 CURL_OPTS=--http1.1
 '
-    write_file /etc/dehydrated/config "${s}"
-    write_file /etc/dehydrated/domains.txt \
+	write_file /etc/dehydrated/config "${s}"
+	write_file /etc/dehydrated/domains.txt \
 	"${webserver_certificate_domains} > host"
 
-    s='#!/bin/sh
+	s='#!/bin/sh
 set -e -u
 
 dehydrated --account --accept-terms
@@ -1956,9 +1968,9 @@ kill -s HUP "${nginx_pid}"
 echo "all OK" >&2
 '
 
-    write_file -m 0755 /usr/lib/tliset/dehydrated-renew "${s}"
+	write_file -m 0755 /usr/lib/tliset/dehydrated-renew "${s}"
 
-    p_file service:tliset-dehydrated.service '
+	p_file service:tliset-dehydrated.service '
 [Service]
 Type=simple
 User=www-data
@@ -1982,7 +1994,7 @@ ProtectControlGroups=yes
 ProtectSystem=strict
 '
 
-    p_file service:tliset-dehydrated.timer '
+	p_file service:tliset-dehydrated.timer '
 [Unit]
 After=network-online.target
 Wants=network-online.target
@@ -1992,41 +2004,49 @@ Persistent=true
 OnCalendar=*-*-7 03:00:00
 RandomizedDelaySec=86400
 '
-    if test -n "${file_update}"; then
+	if test -n "${file_update}"; then
 	escape_for_shell tliset-dehydrated.timer
 	service_restart_list="${service_restart_list} ${R}"
-    fi
-    multi_user_wants+=("tliset-dehydrated.timer")
+	fi
+	multi_user_wants+=("tliset-dehydrated.timer")
 
 }
 
 setup_ssh_agent_service() {
-    local key_set_name key_dir service_name sock_file
-    key_set_name="$1"
-    key_dir="$2"
-    set -- "${key_dir}/"*_key
-    if test ! -f "$1"; then
-	log "directory for ssh keys has no *_key files - ${key_dir}"
-	return
-    fi
-    service_name="tliset-${ssh_agent_service}"
-    sock_file="common.sock"
-    if test -n "${key_set_name}"; then
-	service_name="${service_name}-${key_set_name}"
-	sock_file="set-${key_set_name}.sock"
-    fi
+	local key_set_name key_dir service_name sock_file
+	key_set_name="$1"
+	key_dir="$2"
+	set -- "${key_dir}/"*_key
+	if test ! -f "$1"; then
+		log "directory for ssh keys has no *_key files - ${key_dir}"
+		return
+	fi
+	service_name="tliset-${ssh_agent_service}"
+	sock_file="common.sock"
+	if test -n "${key_set_name}"; then
+		service_name="${service_name}-${key_set_name}"
+		sock_file="set-${key_set_name}.sock"
+	fi
 
-    # ssh-agent insists that the client must have the same user id as the agent
-    # process. So use systemd-socket-proxyd both to support lazy loading and set
-    # custom permissions on the socket file.
-    p_file "service:${service_name}.socket" "\
+	# ssh-agent insists that the client must have the same user id as the agent
+	# process. So use systemd-socket-proxyd both to support lazy loading and set
+	# custom permissions on the socket file.
+	p_file "service:${service_name}.socket" "\
 [Socket]
 ListenStream=/run/tliset-${ssh_agent_service}/${sock_file}
 SocketUser=root
-SocketGroup=${primary_user}
+SocketGroup=${main_user}
 SocketMode=0660
 "
-    p_file "service:${service_name}.service" '
+	multi_user_wants+=("${service_name}.socket")
+
+	# Ensure that the agent is started.
+	if test -n "${file_update}" || \
+			! systemctl -q is-active "${service_name}.socket"; then
+		escape_for_shell "${service_name}.socket"
+		service_restart_list="${service_restart_list} ${R}"
+	fi
+	p_file "service:${service_name}.service" '
 [Unit]
 Requires='"${service_name}"'.socket
 After='"${service_name}"'.socket
@@ -2034,16 +2054,20 @@ After='"${service_name}"'.socket
 [Service]
 ExecStart=/usr/bin/ssh-agent -a /tmp/agent.sock \
   sh -c '\''ssh-add "'"${key_dir}"'"/*_key < /dev/null > /dev/null && \
-    exec /usr/lib/systemd/systemd-socket-proxyd /tmp/agent.sock'\''
+	exec /usr/lib/systemd/systemd-socket-proxyd /tmp/agent.sock'\''
 PrivateTmp=yes
 User='"${ssh_agent_service}"'
 '
-    multi_user_wants+=("${service_name}.socket")
+	if test -n "${file_update}"; then
+		escape_for_shell "${service_name}.service"
+		service_restart_list="${service_restart_list} ${R}"
+		service_try_restart_list="${service_try_restart_list} ${R}"
+	fi
 }
 
 setup_files() {
-    case $NAME in
-    r2 )
+	case $NAME in
+	r2 )
 	ensure_dir /opt /opt/dpodctl "/opt/dpodctl/transdock"
 	write_file "/opt/dpodctl/transdock/config.dpod" "\
 ImageName local/transdock
@@ -2052,61 +2076,56 @@ HostEnv ACME_CONTACT mailto:igor@mir2.org
 UseHostNetwork
 "
 	;;
-    rhea )
+	rhea )
 	ensure_dir -m 0755 /vol
 	;;
-    thip )
+	thip )
 	ensure_dir -m 0755 /vol
 	ensure_dir -m 0770 -u root -g core /vol/projects
 	;;
-    esac
+	esac
 
 }
 
 setup_accounts() {
-    if test -n "${with_sudoless_docker}"; then
-	if [[ -z ${SUDO_USER-} ]]; then
-	    err "cannot determine the user for the docker command - SUDO_USER is not defined"
+	if test -n "${with_sudoless_docker}"; then
+		local s
+		s="$(getent group docker 2>/dev/null || :)"
+		if [[ ! $s  ]]; then
+			cmd_log groupadd docker
+		fi
+		if ! [[ $s =~ ^[^:]+:[^:]*:[^:]+:(.*,)?"${main_user}"(,|$) ]]; then
+			cmd_log usermod -aG docker "${main_user}"
+		fi
 	fi
-	local primary_user
-	primary_user="${SUDO_USER}"
-	local s
-	s="$(getent group docker 2>/dev/null || :)"
-	if [[ ! $s  ]]; then
-	    cmd_log groupadd docker
-	fi
-	if ! [[ $s =~ ^[^:]+:[^:]*:[^:]+:(.*,)?"$primary_user"(,|$) ]]; then
-	    cmd_log usermod -aG docker "$primary_user"
-	fi
-    fi
 }
 
 start_docker_container() {
-    local container dockerfile run_args cmd_arg
-    container="$1"
-    dockerfile="$2"
-    run_args="$3"
-    cmd_args="${4-}"
+	local container dockerfile run_args cmd_arg
+	container="$1"
+	dockerfile="$2"
+	run_args="$3"
+	cmd_args="${4-}"
 
-    local image
-    image="local/${container}"
-    escape_for_shell "${image}"
-    run_args="${run_args} ${R}${cmd_args:+ }${cmd_args}"
+	local image
+	image="local/${container}"
+	escape_for_shell "${image}"
+	run_args="${run_args} ${R}${cmd_args:+ }${cmd_args}"
 
-    local tag
-    escape_for_shell "${dockerfile}"
-    tag="$(printf '%s %s' "${R}" "${run_args}"| sha256sum)"
-    tag="${tag%% *}"
+	local tag
+	escape_for_shell "${dockerfile}"
+	tag="$(printf '%s %s' "${R}" "${run_args}"| sha256sum)"
+	tag="${tag%% *}"
 
-    local s
-    s="$(docker inspect --type container \
+	local s
+	s="$(docker inspect --type container \
 	-f  '{{.State.Running}} {{index .Config.Labels "local.tag"}}' \
 	"${container}" 2>/dev/null || :)"
 
-    local status current_tag
-    status="${s%% *}"
-    current_tag="${s#* }"
-    if test true != "${status}" -o "x${current_tag}" != "x${tag}"; then
+	local status current_tag
+	status="${s%% *}"
+	current_tag="${s#* }"
+	if test true != "${status}" -o "x${current_tag}" != "x${tag}"; then
 	log "Starting ${container} container"
 	if test true = "${status}"; then
 	    cmd_log docker stop "${container}" > /dev/null
@@ -2117,18 +2136,18 @@ start_docker_container() {
 	printf %s "${dockerfile}" | cmd_log docker build -t "${image}" -
 	escape_for_shell cmd_log docker run -d --name "${container}" --label local.tag="${tag}"
 	eval "${R} ${run_args} > /dev/null"
-    fi
+	fi
 }
 
 setup_docker_services() {
-    test -n "${with_docker}" || return 0
+	test -n "${with_docker}" || return 0
 
-    if ! docker version -f '{{.Server.Version}}' > /dev/null 2>&1; then
+	if ! docker version -f '{{.Server.Version}}' > /dev/null 2>&1; then
 	log "Attempting to start the docker daemon"
 	cmd_log systemctl start docker
-    fi
+	fi
 
-    if test -n "${with_docker_development_net}"; then
+	if test -n "${with_docker_development_net}"; then
 	local net_name="development"
 	local subnet_template
 	subnet_template='{{range .IPAM.Config}}{{if .Subnet}}{{.Subnet}}{{end}}{{end}}'
@@ -2203,19 +2222,19 @@ EOF
 
 	    write_file "/etc/resolv.conf" "nameserver 127.0.0.1${NL}"
 	fi
-    fi
+	fi
 }
 
 setup_development_dpodctl() {
-    local net_name="development"
+	local net_name="development"
 
-    local dir="/opt/dpodctl"
-    ensure_dir /opt/dpodctl
+	local dir="/opt/dpodctl"
+	ensure_dir /opt/dpodctl
 
-    local projects_root="/vol/projects"
+	local projects_root="/vol/projects"
 
-    local i ip4_last_byte=10
-    for i in transdock; do
+	local i ip4_last_byte=10
+	for i in transdock; do
 	ensure_dir "$dir/$i"
 	local ipv4="$dev_docker_network_prefix.$ip4_last_byte"
 	: $((ip4_last_byte+=1))
@@ -2240,52 +2259,52 @@ NetworkIPv4 $ipv4
 "
 	    ;;
 	esac
-    done
+	done
 }
 
 run_remotely() {
-    local OPTIND opt ssh_user machine_host
-    ssh_user=root
-    machine_host=
-    while getopts :m:u: opt; do
+	local OPTIND opt ssh_user machine_host
+	ssh_user=root
+	machine_host=
+	while getopts :m:u: opt; do
 	case "$opt" in
 	m ) machine_host="${OPTARG}";;
 	u ) ssh_user="${OPTARG}";;
 	* ) getopts_err "$opt" "${OPTARG-}";;
 	esac
-    done
-    shift $(($OPTIND - 1))
+	done
+	shift $(($OPTIND - 1))
 
-    local target_host="$1"
-    shift
+	local target_host="$1"
+	shift
 
-    # I need to send the directory and allow to use terminal to ask
-    # for password or secreets. So just emebedd the archive into the
-    # command as base64 and ensure that ssh allocates tty.
-    local data=$(tar -C "${selfdir}" --exclude .git --exclude README.md --exclude LICENSE -cf - . | gzip -9 | base64 -w0)
+	# I need to send the directory and allow to use terminal to ask
+	# for password or secreets. So just emebedd the archive into the
+	# command as base64 and ensure that ssh allocates tty.
+	local data=$(tar -C "${selfdir}" --exclude .git --exclude README.md --exclude LICENSE -cf - . | gzip -9 | base64 -w0)
 
-    local i cmd
-    cmd=$(printf %q "/tmp/tliset/$(basename "$0")")
-    for i in "$@"; do
+	local i cmd
+	cmd=$(printf %q "/tmp/tliset/$(basename "$0")")
+	for i in "$@"; do
 	cmd+=" $(printf %q "$i")"
-    done
+	done
 
-    local cmd="rm -rf /tmp/tliset && mkdir /tmp/tliset && printf %s $data | base64 -d | tar -C /tmp/tliset -xzf - && $cmd"
+	local cmd="rm -rf /tmp/tliset && mkdir /tmp/tliset && printf %s $data | base64 -d | tar -C /tmp/tliset -xzf - && $cmd"
 
-    local wrapped_cmd
-    if [[ ${machine_host} ]]; then
+	local wrapped_cmd
+	if [[ ${machine_host} ]]; then
 	wrapped_cmd="systemd-run -M ${target_host} --quiet --tty --wait"
 	wrapped_cmd+=" /bin/bash -c $(printf %q "$cmd")"
 	if [[ ${ssh_user} != root ]]; then
 	    wrapped_cmd="sudo ${wrapped_cmd}"
 	fi
 	target_host="${machine_host}"
-    elif [[ ${ssh_user} != root ]]; then
+	elif [[ ${ssh_user} != root ]]; then
 	wrapped_cmd="sudo /bin/bash -c $(printf %q "$cmd")"
-    else
+	else
 	wrapped_cmd="${cmd}"
-    fi
-    exec ssh -t "${ssh_user}@${target_host}" "${wrapped_cmd}"
+	fi
+	exec ssh -t "${ssh_user}@${target_host}" "${wrapped_cmd}"
 }
 
 
@@ -2294,7 +2313,7 @@ NAME=""
 remote=""
 
 while getopts :hn:r:u: opt; do
-    case "$opt" in
+	case "$opt" in
 	h ) show_usage=1 ;;
 	n )
 	    NAME="$OPTARG"
@@ -2307,7 +2326,7 @@ while getopts :hn:r:u: opt; do
 		usage_err "The value of -r argument '$remote' is not a known host name."
 	    ;;
 	* ) getopts_err "$opt" "${OPTARG-}";;
-    esac
+	esac
 done
 
 #[[ $# -eq $(($OPTIND - 1)) ]] || usage_err "Unexpected extra arguments: $@"
@@ -2316,45 +2335,45 @@ let OPTIND==1+$# || usage_err "Unexpected extra arguments: $@"
 [[ -z "$remote" || -z "$NAME" ]] || usage_err "Only one of -n, -r can be given"
 
 if [[ -n "$show_usage" ]]; then
-    echo "Usage: $0 [OPTION]..."
-    echo "Customize installation for the given computer."
-    echo
-    echo "  -h  show this help and exit"
-    echo "  -n name  assume the given name as the hostname rather than use /etc/hostname."
-    echo "           The valid values are (${valid_host_names[*]})."
-    echo "  -r name  execute setup on the remote machine name using ssh to copy the setup files."
-    echo
-    exit
+	echo "Usage: $0 [OPTION]..."
+	echo "Customize installation for the given computer."
+	echo
+	echo "  -h  show this help and exit"
+	echo "  -n name  assume the given name as the hostname rather than use /etc/hostname."
+	echo "           The valid values are (${valid_host_names[*]})."
+	echo "  -r name  execute setup on the remote machine name using ssh to copy the setup files."
+	echo
+	exit
 fi
 
 if [[ $remote ]]; then
-    NAME=$remote
+	NAME=$remote
 elif [[ -z "$NAME" ]]; then
-    read_tliset_name
-    NAME="$R"
+	read_tliset_name
+	NAME="$R"
 fi
 
 get_host_options
 
 if [[ -n "$remote" ]]; then
-    cmd=(run_remotely)
-    if [[ ${machine_host} ]]; then
+	cmd=(run_remotely)
+	if [[ ${machine_host} ]]; then
 	cmd+=(-m "${machine_host}")
-    fi
-    if [[ ${ssh_login_user} ]]; then
+	fi
+	if [[ ${ssh_login_user} ]]; then
 	cmd+=(-u "${ssh_login_user}")
-    fi
-    "${cmd[@]}" -- "$remote" -n "$remote"
+	fi
+	"${cmd[@]}" -- "$remote" -n "$remote"
 fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
-    exec sudo "$0" "$@"
+	exec sudo "$0" "$@"
 fi
 
 determine_os
 
 if test -n "${kind_fedora}"; then
-    fedora_release="$(rpm -E %fedora)"
+	fedora_release="$(rpm -E %fedora)"
 fi
 
 begin_tliset
@@ -2362,7 +2381,7 @@ begin_tliset
 start_generator_write
 
 if test -z "${under_qubes}"; then
-    setup_packages
+	setup_packages
 fi
 
 setup_kernel_parameters
