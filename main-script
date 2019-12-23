@@ -1,0 +1,2679 @@
+#!/bin/sh
+
+# shellcheck shell=dash
+# shellcheck enable=all
+# shellcheck disable=SC2249,SC2034
+
+set -u -e
+
+# shellcheck source=./utils.sh
+. "${0%/*}/utils.sh"
+
+LANG=C.UTF-8
+export LANG
+
+valid_primary_host_names="bergenrabbit.net oberon r2 r4.mir2.org rhea test-br"
+valid_chroot_host_names="vivaldi-dev"
+valid_host_names="${valid_primary_host_names} ${valid_chroot_host_names}"
+
+readonly valid_primary_host_names
+readonly valid_chroot_host_names
+readonly valid_host_names
+
+get_host_options() {
+
+  zram_size=
+  zram_algorithm=
+  with_zswap=
+  custom_user_watches_count=
+  with_disabled_selinux=
+  with_disabled_firewalld=
+
+  with_latex=
+  with_common_packages=
+  with_common_development_tools=
+  with_include_rpmfusion=
+
+  # Main user - must be when needed
+  unset main_user
+
+  with_dev_container=
+
+  # Activate ssh-agent services to serve ssh keys from a separated account.
+  with_ssh_agent_service=
+
+  with_custom_sshd=
+  with_setuidless_sshd=
+  with_remote_ssh_unlock=
+
+  with_nginx=
+  tormed_host=
+
+  bergenrabbit_archive_time=
+  bergenrabbit_archive_root=
+
+  with_stub_resolv_conf=
+  with_forced_networkd=
+  with_networkd_dhcp_ipv4=
+
+  explicit_ipv6_address=
+  explicit_ipv6_gateway=
+
+  webserver_certificate_domains=
+
+  readonly dev_vz_network_prefix="192.168.97"
+
+  container_names=
+
+  case "${NAME}" in
+  bergenrabbit.net )
+    zram_size=1024M
+    zram_algorithm=lz4
+    ;;
+  r2 )
+    bergenrabbit_archive_time=03:00:02
+    bergenrabbit_archive_root=/area/backup
+    explicit_ipv6_address="2001:41d0:e:696::1/64"
+    explicit_ipv6_gateway="2001:41d0:e:6ff:ff:ff:ff:ff"
+    zram_size=512M
+    ;;
+  r4.mir2.org )
+    zram_size=8192M
+    zram_algorithm=lz4hc
+    with_custom_sshd=1
+    with_setuidless_sshd=1
+    with_nginx=1
+    if test r3.mir2.org = "${NAME}"; then
+      enable_tormed media3.mir2.org
+    fi
+    if test r4.mir2.org = "${NAME}"; then
+      bergenrabbit_archive_time=02:40:02
+      bergenrabbit_archive_root=/data2/br-archive
+      enable_tormed media.mir2.org
+    fi
+    ;;
+  oberon )
+    main_user=igor
+    with_common_packages=1
+    with_latex=1
+    zram_size=28G
+    zram_algorithm=lz4hc
+    with_disabled_selinux=1
+    with_disabled_firewalld=1
+
+    custom_user_watches_count="$((1024*1024))"
+    with_ssh_agent_service=1
+    with_custom_sshd=1
+    with_remote_ssh_unlock=1
+
+    with_stub_resolv_conf=1
+    with_forced_networkd=1
+    with_networkd_dhcp_ipv4=1
+
+    container_names=vivaldi-dev
+      ;;
+  rhea )
+    main_user=igor
+    with_common_packages=1
+    with_latex=1
+    zram_size=28G
+    zram_algorithm=lz4hc
+
+    with_stub_resolv_conf=1
+
+    custom_user_watches_count="$((768*1025))"
+    with_ssh_agent_service=1
+
+    container_names=vivaldi-dev
+    ;;
+  test-br )
+    :
+    ;;
+  vivaldi-dev )
+    with_dev_container=1
+    with_common_development_tools=1
+    main_user=vwork
+    ;;
+  * )
+    err "unknown '${NAME}'"
+    ;;
+  esac
+}
+
+determine_os() {
+  kind_coreos=
+  kind_fedora=
+  kind_ubuntu=
+  kind_debian=
+
+  # VM runs under Qubes OS
+  under_qubes=
+
+  local os_kind
+  os_kind=
+  if test -f /etc/os-release; then
+    local line
+    {
+      while IFS='' read -r line; do
+        local s
+        s="${line#ID=}"
+        if test "x${s}" != "x${line}"; then
+          os_kind="${s}"
+          break;
+        fi
+      done
+    } < /etc/os-release
+  fi
+
+  case "${os_kind}" in
+  coreos ) kind_coreos=1 ;;
+  debian ) kind_debian=1 ;;
+  fedora ) kind_fedora=1 ;;
+  ubuntu ) kind_ubuntu=1 ;;
+  * ) err "Do not know how to determine OS, os_kind='${os_kind}'" ;;
+  esac
+  if test -d /etc/qubes; then
+    under_qubes=1
+  fi
+  readonly under_qubes
+
+  if test -n "${kind_fedora}"; then
+    fedora_release="$(rpm -E %fedora)"
+  fi
+}
+
+
+getopts_err() {
+  local name=$1 msg
+  case "${name}" in
+  : ) msg="-${OPTARG} requires an argument" ;;
+  \? ) msg="unknown option -${OPTARG}" ;;
+  * ) msg="-${name} is listed in getopts arguments but not processed" ;;
+  esac
+  # If this iscalled in a function, print function name
+  local function_name parent_name
+  function_name=
+  parent_name=
+  if test -n "${FUNCNAME-}"; then
+    if eval 'test 2 -lt "${#FUNCNAME[@]}"'; then
+      eval 'function_name="${FUNCNAME[1]}";'
+      eval 'parent_name="${FUNCNAME[2]}";'
+    fi
+  fi
+  if test -n "${function_name}"; then
+    err "${parent_name}->${function_name} - ${msg}"
+  else
+    err "${msg}"
+  fi
+}
+
+log_indent_level=0
+
+log() {
+  local indent='' i
+  i=0
+  while test "${i}" -lt "${log_indent_level}"; do
+    indent="${indent}  "
+    : $((i+=1))
+  done
+  printf '%s%s\n' "${indent}" "$*" 1>&2
+}
+
+warn() {
+  log "WARNING:" "$@"
+}
+
+cmd_log() {
+  log "$*"
+  "$@"
+}
+
+inc_log_level() {
+  : $((log_indent_level+=1))
+}
+
+dec_log_level() {
+  test 1 -le "${log_indent_level}" || \
+      err "dec_log_level without inc_log_level"
+  : $((log_indent_level-=1))
+}
+
+is_valid_host_name() {
+  local name names i
+  name="$1"
+  names="${2-}"
+  has_value names || names="${valid_host_names}"
+
+  for i in ${names}; do
+    if test "x${i}" = "x${name}"; then
+      return 0
+    fi
+  done
+  return 1;
+}
+
+# ensure that a config file $1 contains $2 at its end between marker comments
+ensure_config_file_tail_section() {
+  local path section
+  path="$1"
+  section="$2"
+
+  test -f "${path}" || err "${path} does not exist. A section cannot be added."
+
+  local section_start_mark section_end_mark
+  section_start_mark="#-# (tliset start)"
+  section_end_mark="#-# (tliset end)"
+
+  local lineno inside_section found_section right_after_end_mark
+  local old_section
+
+  lines=
+  inside_section=
+  found_section=
+  right_after_end_mark=
+  while :; do
+    local line
+    line=
+    if ! IFS= read -r line; then
+      if has_value line && has_value lines; then
+        err "${path} ends with line without \\n"
+      fi
+      if has_value right_after_end_mark; then
+        if test "x${old_section}" = "${section}"; then
+          return 0
+        fi
+      fi
+      break
+    fi
+    right_after_end_mark=
+    if is_empty inside_section; then
+      if has_value found_section; then
+        err "${path} contains lines after the tail custom section"
+      fi
+      if test "x${line}" = "x${section_end_mark}"; then
+        err "${path} contains section end marker without the start marker"
+      fi
+      if test "x${line}" = "x${section_start_mark}"; then
+        if has_value found_section; then
+          err "${path} contains duplicated section"
+        fi
+        found_section=1
+        inside_section=1
+        old_section=
+      else
+        lines="${lines}${line}${NL}"
+      fi
+    else
+      if test "x${line}" = "x${section_start_mark}"; then
+        err "${path} contains duplicated section start markers"
+      fi
+      if test "x${line}" = "x${section_end_mark}"; then
+        right_after_end_mark=1
+        inside_section=
+      else
+        old_section="${old_section}${line}${NL}"
+      fi
+    fi
+  done < "${path}"
+
+  if has_value inside_section; then
+    err "${path} contains section start without section start"
+  fi
+
+  log "Updating ${path} with custom tail lines"
+  printf '%s%s\n%s%s\n' "${lines}" "${section_start_mark}" "${section}" \
+      "${section_end_mark}" > "${path}"
+}
+
+ensure_dir() {
+  local mode group user dir
+  mode=
+  group=
+  user=
+
+  local opt OPTIND
+  while getopts :g:m:u: opt; do
+    case "${opt}" in
+    g ) group="${OPTARG}" ;;
+    m ) mode="${OPTARG}" ;;
+    u ) user="${OPTARG}" ;;
+    * ) getopts_err "${opt}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  if test -z "${mode}"; then
+    mode=0755
+  fi
+  if test -z "${user}"; then
+    user=root
+  fi
+  if test -z "${group}"; then
+    group="${user}"
+  fi
+
+  if test $# -eq 0; then
+    return
+  fi
+
+  local dir
+  for dir in "$@"; do
+    test -n "${dir}" || err "directory cannot be empty"
+    test "x${dir}" = "x${dir%/}" || \
+        err "directory must not end with slash - ${dir}"
+    test "x${dir}" != "x${dir#/}" || \
+        err "directory must be an absolute path - ${dir}"
+    if test ! -d "${dir}"; then
+        test ! -e "${dir}" -a ! -h "${dir}"  || \
+            err "${dir} exists and is not a directory"
+        cmd_log mkdir -m "${mode}" "${dir}"
+    else
+        test ! -h "${dir}" || \
+            err "${path} exists and is a symbilic link, not a directory - ${dir}"
+    fi
+    local s
+    s="$(find "${dir}" \
+        -maxdepth 0 -perm "${mode}" -user "${user}" -group "${group}" \
+         2>/dev/null || : \
+    )"
+    if test -z "${s}"; then
+      cmd_log chmod "=${mode}" "${dir}"
+      cmd_log chown "${user}:${group}" "${dir}"
+    fi
+    note_path "${dir}"
+  done
+}
+
+ensure_symlink() {
+  local target path
+  target="$1"
+  path="$2"
+  file_update=
+  while :; do
+    if test -h "${path}"; then
+      local current_target
+      current_target="$(readlink "${path}")"
+      if test "x${current_target}" = "x${target}"; then
+        break
+      fi
+    elif test -d "${path}"; then
+      cmd_log rmdir "${path}" || \
+        err "remove symbolic link ${path} manually and run again"
+    fi
+    cmd_log ln -sfT "${target}" "${path}"
+    file_update=1
+    break
+  done
+  note_path "${path}"
+}
+
+file_update=
+file_update_count=0
+
+write_file() {
+  local user group mode
+  user=
+  group=
+  mode=
+  local opt OPTIND
+  while getopts :g:m:u: opt; do
+    case "${opt}" in
+    g) group="${OPTARG}" ;;
+    m) mode="${OPTARG}" ;;
+    u) user="${OPTARG}" ;;
+    *) getopts_err "${opt}" ;;
+    esac
+  done
+
+  shift $((OPTIND - 1))
+  test $# -eq 2 -o $# -eq 1 || \
+      err "write_file takes path and optional body arguments"
+
+  local path body
+  path="$1"
+  if test $# -eq 2; then
+    body="${2}"
+  else
+    read_stdin
+    body="${R}"
+  fi
+  if is_empty user; then
+    user=root
+  fi
+  if is_empty group; then
+    group="${user}"
+  fi
+  if is_empty mode; then
+    mode=0644
+  fi
+
+  local wanted_umask need_chmod
+  need_chmod=
+  case "${mode}" in
+  0644) wanted_umask=022 ;;
+  0640) wanted_umask=027 ;;
+  0600) wanted_umask=077 ;;
+  0660) wanted_umask=007 ;;
+  0755) wanted_umask=022 need_chmod=1 ;;
+  *) err "unsupported mode - ${mode}" ;;
+  esac
+
+  local do_update
+  do_update=1
+  while :; do
+    if test ! -f "${path}" -o -h "${path}"; then
+      log "creating new ${path}"
+      break;
+    fi
+    local s
+    s="$(find "${path}" \
+        -maxdepth 0 -perm "${mode}" -user "${user}" -group "${group}" \
+        -printf 1 \
+    )"
+    if test -z "${s}"; then
+      log "updating ${path} - permission changes"
+      break;
+    fi
+
+    if printf %s "${body}" | cmp -s "${path}" -; then
+      # Permissions and text matches
+      do_update=
+      break
+    fi
+
+    log "updating ${path} - content changes"
+    break
+  done
+
+  if test -z "${do_update}"; then
+    file_update=
+  else
+    # Use temporary to ensure atomic operation on filesystem
+    local tmp
+    tmp="${path}.tmp"
+    if test -f "${tmp}"; then
+      rm "${tmp}"
+    fi
+
+    umask "${wanted_umask}"
+    printf %s "${body}" > "${tmp}"
+    if test -n "${need_chmod}"; then
+      chmod "${mode}" "${tmp}"
+    fi
+    chown "${user}:${group}" "${tmp}"
+    mv -fT "${tmp}" "${path}"
+
+    file_update=1
+    : $((file_update_count+=1))
+  fi
+  note_path "${path}"
+}
+
+ensure_group() {
+  local gid
+  gid=
+  local opt OPTIND
+  while getopts :g: opt; do
+    case "${opt}" in
+    g) gid="${OPTARG}" ;;
+    *) getopts_err "${opt}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  local group
+  group="$1"
+
+  local s
+  s="$(getent group "${group}" 2>/dev/null || :)"
+  if test -z "${s}"; then
+    set --
+    if has_value gid; then
+      set -- "$@" -g "${gid}"
+    fi
+    cmd_log groupadd "$@" "${group}"
+  elif has_value gid; then
+    local current_gid
+    s="${s#*:*:}"
+    current_gid="${s%%:*}"
+    if test "x${current_gid}" != "x${gid}"; then
+      cmd_log groupmod -g "${gid}" "${group}"
+    fi
+  fi
+}
+
+ensure_user() {
+  local home_dir groups shell uid
+  home_dir=
+  groups=
+  shell=
+  uid=
+  local opt OPTIND
+  while getopts :d:G:s:u: opt; do
+    case "${opt}" in
+    d) home_dir="${OPTARG}" ;;
+    G) groups="${OPTARG}" ;;
+    s) shell="${OPTARG}" ;;
+    u) uid="${OPTARG}" ;;
+    *) getopts_err "${opt}" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+  user="$1"
+
+  # TODO update on mismatch
+  local s
+  s="$(getent passwd "${user}" 2>/dev/null || :)"
+  if test -z "${s}"; then
+    set -- -M
+    if has_value home_dir; then
+      set -- "$@" -d "${home_dir}"
+    fi
+    if has_value groups; then
+      set -- "$@" -G "${groups}"
+    fi
+    if has_value uid; then
+      set -- "$@" -u "${uid}"
+    fi
+    if has_value shell; then
+      set -- "$@" -s "${shell}"
+    fi
+    cmd_log useradd "$@" "${user}"
+  fi
+}
+
+ensure_group_member() {
+  local group user
+  group="$1"
+  user="$2"
+  file_update=
+  local s
+  s="$(getent group "${group}")"
+  if test -z "${s}"; then
+    err "group ${group} doesn't exist"
+  fi
+  s="${s##*:}"
+  while test -n "${s}"; do
+    local member
+    member="${s%%,*}"
+    if test "x${member}" = "x${user}"; then
+      break
+    fi
+    if test "x${member}" = "x${s}"; then
+      s=
+    else
+      s="${s#*,}"
+    fi
+  done
+  if test -z "${s}"; then
+    cmd_log usermod -aG "${group}" "${user}"
+    file_update=1
+  fi
+}
+
+read_tliset_name() {
+  local path name
+  path=/etc/tliset.name
+  if test -n "${under_qubes}"; then
+    path="/usr/local${path}"
+  fi
+  if test ! -s "${path}"; then
+    err "${path} does not exist or empty. Initilize it with a valid name and try again."
+  fi
+  IFS= read -r name < "${path}"
+  if ! is_valid_host_name "${name}"; then
+    err "Unknown name in ${path}: '${name}'"
+  fi
+  NAME="${name}"
+  readonly NAME
+}
+
+ensure_masked_service() {
+  local service_name s
+  service_name="$1"
+  s="$(systemctl is-enabled "${service_name}" || :)"
+  if test masked != "${s}"; then
+    cmd_log systemctl mask "${service_name}"
+  fi
+}
+
+read_tliset_parent_name() {
+  local path name
+  path="/etc/tliset.parent_name"
+  if ! test -s "${path}"; then
+    err "${path} must exists and be non-empty"
+  fi
+  IFS= read -r name < "${path}"
+  if ! is_valid_host_name "${name}" "${valid_primary_host_names}"; then
+    err "Unknown name in ${path}: '${name}'." \
+        "The name must be one of ${valid_primary_host_names}"
+  fi
+  PARENT_NAME="${name}"
+  readonly PARENT_NAME
+}
+
+enable_tormed() {
+  local name
+  name="$1"
+  webserver_certificate_domains="${webserver_certificate_domains}${webserver_certificate_domains:+ }${name}"
+  tormed_host="${name}"
+}
+
+add_dns_record_a() {
+  local host ipv4
+  host="$1"
+  ipv4="$2"
+  escape_for_shell "--host-record=${host},${ipv4}"
+  extra_dnsmasq_eargs="${extra_dnsmasq_eargs} ${R}"
+}
+
+add_dns_interface_name() {
+  local host interface
+  host="$1"
+  interface="$2"
+  escape_for_shell "--interface-name=${host},${interface}"
+  extra_dnsmasq_eargs="${extra_dnsmasq_eargs} ${R}"
+}
+
+begin_tliset() {
+  paths_file=/var/lib/tliset/paths.txt
+  can_note_paths=
+  readonly paths_file
+  ensure_dir /var/lib/tliset
+  exec 9>>"${paths_file}.new"
+
+  can_note_paths=1
+  note_path /var/lib/tliset
+}
+
+end_tliset() {
+  exec 9>&-
+  sort "${paths_file}.new" > "${paths_file}.tmp"
+  mv "${paths_file}.tmp" "${paths_file}.new"
+
+  # Duplicates happens when tliset runs again after a failure
+  uniq "${paths_file}.new" > "${paths_file}.tmp"
+  mv "${paths_file}.tmp" "${paths_file}.new"
+
+  if test -f "${paths_file}"; then
+    comm -23 "${paths_file}" "${paths_file}.new" > "${paths_file}.unknown"
+    filter_existing_paths < "${paths_file}.unknown" > "${paths_file}.tmp"
+    mv "${paths_file}.tmp" "${paths_file}.unknown"
+    if test -s "${paths_file}.unknown"; then
+      log "No longer generated files from the previous runs:" \
+          "${NL}$(cat "${paths_file}.unknown")"
+      sort "${paths_file}.new" "${paths_file}.unknown" > "${paths_file}.tmp"
+      mv "${paths_file}.tmp" "${paths_file}.new"
+    else
+      rm -f "${paths_file}.unknown"
+    fi
+  fi
+
+  mv "${paths_file}.new" "${paths_file}"
+}
+
+filter_existing_paths() {
+  local line
+  while IFS= read -r line; do
+    if test -e "${line}" -o -h "${line}"; then
+      printf '%s\n' "${line}"
+    fi
+  done
+}
+
+note_path() {
+  local path
+  path="$1"
+  if test -n "${can_note_paths}"; then
+    printf '%s\n' "${path}" 1>&9
+  fi
+}
+
+setup_packages() {
+  log "Checking packages"
+  inc_log_level
+  if has_value kind_fedora; then
+    setup_rpm_packages
+  fi
+  if has_value kind_debian || has_value kind_ubuntu; then
+    setup_apt_packages
+  fi
+  dec_log_level
+  return 0
+}
+
+
+setup_rpm_packages() {
+  if test -n "${with_common_packages}" -a -n "${with_include_rpmfusion}"; then
+    # Loop over rpmfusion kinds
+    set -- free nonfree
+    local eargs
+    eargs=
+    earg rpm -q --quiet
+    local i
+    for i in "$@"; do
+      earg "rpmfusion-${i}-release"
+    done
+
+    if ! eval "${eargs}" ; then
+      log "Installing rpmfusion"
+      eargs=
+      earg dnf install -y --nogpgcheck
+      for i in "$@"; do
+        earg "http://download1.rpmfusion.org/${i}/fedora/rpmfusion-${i}-release-${fedora_release}.noarch.rpm"
+      done
+      eval "${eargs}" || :
+    fi
+  fi
+  local eargs
+  eargs=
+
+  earg lzip zip unzip
+  earg apg ccrypt
+  earg git quilt
+  earg jq ShellCheck
+  earg screen tmux pv
+
+  if has_value with_common_packages; then
+    earg lsyncd
+    earg terminus-fonts-console
+    earg quilt mercurial subversion
+    earg livecd-tools
+    earg autoconf automake gcc-c++ kernel-devel chrpath
+    earg geany geany-plugins-spellcheck
+    earg tigervnc
+    earg pcp-system-tools strace
+    earg xclip xorg-x11-apps
+    earg xpra
+    earg xorg-x11-server-Xephyr
+    earg openssh-askpass
+
+    # filesystems
+    earg udftools inotify-tools fdupes fslint mtools
+
+    # encryption and backup
+    earg apg duplicity perl-Digest-Bcrypt
+
+    # Recovery tools
+    earg ddrescue foremost scalpel testdisk
+
+    # Graphs
+    earg graphviz graphviz-doc
+
+    # PDF tools
+    earg pdfmerge poppler-utils
+
+    # Media
+    earg gimp inkscape gthumb
+    earg scribus
+    earg evince evince-djvu pdf2djvu
+    earg linux-libertine-biolinum-fonts linux-libertine-fonts
+    earg gstreamer1-plugins-good-extras
+
+    # Languages
+    earg hunspell-ru hunspell-nb
+
+    if test -n "${with_include_rpmfusion}"; then
+      # Archives
+      earg unrar libunrar
+
+      # Media
+      earg vlc
+      earg kdenlive
+      earg ffmpeg
+      earg gstreamer1-libav
+      earg gstreamer1-plugins-bad-free
+      earg gstreamer1-plugins-bad-free-extras
+      earg gstreamer1-plugins-bad-freeworld
+      earg  gstreamer1-plugins-ugly
+    fi
+
+    # hardware management
+    earg util-linux lm_sensors
+
+    earg gnome-tweaks
+    earg gnome-terminal-nautilus
+  fi
+
+  if has_value with_latex; then
+    earg texlive
+    earg texlive-babel-norsk
+    earg texlive-hyphen-norwegian
+    earg texlive-babel-russian
+    earg texlive-collection-langcyrillic
+  fi
+
+  if has_value with_setuidless_sshd || has_value with_custom_sshd; then
+    earg openssh-server
+  fi
+
+  earg gcc kernel-devel
+
+  if test rhea = "${NAME}"; then
+    earg libguestfs-tools
+  fi
+
+  if has_value container_names; then
+    earg debootstrap
+  fi
+
+  if has_value with_remote_ssh_unlock; then
+    earg dracut-network
+  fi
+
+  eval "set -- ${eargs}"
+  for i in "$@"; do
+    rpm -q --quiet "${i}" || log "Missed: ${i}"
+  done
+
+  if ! rpm -q --quiet "$@" ; then
+    log "Installing missing packages"
+    dnf install -y "$@"
+  fi
+
+  # Packages to remove
+  local eargs
+  eargs=
+
+  if test -n "${eargs}"; then
+    eval "set -- ${eargs}"
+    local status
+    status=0
+    rpm -q --quiet "$@" || status=$?
+    if test $# -gt "${status}"; then
+      cmd_log dnf remove -y "$@"
+    fi
+  fi
+
+  write_file /etc/tmux.conf "new-session${NL}"
+}
+
+setup_apt_packages() {
+  local eargs
+  eargs=
+  earg file apt-file
+  earg man-db
+  earg lzip zip unzip
+  earg apg ccrypt
+  earg screen tmux pv
+  earg git quilt
+  earg jq shellcheck
+
+  if has_value with_nginx; then
+    earg nginx-full
+    earg dehydrated ssl-cert
+  fi
+  if has_value tormed_host; then
+    earg whois
+    earg transmission-daemon
+
+    # Make sure that the default transmission-daemon never starts
+    ensure_symlink /dev/null /etc/systemd/system/transmission-daemon.service
+    if has_value file_update; then
+        systemd_unit_update=1
+    fi
+  fi
+
+  if has_value with_common_packages; then
+    earg lsyncd
+    earg dstat
+    earg libreoffice
+    #earg gvfs-bin
+    #earg libglib2.0-dev
+    #earg libgnome-keyring-dev
+    earg ffmpeg
+    earg firejail
+    earg xpra
+    #earg xephyr
+  fi
+
+  if has_value with_common_development_tools; then
+    earg python3 python
+    earg gcc g++
+    earg xauth
+  fi
+
+  if has_value with_latex; then
+    earg texlive
+    earg texlive-lang-cyrillic
+    earg texlive-lang-european
+  fi
+
+  if has_value with_setuidless_sshd || has_value with_custom_sshd; then
+    earg openssh-server
+  fi
+
+  if has_value container_names; then
+    earg systemd-container
+    earg debootstrap
+  fi
+
+  if has_value with_remote_ssh_unlock; then
+    earg dropbear-initramfs
+    #earg busybox
+  fi
+
+  local escaped_install_list
+  escaped_install_list="${eargs}"
+
+  # Remove list
+
+  eargs=
+  earg resolvconf
+  if has_value with_dev_container; then
+    earg networkd-dispatcher rsyslog
+  fi
+
+  local escaped_remove_list
+  escaped_remove_list="${eargs}"
+
+  local escaped_apt_action_list
+  escaped_apt_action_list=
+  eval "fill_apt_action_list install ${escaped_install_list}"
+  if test -n "${escaped_apt_action_list}"; then
+    log "Installing missing packages"
+    cmd_log apt-get update
+    eval "DEBIAN_FRONTEND=noninteractive \
+        cmd_log apt-get install -y ${escaped_apt_action_list}"
+  fi
+
+  escaped_apt_action_list=
+  eval "fill_apt_action_list uninstall ${escaped_remove_list}"
+  if test -n "${escaped_apt_action_list}"; then
+    log "Purging unnecessary packages ${escaped_remove_list}"
+    eval "DEBIAN_FRONTEND=noninteractive \
+        apt-get purge -y ${escaped_apt_action_list}"
+  fi
+}
+
+fill_apt_action_list() {
+  local action
+  action="$1"
+  shift
+  test $# -ne 0 || return 0
+
+  # Complication: for unknown packages dpkg-query reports an error,
+  # so parse both stdout and stderr.
+  local status_package_prefix
+  local unknown_package_message_prefix
+  status_package_prefix='#stdout '
+  unknown_package_message_prefix='dpkg-query: no packages found matching '
+
+  local output
+  output="$(dpkg-query -W --showformat \
+      '#stdout ${db:Status-Abbrev} ${Package}\n' "$@"  2>&1 || : \
+  )"
+  if test -z "${output}"; then
+    return 0
+  fi
+
+  # Parse lines in the output using herestring redirect
+  {
+    while IFS= read -r line; do
+      local package status
+      case "${line}" in
+      "${unknown_package_message_prefix}"* )
+        package="${line#"${unknown_package_message_prefix}"}"
+        case "${package}" in
+        "" | *" "*)
+          err "unexpected dpkg-query unknown package line: '${line}'"
+          ;;
+        *) ;;
+        esac
+        status='unknown'
+        ;;
+      "${status_package_prefix}"* )
+        line="${line#"${status_package_prefix}"}"
+        status="${line%%"  "*}"
+        package="${line#*"  "}"
+        case "${status}" in
+        ii ) status=installed ;;
+        un ) status=uninstalled ;;
+        * ) err "unexpected dpkg-query status '${status}': '${line}'" ;;
+        esac
+        case "${package}" in
+        "" | *" "*)
+          err "unexpected dpkg-query status: '${line}'"
+          ;;
+        *) ;;
+        esac
+        ;;
+      *) err "unexpected dpkg-query output: ${line}" ;;
+      esac
+      case "${action}" in
+      install)
+        if test installed = "${status}"; then
+          continue
+        fi
+        ;;
+      uninstall)
+        # purge both installed packages and packages with config-files
+        if test installed != "${status}" -a config-files != "${status}"; then
+          continue
+        fi
+        ;;
+      *) err "bad action: ${action}" ;;
+      esac
+      escape_for_shell "${package}"
+      escaped_apt_action_list="${escaped_apt_action_list} ${R}"
+    done
+  } << EOF
+${output}
+EOF
+}
+
+start_generator_write() {
+  multi_user_wants_list=
+  basic_target_wants_list=
+  systemd_unit_update=
+  service_start_list=
+  service_try_restart_list=
+  service_restart_list=
+  service_reload_list=
+  systemd_tmpfile_lines=
+}
+
+add_multi_user_wants() {
+  local eargs
+  eargs="${multi_user_wants_list}"
+  earg "$@"
+  multi_user_wants_list="${eargs}"
+}
+
+add_basic_target_wants() {
+  local eargs
+  eargs="${basic_target_wants_list}"
+  earg "$@"
+  basic_target_wants_list="${eargs}"
+}
+
+add_service_start() {
+  local eargs
+  eargs="${service_start_list}"
+  earg "$@"
+  service_start_list="${eargs}"
+}
+
+add_service_try_restart() {
+  local eargs
+  eargs="${service_try_restart_list}"
+  earg "$@"
+  service_try_restart_list="${eargs}"
+}
+
+add_service_restart() {
+  local eargs
+  eargs="${service_restart_list}"
+  earg "$@"
+  service_restart_list="${eargs}"
+}
+
+add_service_reload() {
+  local eargs
+  eargs="${service_reload_list}"
+  earg "$@"
+  service_reload_list="${eargs}"
+}
+
+add_systemd_tmpfile_entry() {
+  systemd_tmpfile_lines="${systemd_tmpfile_lines}$1${NL}"
+}
+
+print_wants_list() {
+  local target
+  target="$1"
+  shift
+  test $# -ne 0 || return 0
+  local lines i
+  lines=
+  pl "[Unit]"
+  for i in "$@"; do
+    pl "Wants=${i}"
+  done
+  p_systemd_drop_in "${target}" "${lines}"
+}
+
+# shellcheck disable=SC2120
+finish_generator_write() {
+  if has_value systemd_tmpfile_lines; then
+    write_file /etc/tmpfiles.d/tliset.conf "${systemd_tmpfile_lines}"
+    if has_value file_update; then
+      cmd_log systemd-tmpfiles --create /etc/tmpfiles.d/tliset.conf
+    fi
+  fi
+
+  eval "print_wants_list multi-user.target ${multi_user_wants_list}"
+  eval "print_wants_list basic.target ${basic_target_wants_list}"
+  if has_value systemd_unit_update; then
+    cmd_log systemctl daemon-reload
+  fi
+  if has_value service_restart_list; then
+    eval "cmd_log systemctl restart ${service_restart_list}"
+  fi
+  if has_value service_try_restart_list; then
+    eval "cmd_log systemctl try-restart ${service_try_restart_list}"
+  fi
+  if has_value service_reload_list; then
+    eval "cmd_log systemctl try-reload-or-restart ${service_reload_list}"
+  fi
+  if has_value service_start_list; then
+    # Use explicit loop with a status query to log nothing unless we start
+    # something.
+    local eargs
+    eargs=
+    eval "set -- ${service_start_list}"
+    local service
+    for service in "$@"; do
+      if ! systemctl --quiet is-active "${service}"; then
+        earg "${service}"
+      fi
+    done
+    if test -n "${eargs}"; then
+      eval "cmd_log systemctl start ${eargs}"
+    fi
+  fi
+}
+
+# The first argument is <kind>:<subpath> where kind specifies
+# directory kind and subpath is a file path. The second argument is
+# text that should be written into the file at that path. Option -x
+# indicattes that file must be executable.
+p_file() {
+  local executable
+  executable=
+  case "$1" in
+  -x) shift; executable=1 ;;
+  *) ;;
+  esac
+  local file_kind_and_path body
+  file_kind_and_path="$1"
+  body="$2"
+  local path
+  convert_kind_path "${file_kind_and_path}"
+  path="${R}"
+
+  set --
+  if test -n "${executable}"; then
+  set -- "$@" -m 0755
+  fi
+  write_file "$@" "${path}" "${body}"
+  if test -n "${file_update}"; then
+  case "${file_kind_and_path}" in
+  service:*) systemd_unit_update=1 ;;
+  *) ;;
+  esac
+  fi
+}
+
+p_dir() {
+  local dir
+  dir="$1"
+  convert_kind_path "${dir}"
+  dir="${R}"
+  ensure_dir "${dir}"
+}
+
+p_ensure_no_file() {
+  local file
+  file="$1"
+  convert_kind_path "${file}"
+  file="${R}"
+  file_update=
+  if test -f "${file}"; then
+  cmd_log rm -f "${file}"
+  file_update=1
+  fi
+}
+
+p_ensure_no_dir() {
+  local dir
+  dir="$1"
+  convert_kind_path "${dir}"
+  dir="${R}"
+  if test -d "${dir}"; then
+  cmd_log rmdir "${file}"
+  fi
+}
+
+p_symlink() {
+  local target path
+  target="$1"
+  path="$2"
+  convert_kind_path "${path}"
+  path="${R}"
+  ensure_symlink "${target}" "${path}"
+}
+
+p_systemd_drop_in() {
+  local unit_name
+  unit_name="$1"
+  drop_in_text="$2"
+
+  p_dir "service:${unit_name}.d"
+  p_file "service:${unit_name}.d/tliset.conf" "${drop_in_text}"
+}
+
+convert_kind_path() {
+  local file_kind_and_path file_kind file_path
+  file_kind_and_path="$1"
+  file_kind="${file_kind_and_path%%:*}:"
+  file_path="${file_kind_and_path#*:}"
+  if test "x${file_path}" = "x${file_kind_and_path}"; then
+  err "the argument must start with <kind>: prefix - ${file_kind_and_path}"
+  fi
+  local dir
+  case "${file_kind}" in
+  module: ) dir='/etc/modules-load.d' ;;
+  net: ) dir='/etc/systemd/network' ;;
+  nspawn: ) dir="/etc/systemd/nspawn" ;;
+  nginx-site: ) dir="/etc/nginx/sites-enabled" ;;
+  nginx-config: ) dir="/etc/nginx/conf.d" ;;
+  service: ) dir='/etc/systemd/system' ;;
+  scripts: ) dir="/var/lib/tliset" ;;
+  sysctl: ) dir="/etc/sysctl.d" ;;
+  NetworkManager: ) dir="/etc/NetworkManager/conf.d" ;;
+  * ) err "Unknown file kind - ${file_kind_and_path}" ;;
+  esac
+  ensure_dir "${dir}"
+
+  if test -z "${file_path}"; then
+  R="${dir}"
+  return 0
+  fi
+  case "${file_path}" in
+  /*) err "the path part must be a relative path: ${file_kind_and_path}" ;;
+  *) ;;
+  esac
+  R="${dir}/${file_path}"
+}
+
+p_mask_service() {
+  p_symlink /dev/null "service:$1"
+}
+
+setup_kernel_parameters() {
+  if test -n "${with_zswap}"; then
+    local unit
+    unit=tliset-zswap.service
+    p_file "service:${unit}" '
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "cd /sys/module/zswap/parameters && printf 1 > enabled && printf 30 > max_pool_percent && printf z3fold > zpool"
+ExecStop=/bin/sh -c "printf 0 > /sys/module/zswap/parameters/enabled"
+RemainAfterExit=yes
+'
+    add_basic_target_wants "${unit}"
+  fi
+  setup_zram
+
+  local lines
+  lines=""
+  if test -n "${custom_user_watches_count}"; then
+    pl "fs.inotify.max_user_watches=${custom_user_watches_count}"
+  fi
+
+  if test -n "${lines}"; then
+    p_file sysctl:50-tliset.conf "${lines}"
+  else
+    p_ensure_no_file sysctl:50-tliset.conf
+  fi
+}
+
+setup_initramfs() {
+  if has_value with_remote_ssh_unlock; then
+    if has_value kind_ubuntu; then
+      # This is based on
+      # https://hamy.io/post/0009/how-to-install-luks-encrypted-ubuntu-18.04.x-server-and-enable-remote-unlocking/
+      # After the login at boot time use cryptroot-unlock command
+      write_file /etc/dropbear-initramfs/config '
+DROPBEAR_OPTIONS="-p 21"
+'
+      if has_value file_update; then
+        update_initram=1
+      fi
+
+      local authorized_keys
+      authorized_keys=
+      if test -s /root/.ssh/authorized_keys; then
+        authorized_keys="$( \
+            grep '^ssh-rsa ' /root/.ssh/authorized_keys \
+        )${NL}"
+      fi
+      if is_empty authorized_keys; then
+        warn "/root/.ssh/authorized_keys does not have RSA keys for dropbear" \
+            "boot unlock"
+      fi
+      write_file /etc/dropbear-initramfs/authorized_keys "${authorized_keys}"
+      if has_value file_update; then
+        cmd_log update-initramfs -u
+      fi
+    elif has_value kind_fedora; then
+      # Use systemd-tty-ask-password-agent during the login
+      if test ! -d /usr/lib/dracut/modules.d/46sshd ; then
+        err "Install https://github.com/gsauthof/dracut-sshd"
+      fi
+
+      # Use systemd-networkd at boot
+      write_file /etc/dracut.conf.d/tliset.conf '
+add_dracutmodules+="systemd-networkd"
+omit_dracutmodules+="ifcfg network-legacy network-manager"
+'
+      if test -n "${file_update}"; then
+        cmd_log dracut -f -v
+      fi
+    else
+      err "Unsupported OS kind for with_remote_ssh_unlock"
+    fi
+  fi
+}
+
+setup_zram() {
+  test -n "${zram_size}" || return 0
+
+  log "Checking zram"
+
+  local alg_arg
+  alg_arg=
+  if test -n "${zram_algorithm}"; then
+  alg_arg=" --algorithm ${zram_algorithm}"
+  fi
+
+  p_file module:tliset-zram.conf "\
+zram
+"
+
+  # shellcheck disable=SC1004,SC2016
+  p_file service:tliset-zram.service '
+[Unit]
+Description=Service enabling RAM compression using zRam
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=oneshot
+Environment=SWAP_SIZE='"${zram_size}"'
+EnvironmentFile=-/run/tliset-zram-state
+ExecStart=/bin/sh -c '\''\
+set -e -u; \
+printf "" > /run/tliset-zram-state; \
+device="$(zramctl --find --size "$${SWAP_SIZE}"'"${alg_arg}"')"; \
+echo "ZRAM_DEVICE=$${device}" >> /run/tliset-zram-state; \
+/sbin/mkswap "$${device}"; \
+/sbin/swapon -p 100 "$${device}"; \
+echo "AFTER_SWAPON=1" >> /run/tliset-zram-state; \
+swappiness=; \
+read swappiness < /proc/sys/vm/swappiness; \
+echo "ORIGINAL_SWAPINESS=$${swappiness}" >> /run/tliset-zram-state; \
+printf 100 > /proc/sys/vm/swappiness'\''
+
+ExecStopPost=/bin/sh -c '\''\
+test -n "$${ORIGINAL_SWAPINESS-}" && \
+  printf %%s "$${ORIGINAL_SWAPINESS}" > /proc/sys/vm/swappiness; \
+test -n "$${AFTER_SWAPON-}" && /sbin/swapoff "$${ZRAM_DEVICE}"; \
+test -n "$${ZRAM_DEVICE-}" && zramctl --reset "$${ZRAM_DEVICE}"; \
+rm /run/tliset-zram-state'\''
+
+RemainAfterExit=yes
+'
+  add_multi_user_wants tliset-zram.service
+
+}
+
+setup_network() {
+  log "Checking network"
+  inc_log_level
+
+  # To ensure network connectivity for the following operations restart
+  # services on return.
+  local restart_systemd_networkd
+  local restart_systemd_resolved
+  restart_systemd_networkd=
+  restart_systemd_resolved=
+
+  if test -n "${with_networkd_dhcp_ipv4}"; then
+    p_file net:20-wired.network "\
+[Match]
+Name=en*
+
+[Network]
+DHCP=ipv4
+
+[DHCPv4]
+UseMTU=true
+"
+    has_value file_update && restart_systemd_networkd=1
+  fi
+
+  if test -n "${explicit_ipv6_address}"; then
+    test -n "${kind_coreos}" || err "unsupported configuration"
+    p_file net:zz-default.network "\
+[Network]
+DHCP=ipv4
+
+Address=${explicit_ipv6_address}
+Gateway=${explicit_ipv6_gateway}
+
+[DHCP]
+UseMTU=true
+UseDomains=true
+"
+    has_value file_update && restart_systemd_networkd=1
+  fi
+
+  if test rhea = "${NAME}"; then
+    p_file NetworkManager:tliset.conf "\
+[main]
+dns=dnsmasq
+rc-manager=symlink
+
+[keyfile]
+unmanaged-devices=interface-name:ve-*
+"
+    if test -n "${file_update}"; then
+      systemctl try-reload-or-restart NetworkManager
+    fi
+
+    if ! :; then
+      p_file "net:40-nspawn1.network" "\
+[Match]
+Name=*-nspawn1
+
+[Network]
+# Default to using a /24 prefix, giving up to 253 addresses per virtual network.
+Address=${dev_vz_network_prefix}.1/24
+LinkLocalAddressing=yes
+#DHCPServer=yes
+IPMasquerade=yes
+LLDP=yes
+EmitLLDP=customer-bridge
+"
+      has_value file_update && restart_systemd_networkd=1
+    fi
+  fi
+
+  if test -n "${with_stub_resolv_conf}"; then
+    ensure_symlink /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    has_value file_update && restart_systemd_resolved=1
+    add_multi_user_wants systemd-resolved.service
+  fi
+
+  if test -n "${with_forced_networkd}"; then
+    if systemctl --quiet is-enabled NetworkManager; then
+      cmd_log systemctl disable NetworkManager
+    fi
+    add_multi_user_wants systemd-resolved.service
+    add_multi_user_wants systemd-networkd.service
+
+    if systemctl --quiet is-active NetworkManager; then
+      cmd_log systemctl stop NetworkManager
+    fi
+
+    if ! systemctl --quiet is-active systemd-networkd.service; then
+      restart_systemd_networkd=1
+    fi
+    if ! systemctl --quiet is-active systemd-resolved.service; then
+      restart_systemd_network=1
+    fi
+  fi
+
+  if has_value with_dev_container; then
+    write_file "/etc/hostname" "${PARENT_NAME}-${NAME}${NL}"
+    write_file /etc/hosts "127.0.0.1 localhost ${PARENT_NAME}-${NAME}${NL}"
+
+    # Assume that the host runs systemd-resolved
+    ensure_symlink /lib/systemd/resolv.conf /etc/resolv.conf
+  fi
+
+  if has_value restart_systemd_networkd; then
+    cmd_log systemctl restart systemd-networkd.service
+    cmd_log sleep 1
+  fi
+  if has_value restart_systemd_resolved; then
+    cmd_log systemctl restart systemd-resolved.service
+  fi
+
+  dec_log_level
+}
+
+ensure_root_ssh_key() {
+  local prefix file
+  prefix="$1"
+  file="/root/.ssh/${prefix}-ed25519"
+  if test ! -s "${file}"; then
+    cmd_log mkdir -p -m 0700 /root/.ssh
+    cmd_log ssh-keygen -t ed25519 -N '' -f "${file}"
+  fi
+}
+
+setup_bergenrabbit_archive() {
+  test -n "${bergenrabbit_archive_time}" || return 0
+
+  ensure_root_ssh_key bergenrabbit-www-backup
+
+  if test manual = "${bergenrabbit_archive_time}"; then
+    return 0
+  fi
+
+  case "${bergenrabbit_archive_time}" in
+  [0-2][0-9]:[0-5][0-9]:[0-5][0-9]) ;;
+  *)
+    err "Invalid backup time spec in bergenrabbit_archive_time" \
+        "- '${bergenrabbit_archive_time}'"
+    ;;
+  esac
+
+  ensure_user -d "${bergenrabbit_archive_root}" tliset-br-archive
+  ensure_dir -m 0770 -g tliset-br-archive "${bergenrabbit_archive_root}"
+
+  p_file service:tliset-br-archive.timer "\
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+Persistent=true
+OnCalendar=${bergenrabbit_archive_time}
+"
+  p_file service:tliset-br-archive.service '
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=tliset-br-archive
+ExecStart=/var/lib/tliset/br-archive
+StandardError=journal
+StandardOutput=journal
+Type=oneshot
+
+ReadWritePaths='"${bergenrabbit_archive_root}"'
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectSystem=strict
+'
+  add_multi_user_wants "tliset-br-archive.timer"
+
+  # Script source with condition code
+  local s
+  s='#!/bin/bash
+set -e -u -o pipefail
+
+# Number of days to keep old backups in the changed dir
+max_keep_changed_days=90
+
+'
+  # On fedora change SELinux context for rsync so it is treated as
+  # a binary, not a service. As an update can reset it, do it each
+  # time we are about to run it.
+  if test -n "${kind_fedora}"; then
+    # shellcheck disable=SC2016
+    s="${s}"'
+se_context=$(stat -c %C /usr/bin/rsync)
+if [[ $se_context =~ ^[^:]*:[^:]*:([^:]*):[^:]*$ ]]; then
+  if [[ ${BASH_REMATCH[1]} != bin_t ]]; then
+    echo "Changing SE context for /usr/bin/rsync from ${BASH_REMATCH[1]} to bin_t" 1>&2
+    chcon -t bin_t /usr/bin/rsync
+  fi
+fi
+'
+  fi
+  # shellcheck disable=SC1004,SC2016
+  s="${s}"'
+
+readonly backup_root="'"${bergenrabbit_archive_root}"'"
+
+remove_list=()
+
+backup_from_host() {
+  local pod_name="$1" host_name="$2"
+  local data="$backup_root/$pod_name"
+  local changes="$backup_root/changes/$pod_name"
+  local partial="$backup_root/rsync-partial/$pod_name"
+  local dir
+  for dir in "$data" "$changes" "$partial"; do
+    if [[ ! -d "$dir" ]]; then
+      mkdir -p "$dir"
+    fi
+  done
+
+  local -a ssh_cmd=(
+    ssh -l br-backup
+    -o Ciphers=aes128-gcm@openssh.com
+    -o StrictHostKeyChecking=no
+  )
+
+  local -a rsync_args=(
+    -rlpt
+    --no-owner --no-group --omit-dir-times --omit-link-times
+    --partial-dir="$partial" --delete-after
+    --info=NAME
+    --rsh="${ssh_cmd[*]}"
+  )
+
+  local too_old_backup="$changes/$(date --date="-20 days" +%Y-%m-%d)"
+  rm -rf "$too_old_backup"
+  local changed_files
+  changed_files="$changes/$(date +%Y-%m-%d)"
+  mkdir -p "${changed_files}.srv" "${changed_files}.opt"
+
+  echo "Backing up $pod_name" >&2
+  local ok=1
+  rsync "${rsync_args[@]}" --backup --backup-dir="${changed_files}.srv" \
+    "rsync://$host_name/srv/" "$data/srv/" || ok=
+  rsync "${rsync_args[@]}" --backup --backup-dir="${changed_files}.opt" \
+    "rsync://$host_name/opt/" "$data/opt/" || ok=
+  if [[ $ok ]]; then
+  local i cur_time
+  cur_time="$(date +%s)"
+  for i in "$changes"/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].*; do
+      local file_name
+      file_name="${i##*/}"
+      dir_time="$(date --date="${file_name%%.*}" +%s)"
+      if test "$((cur_time-dir_time))" -gt "$((max_keep_changed_days*86400))"; then
+    remove_list+=("$i")
+      fi
+  done
+  fi
+
+}
+
+backup_from_host bergenrabbit bergenrabbit.net
+
+if [[ ${#remove_list[@]} -ne 0 ]]; then
+  printf -v s "\\n\\t%s" "${remove_list[@]}"
+  echo "removing older changes created more than $max_keep_changed_days days ago:$s"
+  rm -rf "${remove_list[@]}"
+fi
+
+'
+
+  write_file -m 0755 "/var/lib/tliset/br-archive" "${s}"
+
+  if test -n "${kind_fedora}"; then
+  setsebool rsync_client 1
+  fi
+}
+
+setup_services() {
+  log "Checking services"
+  inc_log_level
+
+  if has_value with_dev_container; then
+    write_file "/etc/default/locale" "LANG=C.UTF-8${NL}"
+    ensure_symlink "/lib/systemd/system/multi-user.target" \
+      "/etc/systemd/system/default.target"
+
+    # Disable unnecesary services
+    ensure_masked_service cron
+    ensure_masked_service console-getty
+
+    # The container shares the networking with the host, so disable any
+    # networking services
+    ensure_masked_service systemd-networkd
+    ensure_masked_service systemd-resolved
+    ensure_masked_service networkd-dispatcher
+  fi
+
+  if has_value with_disabled_selinux; then
+    if ! test -f /etc/selinux/config.orig; then
+      cp -a /etc/selinux/config /etc/selinux/config.orig
+    fi
+    write_file /etc/selinux/config "SELINUX=disabled${NL}"
+  fi
+
+  if has_value with_disabled_firewalld; then
+    ensure_masked_service firewalld
+  fi
+
+  setup_bergenrabbit_archive
+  setup_nginx_service
+  setup_tormed_service
+  setup_containers
+  setup_ssh_agent_service
+
+  dec_log_level
+}
+
+setup_sshd() {
+
+  has_value with_custom_sshd || has_value with_dev_container || return 0
+
+  # sshd_config lines
+  local lines
+  lines="\
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+
+X11Forwarding yes
+PrintMotd no
+
+# AcceptEnv LANG LC_*
+
+Subsystem sftp  /usr/lib/openssh/sftp-server
+"
+
+  local use_pam
+  use_pam=yes
+  if has_value with_setuidless_sshd && has_value kind_fedora; then
+    # Fedora uses setuid helper for PAM that is broken with
+    # with_setuidless_sshd
+    use_pam=no
+  #elif has_value with_dev_container; then
+  #  use_pam=no
+  fi
+  pl "UsePAM ${use_pam}"
+
+  local local_only
+  local_only=
+  if test rhea = "${NAME}"; then
+    local_only=1
+  elif has_value with_dev_container && test rhea = "${PARENT_NAME}"; then
+    local_only=1
+  fi
+
+  listen_address=
+  if has_value local_only; then
+    listen_address=127.0.0.1
+  fi
+  if has_value listen_address; then
+    pl "ListenAddress ${listen_address}"
+  fi
+  if has_value with_dev_container; then
+    pl "Port 12022"
+  fi
+
+  # User sessions
+
+  if has_value tormed_host; then
+    lines="${lines}
+Match User tormed-files
+  ChrootDirectory /var/lib/tormed/files-root
+  ForceCommand internal-sftp -u 0007
+  AllowTcpForwarding local
+  PermitOpen 127.0.0.1:9091 127.0.0.1:9093
+  PasswordAuthentication yes
+
+Match User tormed-rsync
+  ForceCommand /var/lib/tliset/tormed-rsyncd
+  AllowAgentForwarding no
+  AllowTcpForwarding no
+  AllowStreamLocalForwarding no
+  PasswordAuthentication yes
+"
+  fi
+
+  write_file /etc/ssh/sshd_config "${lines}"
+
+  local ssh_service_name
+  if has_value kind_debian || has_value kind_ubuntu; then
+    ssh_service_name=ssh
+  elif has_value kind_fedora; then
+    ssh_service_name=sshd
+  else
+    err "ssh service name is not known on this system"
+  fi
+
+  if test -n "${file_update}"; then
+    add_service_reload "${ssh_service_name}.service"
+  fi
+
+  if test -n "${with_setuidless_sshd}"; then
+    local ssh_drop_in
+    ssh_drop_in="\
+[Service]
+NoNewPrivileges=yes
+"
+    p_systemd_drop_in "${ssh_service_name}.service" "${ssh_drop_in}"
+  fi
+
+  add_multi_user_wants "${ssh_service_name}.service"
+
+  if has_value with_dev_container; then
+    ensure_user -u 1000 -s /bin/bash "${main_user}"
+    ensure_dir -m 0700 /root/.ssh
+    if test ! -s /root/.ssh/authorized_keys; then
+      local public_key
+      public_key=
+      printf '%s%s\n' "Enter ssh public key for the root access: "
+      IFS= read -r public_key || :
+      has_value public_key || err "Cannot proceed without public key"
+      if test "${#public_key}" -lt 80; then
+        err "The public key is too short: ${public_key}"
+      fi
+      # Do not note as we write conditionally on file non-existance
+      can_note_paths=
+      write_file -m 0600 /root/.ssh/authorized_keys "${public_key}${NL}"
+      can_note_paths=1
+    fi
+  fi
+}
+
+setup_ssh_agent_service() {
+  has_value with_ssh_agent_service || return 0
+
+  ensure_user tliset-ssh-agent
+  ensure_dir -g tliset-ssh-agent -u tliset-ssh-agent \
+      -m 0700 "/home/tliset-ssh-agent"
+
+  local d
+  d="/home/tliset-ssh-agent/keys"
+
+  ensure_dir -g tliset-ssh-agent -u tliset-ssh-agent -m 0700 "${d}"
+
+  add_systemd_tmpfile_entry \
+    "d /run/tliset-ssh-agent 0755 root root"
+
+  set --
+  local s
+  for s in "${d}"/*; do
+    if test -d "${s}"; then
+      case "${s##*/}" in
+      *[!a-zA-Z0-9._-]*)
+        warn "Bad sub-directory name in the directory for ssh keys - ${s}"
+        ;;
+      *)
+        set -- "$@" "${s}"
+        ;;
+      esac
+    fi
+  done
+
+  if test 0 -eq $#; then
+    warn "directory ${d} does not contain any ssh keyset sub-directories"
+    return 0
+  fi
+
+  local set_dir
+  for set_dir in "$@"; do
+    setup_ssh_agent_key_set "${set_dir}"
+  done
+}
+
+setup_ssh_agent_key_set() {
+  local key_dir
+  key_dir="$1"
+  local name
+  name="${key_dir##*/}"
+  set -- "${key_dir}/"*_key
+  if test ! -f "$1"; then
+    warn  "directory for ssh keys has no *_key files - ${key_dir}"
+    return
+  fi
+  local service_name
+  service_name="tliset-ssh-agent-${name}"
+
+  # TODO: avoif this hard-codding
+  local access_group
+  if test vivaldi-dev = "${name}"; then
+    access_group="tliset-${name}"
+  else
+    access_group="${main_user}"
+  fi
+
+  # ssh-agent insists that the client must have the same user id as the agent
+  # process. So use systemd-socket-proxyd both to support lazy loading and set
+  # custom permissions on the socket file.
+
+  add_systemd_tmpfile_entry \
+    "d /run/tliset-ssh-agent/${name} 0750 root ${access_group}"
+
+  p_file "service:${service_name}.socket" "\
+[Socket]
+ListenStream=/run/tliset-ssh-agent/${name}/socket
+"
+  add_multi_user_wants "${service_name}.socket"
+
+  # Ensure that the agent is started.
+  if test -n "${file_update}"; then
+    add_service_restart "${service_name}.socket"
+  fi
+
+  local systemd_lib
+  systemd_lib=/lib/systemd
+  if has_value kind_fedora; then
+    systemd_lib=/usr/lib/systemd
+  fi
+
+  # shellcheck disable=SC1004
+  p_file "service:${service_name}.service" '
+[Unit]
+Requires='"${service_name}"'.socket
+After='"${service_name}"'.socket
+
+[Service]
+ExecStart=/usr/bin/ssh-agent -a /tmp/agent.sock \
+  sh -c '\''ssh-add "'"${key_dir}"'"/*_key < /dev/null > /dev/null && \
+  exec '"${systemd_lib}"'/systemd-socket-proxyd /tmp/agent.sock'\''
+PrivateTmp=yes
+User=tliset-ssh-agent
+'
+  if test -n "${file_update}"; then
+    add_service_try_restart "${service_name}.service"
+  fi
+}
+
+setup_containers() {
+  test -n "${container_names}" || return 0
+
+  local container_set_dir=/var/lib/machines
+  local container_ubuntu_archive_url="http://no.archive.ubuntu.com/ubuntu/"
+  local container_name
+  local container_ubuntu_version
+  local container_user_name
+  local container_user_id
+  local container_private_users
+  local container_user_home
+  local container_macvlan
+
+  container_macvlan=
+  for container_name in ${container_names}; do
+    case "${container_name}" in
+    vivaldi-dev )
+      container_ubuntu_version=bionic
+      container_user_name=vwork
+      container_user_id=1000
+      container_private_users=1637875712:65536
+      container_user_home=/home/vwork
+      ;;
+    * ) err "unknwon container name - ${container_name}" ;;
+    esac
+    setup_nspawn_container
+  done
+}
+
+setup_nspawn_container() {
+  # check if systemd-nspawn supports --no-new-privileges
+  local systemd_after_237
+  systemd_after_237=1
+
+  local systemd_version
+  systemd_version="$(systemd-nspawn --version)"
+  local version_name version_value ignore
+  read -r version_name version_value ignore <<_EOF_
+${systemd_version}
+_EOF_
+  if test systemd = "${version_name}" -a 237 -ge "${version_value}"; then
+    systemd_after_237=
+  fi
+
+  setup_nspawn_container_tree
+
+  local home_gid
+  if has_value container_user_home; then
+    # Create group for accessing the container home as main_user
+    local container_root_uid
+    container_root_uid="${container_private_users%%:*}"
+    home_gid="${container_root_uid}"
+    : $((home_gid += container_user_id))
+    ensure_group -g "${home_gid}" "tliset-${container_name}"
+    ensure_group_member "tliset-${container_name}" "${main_user}"
+    ensure_dir -u "${container_root_uid}" -g "${home_gid}" \
+        -m 02770 "${container_user_home}"
+  fi
+
+  ensure_dir /etc/systemd/nspawn
+
+  ensure_dir "/var/lib/tliset/chroot"
+
+  local settings_dir
+  settings_dir="/var/lib/tliset/chroot/${container_name}"
+  ensure_dir "${settings_dir}"
+
+  # For now use host networking. VirtualEthernet does not work unless
+  # one disables firewalld and NetworkNanager on the host.
+  local lines
+  lines="\
+[Exec]
+Boot=on
+PrivateUsers=${container_private_users}
+"
+  if has_value systemd_after_237; then
+    pl "NoNewPrivileges=true"
+    pl "Timezone=copy"
+    pl "LinkJournal=try-guest"
+    if is_empty container_macvlan; then
+      pl "ResolvConf=off"
+    fi
+  fi
+
+  pl "[Network]"
+  if has_value container_macvlan; then
+    pl "Private=on"
+    pl "MACVLAN=${container_macvlan}"
+  else
+    pl "Private=off"
+  fi
+
+  lines="${lines}\
+[Files]
+# This cannot be used directly as the directory will have 0775 mode, not 01777
+#Bind=:/var/tmp
+
+BindReadOnly=${settings_dir}/tliset.parent_name:/etc/tliset.parent_name
+BindReadOnly=${settings_dir}/tliset.name:/etc/tliset.name
+BindReadOnly=${settings_dir}/journald.conf:/etc/systemd/journald.conf
+"
+  if test -n "${container_user_home}"; then
+    pl "Bind=${container_user_home}:/home/${container_user_name}"
+  fi
+
+  if is_empty systemd_after_237; then
+    pl "BindReadOnly=/etc/localtime:/etc/localtime"
+  fi
+
+  if test -d "/home/tliset-ssh-agent/keys/${container_name}"; then
+    pl "BindReadOnly=/run/tliset-ssh-agent/${container_name}:/run/ssh-agent"
+  fi
+
+  write_file "/etc/systemd/nspawn/${container_name}.nspawn" "${lines}"
+
+  local container_sshd_listen_address
+  container_sshd_listen_address=127.0.0.1
+  if test oberon = "${NAME}"; then
+    container_sshd_listen_address=0.0.0.0
+  fi
+
+  local container_root_uid
+  container_root_uid="${container_private_users%%:*}"
+
+  ensure_dir "/var/lib/tliset/chroot"
+  ensure_dir "/var/lib/tliset/chroot/${container_name}"
+  write_file "${settings_dir}/tliset.parent_name" "${NAME}${NL}"
+  write_file "${settings_dir}/tliset.name" "${container_name}${NL}"
+
+
+  write_file "${settings_dir}/journald.conf" "
+[Journal]
+Storage=persistent
+#ForwardToConsole=true
+#Storage=none
+"
+}
+
+setup_nspawn_container_tree() {
+  ensure_dir -m 0700 "${container_set_dir}"
+
+  test -d "${container_set_dir}/${container_name}" && return 0
+
+  log "Setting up the file tree for the container ${container_name}"
+
+  if test -z "${allow_long_running_ops}"; then
+    warn "cannot setup the file tree for ${container_name} container" \
+        "as -L option was not provided"
+    return 0
+  fi
+
+  local tmp_dir
+  tmp_dir="${container_set_dir}/.tmp.${container_name}"
+  cmd_log rm -rf "${tmp_dir}"
+
+  local version url
+  version="${container_ubuntu_version}"
+  url="${container_ubuntu_archive_url}"
+
+  local eargs
+  eargs=
+  earg debootstrap
+  earg --arch=amd64
+  earg --include=openssh-server,man-db
+  earg "${version}" "${tmp_dir}" "${url}"
+  eval "${eargs}"
+
+  can_note_paths=
+
+  write_file "${tmp_dir}/etc/apt/sources.list" "\
+###### Ubuntu Main Repos
+deb ${url} ${version} main restricted universe multiverse
+deb-src ${url} ${version} main restricted universe
+
+###### Ubuntu Update Repos
+deb ${url} ${version}-security main restricted universe multiverse
+deb ${url} ${version}-updates main restricted universe multiverse
+deb-src ${url} ${version}-security main restricted universe
+deb-src ${url} ${version}-updates main restricted universe
+"
+
+  can_note_paths=1
+
+  # Run systemd-nspawn to adjust ownership.
+
+  local eargs
+  eargs=systemd-nspawn
+  earg --directory="${tmp_dir}"
+  if has_value systemd_after_237; then
+    earg --no-new-privileges=yes
+  fi
+  earg --private-users="${container_private_users}"
+  earg --private-users-chown
+  if has_value systemd_after_237; then
+    earg --console=read-only
+  fi
+  earg /bin/sh -c ':'
+  eval "cmd_log ${eargs}"
+
+  cmd_log mv "${tmp_dir}" "${container_set_dir}/${container_name}"
+}
+
+setup_nginx_service() {
+  test -n "${with_nginx}" || return 0
+
+  local reload_nginx
+  reload_nginx=
+  write_nginx_configs
+
+  local nginx_cmd
+  nginx_cmd="/usr/sbin/nginx"
+  nginx_cmd="${nginx_cmd} -g '"
+  nginx_cmd="${nginx_cmd} daemon on;"
+  nginx_cmd="${nginx_cmd} master_process on;"
+  nginx_cmd="${nginx_cmd} pid /run/nginx/nginx.pid;"
+  nginx_cmd="${nginx_cmd}'"
+
+  local unit_fragment
+  # shellcheck disable=SC2016
+  unit_fragment='
+[Service]
+PIDFile=/run/nginx/nginx.pid
+User=www-data
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+Restart=on-failure
+RestartSec=2s
+
+ExecStartPre=
+ExecStart=
+ExecStart='"${nginx_cmd}"'
+ExecStop=
+
+KillSignal=SIGQUIT
+ExecReload=
+ExecReload=/bin/kill -s HUP $MAINPID
+
+RuntimeDirectory=nginx
+RuntimeDirectoryMode=0700
+ReadWritePaths=/var/log/nginx /var/lib/nginx
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectSystem=strict
+'
+
+  p_systemd_drop_in nginx.service "${unit_fragment}"
+  if test -n "${file_update}"; then
+    add_service_try_restart nginx.service
+  elif test -n "${reload_nginx}"; then
+    add_service_reload nginx.service
+  fi
+
+  setup_letsencrypt
+}
+
+write_nginx_configs() {
+
+  local s
+  if grep -q '^user www-data;$' /etc/nginx/nginx.conf; then
+  log "Patching /etc/nginx/nginx.conf"
+  s='s/^\(user www-data\|worker_processes auto\|pid \/run\/nginx.pid\);/#&/g'
+  sed -i -e "${s}" /etc/nginx/nginx.conf
+  reload_nginx=1
+  fi
+
+  s=
+  if test -n "${tormed_host}"; then
+    # shellcheck disable=SC2016
+    s="${s}"'
+
+limit_req_zone $binary_remote_addr zone=tormed:1m rate=5r/s;
+
+upstream transmission {
+  server 127.0.0.1:9091;
+  keepalive 4;
+}
+
+upstream transmission2 {
+  server 127.0.0.1:9093;
+  keepalive 4;
+}
+
+server {
+  server_name '"${tormed_host}"';
+  listen 80;
+  listen [::]:80;
+
+  access_log off;
+
+  location /.well-known/acme-challenge/ {
+    alias /run/acme-challenge/;
+  }
+  location / {
+    return 301 https://'"${tormed_host}"'$request_uri;
+  }
+}
+
+server {
+  server_name '"${tormed_host}"';
+  listen 443 ssl http2;
+  listen [::]:443 ssl http2;
+
+  ssl_certificate /var/lib/dehydrated/certs/host/fullchain.pem;
+  ssl_certificate_key /var/lib/dehydrated/certs/host/privkey.pem;
+  ssl_protocols TLSv1.2;
+
+  limit_req zone=tormed burst=25;
+  access_log off;
+
+  auth_basic "Restricted";
+  auth_basic_user_file /etc/tormed/htpassword/htpassword;
+
+  location / {
+    root /usr/lib/tormed/www;
+    try_files $uri $uri/ =404;
+    index index.html index.htm;
+  }
+
+  location /files/ {
+    alias /var/lib/tormed/files-root/files/;
+
+    directio 4m;
+    output_buffers 1 1m;
+
+    dav_methods PUT DELETE MKCOL COPY MOVE;
+    dav_access group:rw;
+
+    # This is for directory listing
+    dav_ext_methods PROPFIND OPTIONS;
+
+    autoindex on;
+    autoindex_exact_size off;
+    autoindex_localtime on;
+    charset utf-8;
+
+    try_files $uri $uri/ =404;
+  }
+
+  # Serve static files from the Tranmission web interface itself
+  location /transmission/web/ {
+    alias /usr/share/transmission/web/;
+    index index.html index.htm;
+  }
+
+  location /transmission2/web/ {
+    alias /usr/share/transmission/web/;
+    index index.html index.htm;
+  }
+  location /transmission/ {
+    proxy_pass          http://transmission;
+    proxy_http_version  1.1;
+    proxy_redirect      off;
+    proxy_buffering     off;
+    proxy_set_header    Host            $host;
+    proxy_set_header    X-Real-IP       $remote_addr;
+    proxy_set_header    Connection      "";
+    proxy_pass_header   X-Transmission-Session-Id;
+  }
+
+  location /transmission2/ {
+    proxy_pass          http://transmission2/transmission/;
+    proxy_http_version  1.1;
+    proxy_redirect      off;
+    proxy_buffering     off;
+    proxy_set_header    Host            $host;
+    proxy_set_header    X-Real-IP       $remote_addr;
+    proxy_set_header    Connection      "";
+    proxy_pass_header   X-Transmission-Session-Id;
+  }
+}
+'
+  fi
+
+  if has_value s; then
+    p_file "nginx-site:tliset" "${s}"
+    if has_value file_update; then
+      reload_nginx=1
+    fi
+  fi
+
+  p_ensure_no_file nginx-site:default
+  if has_value file_update; then
+    reload_nginx=1
+  fi
+}
+
+setup_tormed_service() {
+  test -n "${tormed_host}" || return 0
+
+  ensure_dir /var/lib/tormed
+
+  local home_path
+  home_path="/var/lib/tormed/files-root/files"
+  ensure_user -d "${home_path}" tormed-files
+  ensure_dir /var/lib/tormed/files-root
+  ensure_dir -m 02770 -g tormed-files "${home_path}"
+
+  # Share "home" dir with tormed-files
+  ensure_user -G tormed-files -d "${home_path}" tormed-rsync
+
+  ensure_group_member tormed-files www-data
+  if test -n "${file_update}"; then
+    # Restart nginx so the process gets the group membership
+    add_service_try_restart nginx.service
+  fi
+
+  local short_user full_user
+  for short_user in service service2; do
+  full_user="tormed-${short_user}"
+  home_path="/var/lib/tormed/${short_user}"
+  ensure_user -d "${home_path}" -G tormed-files "${full_user}"
+  ensure_dir -m 0700 -u "${full_user}" -g "${full_user}" "${home_path}"
+  done
+
+  ensure_dir /etc/tormed
+  ensure_dir -m 0750 -g www-data "/etc/tormed/htpassword"
+
+  ensure_dir /usr/lib/tormed
+  ensure_dir /usr/lib/tormed/www
+
+  # shellcheck disable=SC1004,SC2016
+  write_file -m 0755 "/var/lib/tliset/tormed-update-password" '#!/bin/sh
+set -e -u
+
+err() {
+  printf "%s\\n" "$*" >&2
+  exit 1
+}
+
+if :; then
+  test -t 0 -a -t 1 || err "both stdin and stdout must be tty"
+  stty_orig="$(stty -g)"
+  stty -echo echonl
+  IFS= read -r -p "Enter new tormed password: " password || :
+  stty "${stty_orig}"
+  if test -z "${password}"; then
+  err "Password cannot be empty"
+  fi
+  stty -echo echonl
+  IFS= read -r -p "Confirm password: " password2 || :
+  stty "${stty_orig}"
+  if test "x${password}" != "x${password2}"; then
+  err "Passwords mismatches."
+  fi
+fi
+
+salt="$(dd if=/dev/urandom bs=12 count=1 status=none | base64 -w0 | tr + .)"
+test 16 -eq ${#salt} || \
+  err "unexpected salt length ${#salt} when 16 was expected"
+
+hash="$(printf %s "$password" | mkpasswd -s -m sha-512 -R 5000 -S "$salt")"
+test 118 -eq ${#hash} || \
+  err "unexpected password hash length ${#hash} when 118 was expected"
+
+printf "%s:%s\\n" user "$hash" > /etc/tormed/htpassword/htpassword
+chmod 644 /etc/tormed/htpassword/htpassword
+
+usermod -p "${hash}" tormed-files
+'
+
+  write_file "/usr/lib/tormed/www/index.html" \
+'<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+</head>
+<body>
+<h3><a href="files/">Files</a></h3>
+<h3><a href="transmission/web/">Tranmission web interface</a></h3>
+</body>
+</html>
+'
+
+  for short_user in service service2; do
+    full_user="tormed-${short_user}"
+    home_path="/var/lib/tormed/${short_user}"
+    service_name="tormed-${short_user}"
+    p_file "service:${service_name}.service" '
+[Service]
+Type=simple
+User='"${full_user}"'
+
+Restart=on-failure
+
+ExecStart=/var/lib/tliset/tormed-start-transmission
+
+WorkingDirectory='"${home_path}"'
+ReadWritePaths='"${home_path}"' /var/lib/tormed/files-root/files
+BindPaths=/var/lib/tormed/files-root/files:/files
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectSystem=strict
+'
+    if test -n "${file_update}"; then
+      add_service_restart "${service_name}.service"
+    fi
+    add_multi_user_wants "${service_name}.service"
+  done
+
+  write_file -m 0755 "/var/lib/tliset/tormed-start-transmission" <<'EOF'
+#!/bin/sh
+
+set -e -u
+
+user="$(id -un)"
+case "${user}" in
+tormed-service )
+  suffix=
+  peer_port="25602"
+  rpc_port="9091"
+  ;;
+tormed-service2 )
+  suffix=2
+  peer_port="51412"
+  rpc_port="9093"
+  ;;
+esac
+
+settings_file=settings.json
+
+# Transmission only uses the umask for directories in the config dir.
+# It uses the file mode 600 for the state management files and 660/770
+# for downloaded files and directories.
+umask 002
+
+if test ! -s "${settings_file}"; then
+  echo "Creating defaults tranmission options in ${settings_file}" >&2
+
+  default_settings='{
+  "blocklist-enabled": false,
+  "download-dir": "/files",
+  "incomplete-dir": "/files/incomplete'"${suffix}"'",
+  "incomplete-dir-enabled": false,
+  "encryption": 1,
+  "max-peers-global": 200,
+  "pex-enabled": 1,
+  "port-forwarding-enabled": false,
+  "ratio-limit": 2,
+  "ratio-limit-enabled": true,
+  "speed-limit-down": 2000,
+  "speed-limit-down-enabled": true,
+  "speed-limit-up": 500,
+  "speed-limit-up-enabled": true,
+  "umask": 2
+}
+'
+  ( umask 077 && printf %s "${default_settings}" > "${settings_file}" )
+fi
+
+jq_filter='.
+| .["peer-port"] = '"${peer_port}"'
+| .["rpc-authentication-required"] = false
+| .["rpc-bind-address"] = "127.0.0.1"
+| .["rpc-enabled"] = true
+| .["rpc-host-whitelist-enabled"] = false
+| .["rpc-port"] = '"${rpc_port}"'
+| .["rpc-username"] = ""
+| .["rpc-password"] = ""
+| .["rpc-whitelist-enabled"] = false
+| .["umask"] = 7
+'
+
+settings="$(jq "${jq_filter}" "${settings_file}")"
+printf %s "${settings}" > "${settings_file}"
+
+exec /usr/bin/transmission-daemon -f --log-error -g .
+#exec /usr/bin/transmission-daemon -f --log-debug -g .
+EOF
+
+}
+
+setup_letsencrypt() {
+  test -n "${webserver_certificate_domains}" || return 0
+
+  ensure_dir /var/lib/dehydrated
+  ensure_dir -g www-data -m 0770 /var/lib/dehydrated/accounts
+  ensure_dir -g www-data -m 0770 /var/lib/dehydrated/certs
+  ensure_dir -u www-data -g www-data -m 0755 /var/lib/dehydrated/certs/host
+  ensure_dir -g www-data -m 0770 /var/lib/dehydrated/state
+
+  local cert_dir
+  cert_dir="/var/lib/dehydrated/certs/host"
+  if test ! -s "${cert_dir}/fullchain.pem" ; then
+  cmd_log cp /etc/ssl/private/ssl-cert-snakeoil.key \
+      "${cert_dir}/privkey.pem"
+  cmd_log cp /etc/ssl/certs/ssl-cert-snakeoil.pem \
+      "${cert_dir}/fullchain.pem.tmp"
+  cmd_log chown www-data:www-data \
+      "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem.tmp"
+  cmd_log mv "${cert_dir}/fullchain.pem.tmp" "${cert_dir}/fullchain.pem"
+  fi
+
+  local s
+  s='
+CA=https://acme-v02.api.letsencrypt.org/directory
+# Staging
+#CA=https://acme-staging-v02.api.letsencrypt.org/directory
+BASEDIR=/var/lib/dehydrated/state
+DOMAINS_TXT="/etc/dehydrated/domains.txt"
+WELLKNOWN=/run/acme-challenge
+CERTDIR="/var/lib/dehydrated/certs"
+ACCOUNTDIR="/var/lib/dehydrated/accounts"
+
+# Workaround for a bug in older dehydrated
+CURL_OPTS=--http1.1
+'
+  write_file /etc/dehydrated/config "${s}"
+  write_file /etc/dehydrated/domains.txt \
+      "${webserver_certificate_domains} > host"
+
+  # shellcheck disable=SC2016
+  s='#!/bin/sh
+set -e -u
+
+dehydrated --account --accept-terms
+dehydrated --cron --force
+echo "sending NGINX signal to reload its config" >&2
+read -r nginx_pid < /run/nginx/nginx.pid
+kill -s HUP "${nginx_pid}"
+echo "all OK" >&2
+'
+
+  write_file -m 0755 /var/lib/tliset/dehydrated-renew "${s}"
+
+  p_file service:tliset-dehydrated.service '
+[Service]
+Type=simple
+User=www-data
+
+Restart=on-failure
+
+# Try twice a day until success
+RestartSec=43200
+
+ExecStart=/var/lib/tliset/dehydrated-renew
+
+RuntimeDirectory=acme-challenge
+RuntimeDirectoryMode=0700
+ReadWritePaths=/var/lib/dehydrated
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectSystem=strict
+'
+
+  p_file service:tliset-dehydrated.timer '
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+Persistent=true
+OnCalendar=*-*-7 03:00:00
+RandomizedDelaySec=86400
+'
+  if test -n "${file_update}"; then
+    add_service_restart tliset-dehydrated.timer
+  fi
+  add_multi_user_wants "tliset-dehydrated.timer"
+
+}
+
+run_setup() {
+  determine_os
+
+  read_tliset_name
+
+  get_host_options
+
+  if has_value with_dev_container; then
+    read_tliset_parent_name
+  fi
+
+  begin_tliset
+
+  start_generator_write
+
+  setup_network
+
+  # Setup sshd before we try to setup sshd packages to have sshd_config ready
+  # before apt install and starts sshd.
+  setup_sshd
+
+  if is_empty under_qubes; then
+    setup_packages
+  fi
+
+  setup_kernel_parameters
+  setup_initramfs
+  setup_services
+
+  finish_generator_write
+
+  end_tliset
+
+  log "Done."
+}
+
+for arg_name in "$@"; do
+  # check for name=value pattern and call readonly to initialize the
+  # variable.
+  var_name="${arg_name%%=*}"
+  if test "x${var_name}" = "x${arg_name}"; then
+    err "All arguments should have name=value form - $*"
+  fi
+  readonly "${arg_name}"
+done
+
+run_setup
