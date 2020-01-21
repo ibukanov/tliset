@@ -4,6 +4,8 @@
 readonly NL='
 '
 
+readonly DEFAULT_IFS="${IFS}"
+
 # Variable to return the results
 R=
 
