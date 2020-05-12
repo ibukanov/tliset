@@ -12,7 +12,7 @@ set -u -e
 LANG=C.UTF-8
 export LANG
 
-valid_primary_host_names="bergenrabbit.net oberon r2 r4.mir2.org rhea test-br"
+valid_primary_host_names="bergenrabbit.net oberon r2.mir2.org r4.mir2.org rhea test-br"
 valid_chroot_host_names="vivaldi-dev"
 valid_host_names="${valid_primary_host_names} ${valid_chroot_host_names}"
 
@@ -36,6 +36,7 @@ get_host_options() {
 
   # Main user - must be when needed
   unset main_user
+  main_user_id=1000
 
   with_dev_container=
 
@@ -48,37 +49,45 @@ get_host_options() {
 
   with_nginx=
   tormed_host=
+  with_game_access=
 
   bergenrabbit_archive_time=
   bergenrabbit_archive_root=
 
   with_stub_resolv_conf=
   with_forced_networkd=
-  with_networkd_dhcp_ipv4=
-  with_resolved_disabled_dnssec=
   with_encrypted_dns=
 
   explicit_ipv6_address=
   explicit_ipv6_gateway=
 
   webserver_certificate_domains=
-
+  
   readonly dev_vz_network_prefix="192.168.97"
 
   container_names=
 
   case "${NAME}" in
   bergenrabbit.net )
-    zram_size=1024M
+    zram_size=3072M
     zram_algorithm=lz4
     ;;
-  r2 )
-    bergenrabbit_archive_time=03:00:02
-    bergenrabbit_archive_root=/area/backup
-    explicit_ipv6_address="2001:41d0:e:696::1/64"
-    explicit_ipv6_gateway="2001:41d0:e:6ff:ff:ff:ff:ff"
-    zram_size=512M
+  r2.mir2.org )
+    bergenrabbit_archive_time=01:40:00
+    bergenrabbit_archive_root=/srv/backup/br
+    #explicit_ipv6_address="2001:41d0:e:696::1/64"
+    #explicit_ipv6_gateway="2001:41d0:e:6ff:ff:ff:ff:ff"
+    zram_size=3072M
+    zram_algorithm=lz4
+    with_stub_resolv_conf=1
+    with_forced_networkd=1
+    with_custom_sshd=1
+    #with_remote_ssh_unlock=1
+    with_nginx=1
+    enable_tormed media.mir2.org
+    with_game_access=1
     ;;
+
   r4.mir2.org )
     zram_size=8192M
     zram_algorithm=lz4hc
@@ -110,8 +119,7 @@ get_host_options() {
 
     with_stub_resolv_conf=1
     with_forced_networkd=1
-    with_networkd_dhcp_ipv4=1
-    with_resolved_disabled_dnssec=1
+    with_encrypted_dns=1
 
     container_names=vivaldi-dev
       ;;
@@ -122,8 +130,8 @@ get_host_options() {
     zram_size=28G
     zram_algorithm=lz4hc
 
-    with_stub_resolv_conf=1
-    with_encrypted_dns=1
+    #with_stub_resolv_conf=1
+    #with_encrypted_dns=1
 
     custom_user_watches_count="$((768*1025))"
     with_ssh_agent_service=1
@@ -362,18 +370,18 @@ ensure_dir() {
 
   local dir
   for dir in "$@"; do
-    test -n "${dir}" || err "directory cannot be empty"
+    test -n "${dir}" || err "directory path cannot be empty"
     test "x${dir}" = "x${dir%/}" || \
-        err "directory must not end with slash - ${dir}"
+        err "directory path must not end with slash - ${dir}"
     test "x${dir}" != "x${dir#/}" || \
-        err "directory must be an absolute path - ${dir}"
+        err "directory path must be an absolute path - ${dir}"
     if test ! -d "${dir}"; then
-        test ! -e "${dir}" -a ! -h "${dir}"  || \
-            err "${dir} exists and is not a directory"
-        cmd_log mkdir -m "${mode}" "${dir}"
+      test ! -e "${dir}" -a ! -h "${dir}"  || \
+	  err "${dir} exists and is not a directory"
+      cmd_log mkdir -m "${mode}" "${dir}"
     else
-        test ! -h "${dir}" || \
-            err "${path} exists and is a symbilic link, not a directory - ${dir}"
+      test ! -h "${dir}" || \
+          err "${path} exists and is a symbilic link, not a directory - ${dir}"
     fi
     local s
     s="$(find "${dir}" \
@@ -547,16 +555,20 @@ ensure_group() {
 }
 
 ensure_user() {
-  local home_dir groups shell uid
+  local create_home home_dir group groups shell uid
+  create_home=
   home_dir=
+  group=
   groups=
   shell=
   uid=
   local opt OPTIND
-  while getopts :d:G:s:u: opt; do
+  while getopts :d:g:G:ms:u: opt; do
     case "${opt}" in
     d) home_dir="${OPTARG}" ;;
+    g) group="${OPTARG}" ;;
     G) groups="${OPTARG}" ;;
+    m) create_home=1 ;;
     s) shell="${OPTARG}" ;;
     u) uid="${OPTARG}" ;;
     *) getopts_err "${opt}" ;;
@@ -569,9 +581,17 @@ ensure_user() {
   local s
   s="$(getent passwd "${user}" 2>/dev/null || :)"
   if test -z "${s}"; then
-    set -- -M
+    set --
+    if has_value create_home; then
+      set -- "$@" -m
+    else
+      set -- "$@" -M
+    fi
     if has_value home_dir; then
       set -- "$@" -d "${home_dir}"
+    fi
+    if has_value group; then
+      set -- "$@" -g "${group}"
     fi
     if has_value groups; then
       set -- "$@" -G "${groups}"
@@ -613,6 +633,15 @@ ensure_group_member() {
     cmd_log usermod -aG "${group}" "${user}"
     file_update=1
   fi
+}
+
+read_user_home() {
+  local user
+  user="$1"
+  local s
+  s="$(getent passwd "${user}")"
+  s="${s#*:*:*:*:*:}"
+  R="${s%%:*}"
 }
 
 read_tliset_name() {
@@ -659,6 +688,7 @@ read_tliset_parent_name() {
 enable_tormed() {
   local name
   name="$1"
+  with_nginx=1
   webserver_certificate_domains="${webserver_certificate_domains}${webserver_certificate_domains:+ }${name}"
   tormed_host="${name}"
 }
@@ -788,9 +818,10 @@ setup_rpm_packages() {
     earg tigervnc
     earg pcp-system-tools strace
     earg xclip xorg-x11-apps
-    earg xpra
+    #earg xpra
     earg xorg-x11-server-Xephyr
     earg openssh-askpass
+    earg xfce4-terminal
 
     # filesystems
     earg udftools inotify-tools fdupes fslint mtools
@@ -800,6 +831,8 @@ setup_rpm_packages() {
 
     # Recovery tools
     earg ddrescue foremost scalpel testdisk
+
+    earg hdparm
 
     # Graphs
     earg graphviz graphviz-doc
@@ -897,11 +930,12 @@ setup_apt_packages() {
   eargs=
   earg file apt-file
   earg man-db
-  earg lzip zip unzip
+  earg rsync lzip zip unzip
   earg apg ccrypt
   earg screen tmux pv
-  earg git quilt
+  earg git quilt guilt
   earg jq shellcheck
+  earg wget curl
 
   if has_value with_nginx; then
     earg nginx-full
@@ -927,7 +961,7 @@ setup_apt_packages() {
     #earg libgnome-keyring-dev
     earg ffmpeg
     earg firejail
-    earg xpra
+    #earg xpra
     #earg xephyr
   fi
 
@@ -957,6 +991,11 @@ setup_apt_packages() {
     #earg busybox
   fi
 
+  if has_value with_game_access; then
+    earg tigervnc-common tigervnc-standalone-server
+    earg task-lxde-desktop ratpoison
+  fi
+
   local escaped_install_list
   escaped_install_list="${eargs}"
 
@@ -966,6 +1005,14 @@ setup_apt_packages() {
   earg resolvconf
   if has_value with_dev_container; then
     earg networkd-dispatcher rsyslog
+    earg wpasupplicant
+    earg avahi-daemon
+    earg modemmanager
+    earg udisks2
+    earg cups-daemon
+    earg unattended-upgrades
+    earg gvfs-common
+    earg at-spi2-core
   fi
 
   local escaped_remove_list
@@ -987,6 +1034,7 @@ setup_apt_packages() {
     log "Purging unnecessary packages ${escaped_remove_list}"
     eval "DEBIAN_FRONTEND=noninteractive \
         apt-get purge -y ${escaped_apt_action_list}"
+    cmd_log apt-get autoremove -y
   fi
 }
 
@@ -1033,6 +1081,7 @@ fill_apt_action_list() {
         case "${status}" in
         ii ) status=installed ;;
         un ) status=uninstalled ;;
+        rc ) status=config-files ;;
         * ) err "unexpected dpkg-query status '${status}': '${line}'" ;;
         esac
         case "${package}" in
@@ -1052,7 +1101,7 @@ fill_apt_action_list() {
         ;;
       uninstall)
         # purge both installed packages and packages with config-files
-        if test installed != "${status}" -a config-files != "${status}"; then
+        if test installed != "${status}" && test config-files != "${status}"; then
           continue
         fi
         ;;
@@ -1120,7 +1169,7 @@ add_service_reload() {
 }
 
 add_systemd_tmpfile_entry() {
-  systemd_tmpfile_lines="${systemd_tmpfile_lines}$1${NL}"
+  systemd_tmpfile_lines="${systemd_tmpfile_lines}$*${NL}"
 }
 
 print_wants_list() {
@@ -1249,12 +1298,18 @@ p_symlink() {
 }
 
 p_systemd_drop_in() {
+  local path_kind
+  path_kind=service
+  if test "$1" = --user; then
+    path_kind=user-service
+    shift
+  fi
   local unit_name
   unit_name="$1"
   drop_in_text="$2"
 
-  p_dir "service:${unit_name}.d"
-  p_file "service:${unit_name}.d/tliset.conf" "${drop_in_text}"
+  p_dir "${path_kind}:${unit_name}.d"
+  p_file "${path_kind}:${unit_name}.d/tliset.conf" "${drop_in_text}"
 }
 
 convert_kind_path() {
@@ -1275,6 +1330,7 @@ convert_kind_path() {
   service: ) dir='/etc/systemd/system' ;;
   scripts: ) dir="/var/lib/tliset" ;;
   sysctl: ) dir="/etc/sysctl.d" ;;
+  user-service: ) dir='/etc/systemd/user' ;;
   NetworkManager: ) dir="/etc/NetworkManager/conf.d" ;;
   * ) err "Unknown file kind - ${file_kind_and_path}" ;;
   esac
@@ -1325,12 +1381,12 @@ RemainAfterExit=yes
 
 setup_initramfs() {
   if has_value with_remote_ssh_unlock; then
-    if has_value kind_ubuntu; then
+    if has_value kind_ubuntu || has_value kind_debian; then
       # This is based on
       # https://hamy.io/post/0009/how-to-install-luks-encrypted-ubuntu-18.04.x-server-and-enable-remote-unlocking/
       # After the login at boot time use cryptroot-unlock command
       write_file /etc/dropbear-initramfs/config '
-DROPBEAR_OPTIONS="-p 21"
+DROPBEAR_OPTIONS="-p 21 -s -j -k -I 120"
 '
       if has_value file_update; then
         update_initram=1
@@ -1435,8 +1491,9 @@ setup_network() {
   restart_systemd_networkd=
   restart_systemd_resolved=
 
-  if test -n "${with_networkd_dhcp_ipv4}"; then
-    p_file net:20-wired.network "\
+  if test oberon = "${NAME}"; then
+    local lines
+    lines="\
 [Match]
 Name=en*
 
@@ -1446,6 +1503,17 @@ DHCP=ipv4
 [DHCPv4]
 UseMTU=true
 "
+    if has_value with_encrypted_dns; then
+      pl ""
+      pl "[Network]"
+      pl DNSOverTLS=no
+      pl DNSSECNegativeTrustAnchors=viv.osl,viv.int
+      pl DNSSEC=no
+      pl Domains=~viv.osl ~viv.int
+      pl DNSDefaultRoute=no
+    fi
+
+    p_file net:20-wired.network "${lines}"
     has_value file_update && restart_systemd_networkd=1
   fi
 
@@ -1474,7 +1542,7 @@ UseDomains=true
   fi
 
   if has_value with_forced_networkd; then
-    if systemctl --quiet is-enabled NetworkManager; then
+    if systemctl --quiet is-enabled NetworkManager 2>/dev/null; then
       cmd_log systemctl disable NetworkManager
     fi
     add_multi_user_wants systemd-resolved.service
@@ -1490,6 +1558,10 @@ UseDomains=true
     if ! systemctl --quiet is-active systemd-resolved.service; then
       restart_systemd_network=1
     fi
+    if has_value kind_debian; then
+      # TODO Make this reversable, perhaps via a generator.
+      ensure_masked_service networking.service
+    fi
   fi
 
   if has_value with_dev_container; then
@@ -1497,18 +1569,20 @@ UseDomains=true
     write_file /etc/hosts "127.0.0.1 localhost ${PARENT_NAME}-${NAME}${NL}"
 
     # ensure that /etc/resolv.conf is a plain file that can be bind-mounted
-    write_file /etc/resolv.conf ""
+    if ! test -f /etc/resolv.conf; then
+      rm -f /etc/resolv.conf
+      printf '' > /etc/resolv.conf
+    fi
   fi
 
   # Lines for resolved.conf
   local lines
   lines=
-  if has_value with_resolved_disabled_dnssec; then
-    pl DNSSEC=off
-  fi
   if has_value with_encrypted_dns; then
     pl "DNS=1.1.1.1"
     pl "DNSOverTLS=yes"
+    #pl "DNSSEC=allow-downgrade"
+    pl "DNSSEC=no"
     pl "Domains=~."
   fi
 
@@ -1538,11 +1612,16 @@ setup_network_manager() {
     local reload_network_manager
     reload_network_manager=
 
+    if test -h /etc/resolv.conf; then
+      cmd_log rm -f /etc/resolv.conf
+      cmd_log touch /etc/resolv.conf
+    fi
+
     p_file NetworkManager:tliset.conf "\
 [main]
-#dns=dnsmasq
-dns=systemd-resolved
-rc-manager=unmanaged
+dns=dnsmasq
+#dns=systemd-resolved
+rc-manager=file
 
 [keyfile]
 unmanaged-devices=interface-name:ve-*
@@ -1592,14 +1671,13 @@ if test up = "${action}"; then
     cmd_log resolvectl domain "${interface}" "$@"
   fi
 
-  case "${interface}" in
-  tun[0-9]* )
-    if test 172.16.2.1 = "${IP4_GATEWAY}"; then
-      # Vivaldi VPN
-      cmd_log resolvectl domain "${interface}" ~viv.osl ~viv.int
-      cmd_log resolvectl dnsovertls "${interface}" no
-      cmd_log resolvectl default-route "${interface}" no
-    fi
+  case "${IP4_GATEWAY}" in
+  10.20.80.254 | 172.16.2.1)
+    # Vivaldi Oslo Office or Oslo VPN
+    cmd_log resolvectl domain "${interface}" ~viv.osl ~viv.int
+    cmd_log resolvectl dnsovertls "${interface}" no
+    cmd_log resolvectl dnssec "${interface}" no
+    cmd_log resolvectl default-route "${interface}" no
     ;;
   esac
 fi
@@ -1645,6 +1723,7 @@ setup_bergenrabbit_archive() {
   esac
 
   ensure_user -d "${bergenrabbit_archive_root}" tliset-br-archive
+  ensure_dir "${bergenrabbit_archive_root%/*}"
   ensure_dir -m 0770 -g tliset-br-archive "${bergenrabbit_archive_root}"
 
   p_file service:tliset-br-archive.timer "\
@@ -1792,6 +1871,7 @@ setup_services() {
     # Disable unnecesary services
     ensure_masked_service cron
     ensure_masked_service console-getty
+    ensure_masked_service apache2.service
 
     # The container shares the networking with the host, so disable any
     # networking services
@@ -1814,6 +1894,7 @@ setup_services() {
   setup_bergenrabbit_archive
   setup_nginx_service
   setup_tormed_service
+  setup_game_access_service
   setup_containers
   setup_ssh_agent_service
 
@@ -1827,14 +1908,6 @@ setup_sshd() {
   # sshd_config lines
   local lines
   lines="\
-PasswordAuthentication no
-ChallengeResponseAuthentication no
-
-X11Forwarding yes
-PrintMotd no
-
-# AcceptEnv LANG LC_*
-
 Subsystem sftp  /usr/lib/openssh/sftp-server
 "
 
@@ -1887,6 +1960,28 @@ Match User tormed-rsync
   PasswordAuthentication yes
 "
   fi
+
+  if has_value with_game_access; then
+    lines="${lines}
+Match User game
+  ChrootDirectory /home/game
+  ForceCommand internal-sftp -u 0007
+  AllowTcpForwarding all
+  AllowStreamLocalForwarding all
+  PasswordAuthentication yes
+"
+  fi
+
+  lines="${lines}
+Match All
+  PasswordAuthentication no
+  ChallengeResponseAuthentication no
+
+  X11Forwarding yes
+  PrintMotd no
+
+# AcceptEnv LANG LC_*
+"
 
   write_file /etc/ssh/sshd_config "${lines}"
 
@@ -1946,9 +2041,6 @@ setup_ssh_agent_service() {
 
   ensure_dir -g tliset-ssh-agent -u tliset-ssh-agent -m 0700 "${d}"
 
-  add_systemd_tmpfile_entry \
-    "d /run/tliset-ssh-agent 0755 root root"
-
   set --
   local s
   for s in "${d}"/*; do
@@ -1997,11 +2089,11 @@ setup_ssh_agent_key_set() {
   fi
 
   # ssh-agent insists that the client must have the same user id as the agent
-  # process. So use systemd-socket-proxyd both to support lazy loading and set
-  # custom permissions on the socket file.
+  # process. So use systemd-socket-proxyd both to support lazy loading and
+  # to rely on path permissions for access control.
 
   add_systemd_tmpfile_entry \
-    "d /run/tliset-ssh-agent/${name} 0750 root ${access_group}"
+    d "/run/tliset-ssh-agent/${name}" 0750 root "${access_group}"
 
   p_file "service:${service_name}.socket" "\
 [Socket]
@@ -2040,6 +2132,7 @@ User=tliset-ssh-agent
 
 setup_containers() {
   test -n "${container_names}" || return 0
+
 
   local container_set_dir=/var/lib/machines
   local container_ubuntu_archive_url="http://no.archive.ubuntu.com/ubuntu/"
@@ -2084,7 +2177,7 @@ _EOF_
 
   setup_nspawn_container_tree
 
-  local home_gid
+  local home_gid sockets_dir
   if has_value container_user_home; then
     # Create group for accessing the container home as main_user
     local container_root_uid
@@ -2093,8 +2186,9 @@ _EOF_
     : $((home_gid += container_user_id))
     ensure_group -g "${home_gid}" "tliset-${container_name}"
     ensure_group_member "tliset-${container_name}" "${main_user}"
-    ensure_dir -u "${container_root_uid}" -g "${home_gid}" \
-        -m 02770 "${container_user_home}"
+    sockets_dir="/run/tliset-container/${container_name}/sockets"
+    add_systemd_tmpfile_entry \
+      d "${sockets_dir}" 0770 root "tliset-${container_name}"
   fi
 
   ensure_dir /etc/systemd/nspawn
@@ -2144,8 +2238,8 @@ BindReadOnly=${settings_dir}/journald.conf:/etc/systemd/journald.conf
     pl "BindReadOnly=/etc/resolv.conf:/etc/resolv.conf"
   fi
 
-  if test -n "${container_user_home}"; then
-    pl "Bind=${container_user_home}:/home/${container_user_name}"
+  if has_value container_user_home; then
+    pl "Bind=${sockets_dir}:/run/host-sockets"
   fi
 
   if is_empty systemd_after_237; then
@@ -2158,12 +2252,6 @@ BindReadOnly=${settings_dir}/journald.conf:/etc/systemd/journald.conf
 
   write_file "/etc/systemd/nspawn/${container_name}.nspawn" "${lines}"
 
-  local container_sshd_listen_address
-  container_sshd_listen_address=127.0.0.1
-  if test oberon = "${NAME}"; then
-    container_sshd_listen_address=0.0.0.0
-  fi
-
   local container_root_uid
   container_root_uid="${container_private_users%%:*}"
 
@@ -2171,7 +2259,6 @@ BindReadOnly=${settings_dir}/journald.conf:/etc/systemd/journald.conf
   ensure_dir "/var/lib/tliset/chroot/${container_name}"
   write_file "${settings_dir}/tliset.parent_name" "${NAME}${NL}"
   write_file "${settings_dir}/tliset.name" "${container_name}${NL}"
-
 
   write_file "${settings_dir}/journald.conf" "
 [Journal]
@@ -2456,10 +2543,10 @@ setup_tormed_service() {
 
   local short_user full_user
   for short_user in service service2; do
-  full_user="tormed-${short_user}"
-  home_path="/var/lib/tormed/${short_user}"
-  ensure_user -d "${home_path}" -G tormed-files "${full_user}"
-  ensure_dir -m 0700 -u "${full_user}" -g "${full_user}" "${home_path}"
+    full_user="tormed-${short_user}"
+    home_path="/var/lib/tormed/${short_user}"
+    ensure_user -d "${home_path}" -G tormed-files "${full_user}"
+    ensure_dir -m 0700 -u "${full_user}" -g "${full_user}" "${home_path}"
   done
 
   ensure_dir /etc/tormed
@@ -2623,8 +2710,51 @@ EOF
 
 }
 
+setup_game_access_service() {
+  has_value with_game_access || return 0
+
+  local home_path
+  home_path="/home/game/top"
+  ensure_group game
+  ensure_dir -m 0750 -g game "${home_path%/*}"
+  ensure_user -m -d "${home_path}" -g game -s /bin/bash game
+  
+  local display
+  display=:7
+
+  local service_name=tliset-game-vnc
+  p_file "service:${service_name}.service" '
+[Service]
+Type=simple
+User=game
+
+Restart=always
+RestartSec=2s
+
+PAMName=login
+PIDFile='"${home_path}"'/.vnc/%H'"${display}"'.pid
+ExecStartPre=/bin/sh -c "/usr/bin/tigervncserver -kill '"${display}"' > /dev/null 2>&1 || :"
+ExecStart=/usr/bin/tigervncserver '"${display}"' -alwaysshared -fg -SecurityType TLSVnc -geometry 1920x1080 -depth 32 -dpi 120
+ExecStop=/usr/bin/tigervncserver -kill '"${display}"'
+
+WorkingDirectory='"${home_path}"'
+ReadWritePaths='"${home_path}"'
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectSystem=strict
+'
+  if test -n "${file_update}"; then
+    add_service_restart "${service_name}.service"
+  fi
+  add_multi_user_wants "${service_name}.service"
+}
+
 setup_letsencrypt() {
-  test -n "${webserver_certificate_domains}" || return 0
+  has_value webserver_certificate_domains || return 0
 
   ensure_dir /var/lib/dehydrated
   ensure_dir -g www-data -m 0770 /var/lib/dehydrated/accounts
