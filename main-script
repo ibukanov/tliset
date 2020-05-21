@@ -12,7 +12,7 @@ set -u -e
 LANG=C.UTF-8
 export LANG
 
-valid_primary_host_names="bergenrabbit.net oberon r2.mir2.org r4.mir2.org rhea test-br"
+valid_primary_host_names="bergenrabbit.net oberon r2.mir2.org r3.mir2.org rhea test-br"
 valid_chroot_host_names="vivaldi-dev"
 valid_host_names="${valid_primary_host_names} ${valid_chroot_host_names}"
 
@@ -51,8 +51,8 @@ get_host_options() {
   tormed_host=
   with_game_access=
 
-  bergenrabbit_archive_time=
-  bergenrabbit_archive_root=
+  lms_archive_time=
+  lms_archive_root=
 
   with_stub_resolv_conf=
   with_forced_networkd=
@@ -73,8 +73,8 @@ get_host_options() {
     zram_algorithm=lz4
     ;;
   r2.mir2.org )
-    bergenrabbit_archive_time=01:40:00
-    bergenrabbit_archive_root=/srv/backup/br
+    lms_archive_time=01:40:00
+    lms_archive_root=/srv/backup/br
     #explicit_ipv6_address="2001:41d0:e:696::1/64"
     #explicit_ipv6_gateway="2001:41d0:e:6ff:ff:ff:ff:ff"
     zram_size=3072M
@@ -88,21 +88,21 @@ get_host_options() {
     with_game_access=1
     ;;
 
-  r4.mir2.org )
-    zram_size=8192M
-    zram_algorithm=lz4hc
+  r3.mir2.org )
+    lms_archive_time=01:50:00
+    lms_archive_root=/srv/backup/lms
+    #explicit_ipv6_address="2001:41d0:e:696::1/64"
+    #explicit_ipv6_gateway="2001:41d0:e:6ff:ff:ff:ff:ff"
+    zram_size=3072M
+    zram_algorithm=lz4
+    #with_stub_resolv_conf=1
+    #with_forced_networkd=1
     with_custom_sshd=1
-    with_setuidless_sshd=1
-    with_nginx=1
-    if test r3.mir2.org = "${NAME}"; then
-      enable_tormed media3.mir2.org
-    fi
-    if test r4.mir2.org = "${NAME}"; then
-      bergenrabbit_archive_time=02:40:02
-      bergenrabbit_archive_root=/data2/br-archive
-      enable_tormed media.mir2.org
-    fi
+    #with_remote_ssh_unlock=1
+    enable_tormed media.mir2.org
+    #with_game_access=1
     ;;
+
   oberon )
     main_user=igor
     with_common_packages=1
@@ -811,7 +811,9 @@ setup_rpm_packages() {
   if has_value with_common_packages; then
     earg lsyncd
     earg terminus-fonts-console
-    earg quilt mercurial subversion
+    earg quilt subversion
+    earg git-credential-libsecret
+    #earg mercurial
     earg livecd-tools
     earg autoconf automake gcc-c++ kernel-devel chrpath
     earg geany geany-plugins-spellcheck
@@ -1463,7 +1465,7 @@ echo "ZRAM_DEVICE=$${device}" >> /run/tliset-zram-state; \
 /sbin/swapon -p 100 "$${device}"; \
 echo "AFTER_SWAPON=1" >> /run/tliset-zram-state; \
 swappiness=; \
-read swappiness < /proc/sys/vm/swappiness; \
+read -r swappiness < /proc/sys/vm/swappiness || :; \
 echo "ORIGINAL_SWAPINESS=$${swappiness}" >> /run/tliset-zram-state; \
 printf 100 > /proc/sys/vm/swappiness'\''
 
@@ -1697,57 +1699,74 @@ EOF
 
 ensure_root_ssh_key() {
   local prefix file
-  prefix="$1"
-  file="/root/.ssh/${prefix}-ed25519"
-  if test ! -s "${file}"; then
+  prefix="${1-}"
+  if test -z "${prefix}"; then
+    prefix="id"
+  fi
+  file="/root/.ssh/${prefix}_ed25519"
+  if ! test -s "${file}"; then
     cmd_log mkdir -p -m 0700 /root/.ssh
     cmd_log ssh-keygen -t ed25519 -N '' -f "${file}"
   fi
 }
 
-setup_bergenrabbit_archive() {
-  test -n "${bergenrabbit_archive_time}" || return 0
+setup_lms_archive() {
+  test -n "${lms_archive_time}" || return 0
 
-  ensure_root_ssh_key bergenrabbit-www-backup
-
-  if test manual = "${bergenrabbit_archive_time}"; then
+  if test manual = "${lms_archive_time}"; then
     return 0
   fi
 
-  case "${bergenrabbit_archive_time}" in
+  case "${lms_archive_time}" in
   [0-2][0-9]:[0-5][0-9]:[0-5][0-9]) ;;
   *)
-    err "Invalid backup time spec in bergenrabbit_archive_time" \
-        "- '${bergenrabbit_archive_time}'"
+    err "Invalid backup time spec in lms_archive_time" \
+        "- '${lms_archive_time}'"
     ;;
   esac
 
-  ensure_user -d "${bergenrabbit_archive_root}" tliset-br-archive
-  ensure_dir "${bergenrabbit_archive_root%/*}"
-  ensure_dir -m 0770 -g tliset-br-archive "${bergenrabbit_archive_root}"
+  ensure_user -d "${lms_archive_root}" tliset-lms-archive
+  ensure_dir "${lms_archive_root%/*}"
+  
+  # Initialize new skeleton structure if the directory does not exist.
+  if ! test -d "${lms_archive_root}"; then
+    local d
+    d="${lms_archive_root}.tmp"
+    cmd_log rm -rf "${d}"
+    cmd_log mkdir -m 0770 "${d}"
+    cmd_log mkdir -m 0700 "${d}/.ssh"
+    cmd_log ssh-keygen -t ed25519 -N '' -f "${d}/.ssh/id_ed25519" \
+        -C "tliset-lms-archive@${NAME} $(date +%Y-%m-%d)"
+    cmd_log chown -R tliset-lms-archive:tliset-lms-archive "${d}/.ssh"
+    cmd_log mv -T "${d}" "${lms_archive_root}"
+    cmd_log cat "${lms_archive_root}/.ssh/id_ed25519.pub"
+  fi
 
-  p_file service:tliset-br-archive.timer "\
+  # Now ensure the ownership as we no longer touch files under the directory.
+  ensure_dir -m 0770 -g tliset-lms-archive "${lms_archive_root}"
+
+  p_file service:tliset-lms-archive.timer "\
 [Unit]
 After=network-online.target
 Wants=network-online.target
 
 [Timer]
 Persistent=true
-OnCalendar=${bergenrabbit_archive_time}
+OnCalendar=${lms_archive_time}
 "
-  p_file service:tliset-br-archive.service '
+  p_file service:tliset-lms-archive.service '
 [Unit]
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=tliset-br-archive
-ExecStart=/var/lib/tliset/br-archive
+User=tliset-lms-archive
+ExecStart=/var/lib/tliset/lms-archive
 StandardError=journal
 StandardOutput=journal
 Type=oneshot
 
-ReadWritePaths='"${bergenrabbit_archive_root}"'
+ReadWritePaths='"${lms_archive_root}"'
 
 NoNewPrivileges=yes
 PrivateDevices=yes
@@ -1756,7 +1775,7 @@ ProtectKernelTunables=yes
 ProtectControlGroups=yes
 ProtectSystem=strict
 '
-  add_multi_user_wants "tliset-br-archive.timer"
+  add_multi_user_wants "tliset-lms-archive.timer"
 
   # Script source with condition code
   local s
@@ -1785,35 +1804,34 @@ fi
   # shellcheck disable=SC1004,SC2016
   s="${s}"'
 
-readonly backup_root="'"${bergenrabbit_archive_root}"'"
+readonly backup_root="'"${lms_archive_root}"'"
 
 remove_list=()
 
 backup_from_host() {
-  local pod_name="$1" host_name="$2"
-  local data="$backup_root/$pod_name"
-  local changes="$backup_root/changes/$pod_name"
-  local partial="$backup_root/rsync-partial/$pod_name"
+  local host_name="$1"
+  local files="$backup_root/${host_name}"
+  local changes="$backup_root/changes/${host_name}"
+  local partial="$backup_root/rsync-partial/${host_name}"
   local dir
-  for dir in "$data" "$changes" "$partial"; do
-    if [[ ! -d "$dir" ]]; then
-      mkdir -p "$dir"
+  for dir in "$files" "$changes" "$partial"; do
+    if ! test -d "${dir}"; then
+      mkdir -p "${dir}"
     fi
   done
 
-  local -a ssh_cmd=(
-    ssh -l br-backup
-    -o Ciphers=aes128-gcm@openssh.com
-    -o StrictHostKeyChecking=no
-  )
+  local ssh_cmd
+  ssh_cmd="ssh -l br-backup"
+  ssh_cmd="${ssh_cmd} -o Ciphers=aes128-gcm@openssh.com"
+  ssh_cmd="${ssh_cmd} -o StrictHostKeyChecking=no"
 
-  local -a rsync_args=(
-    -rlpt
-    --no-owner --no-group --omit-dir-times --omit-link-times
-    --partial-dir="$partial" --delete-after
-    --info=NAME
-    --rsh="${ssh_cmd[*]}"
-  )
+  # Argumets to rsync
+  set --
+  set -- "$@" -rlpt
+  set -- "$@" --no-owner --no-group --omit-dir-times --omit-link-times
+  set -- "$@" --partial-dir="${partial}" --delete-after
+  set -- "$@" --info=NAME
+  set -- "$@" --rsh="${ssh_cmd}"
 
   local too_old_backup="$changes/$(date --date="-20 days" +%Y-%m-%d)"
   rm -rf "$too_old_backup"
@@ -1821,28 +1839,27 @@ backup_from_host() {
   changed_files="$changes/$(date +%Y-%m-%d)"
   mkdir -p "${changed_files}.srv" "${changed_files}.opt"
 
-  echo "Backing up $pod_name" >&2
+  echo "Backing up ${host_name}" >&2
   local ok=1
-  rsync "${rsync_args[@]}" --backup --backup-dir="${changed_files}.srv" \
-    "rsync://$host_name/srv/" "$data/srv/" || ok=
-  rsync "${rsync_args[@]}" --backup --backup-dir="${changed_files}.opt" \
-    "rsync://$host_name/opt/" "$data/opt/" || ok=
-  if [[ $ok ]]; then
-  local i cur_time
-  cur_time="$(date +%s)"
-  for i in "$changes"/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].*; do
+  rsync "$@" --backup --backup-dir="${changed_files}.srv" \
+    "rsync://$host_name/srv/" "$files/srv/" || ok=
+  rsync "$@" --backup --backup-dir="${changed_files}.opt" \
+    "rsync://$host_name/opt/" "$files/opt/" || ok=
+  if test "${ok}"; then
+    local i cur_time
+    cur_time="$(date +%s)"
+    for i in "$changes"/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].*; do
       local file_name
       file_name="${i##*/}"
       dir_time="$(date --date="${file_name%%.*}" +%s)"
       if test "$((cur_time-dir_time))" -gt "$((max_keep_changed_days*86400))"; then
-    remove_list+=("$i")
+	remove_list+=("$i")
       fi
-  done
+    done
   fi
-
 }
 
-backup_from_host bergenrabbit bergenrabbit.net
+backup_from_host bergenrabbit.net
 
 if [[ ${#remove_list[@]} -ne 0 ]]; then
   printf -v s "\\n\\t%s" "${remove_list[@]}"
@@ -1852,7 +1869,7 @@ fi
 
 '
 
-  write_file -m 0755 "/var/lib/tliset/br-archive" "${s}"
+  write_file -m 0755 "/var/lib/tliset/lms-archive" "${s}"
 
   if test -n "${kind_fedora}"; then
     setsebool rsync_client 1
@@ -1891,7 +1908,7 @@ setup_services() {
     ensure_masked_service firewalld
   fi
 
-  setup_bergenrabbit_archive
+  setup_lms_archive
   setup_nginx_service
   setup_tormed_service
   setup_game_access_service
@@ -1946,7 +1963,7 @@ Subsystem sftp  /usr/lib/openssh/sftp-server
   if has_value tormed_host; then
     lines="${lines}
 Match User tormed-files
-  ChrootDirectory /var/lib/tormed/files-root
+  ChrootDirectory /srv/tormed/files-root
   ForceCommand internal-sftp -u 0007
   AllowTcpForwarding local
   PermitOpen 127.0.0.1:9091 127.0.0.1:9093
@@ -1964,7 +1981,7 @@ Match User tormed-rsync
   if has_value with_game_access; then
     lines="${lines}
 Match User game
-  ChrootDirectory /home/game
+  ChrootDirectory /srv/game
   ForceCommand internal-sftp -u 0007
   AllowTcpForwarding all
   AllowStreamLocalForwarding all
@@ -2143,9 +2160,11 @@ setup_containers() {
   local container_private_users
   local container_user_home
   local container_macvlan
+  local container_uses_host_x11
 
   container_macvlan=
   for container_name in ${container_names}; do
+    container_uses_host_x11=
     case "${container_name}" in
     vivaldi-dev )
       container_ubuntu_version=bionic
@@ -2153,11 +2172,17 @@ setup_containers() {
       container_user_id=1000
       container_private_users=1637875712:65536
       container_user_home=/home/vwork
+      #container_uses_host_x11=1
       ;;
     * ) err "unknwon container name - ${container_name}" ;;
     esac
     setup_nspawn_container
   done
+
+  if has_value container_uses_host_x11; then
+    add_systemd_tmpfile_entry \
+      d "/tmp/.X11-unix" 01777 root root
+  fi
 }
 
 setup_nspawn_container() {
@@ -2231,6 +2256,10 @@ BindReadOnly=${settings_dir}/tliset.parent_name:/etc/tliset.parent_name
 BindReadOnly=${settings_dir}/tliset.name:/etc/tliset.name
 BindReadOnly=${settings_dir}/journald.conf:/etc/systemd/journald.conf
 "
+
+  if has_value container_uses_host_x11; then
+    pl BindReadOnly=/tmp/.X11-unix
+  fi
   if is_empty container_macvlan; then
     # As systemd-nspawn service templare has After: dependency on
     # systemd-resolved the bind source directory is always available
@@ -2454,7 +2483,7 @@ server {
   }
 
   location /files/ {
-    alias /var/lib/tormed/files-root/files/;
+    alias /srv/tormed/files-root/files/;
 
     directio 4m;
     output_buffers 1 1m;
@@ -2524,12 +2553,12 @@ server {
 setup_tormed_service() {
   test -n "${tormed_host}" || return 0
 
-  ensure_dir /var/lib/tormed
+  ensure_dir /srv/tormed
 
   local home_path
-  home_path="/var/lib/tormed/files-root/files"
+  home_path="/srv/tormed/files-root/files"
   ensure_user -d "${home_path}" tormed-files
-  ensure_dir /var/lib/tormed/files-root
+  ensure_dir /srv/tormed/files-root
   ensure_dir -m 02770 -g tormed-files "${home_path}"
 
   # Share "home" dir with tormed-files
@@ -2544,7 +2573,7 @@ setup_tormed_service() {
   local short_user full_user
   for short_user in service service2; do
     full_user="tormed-${short_user}"
-    home_path="/var/lib/tormed/${short_user}"
+    home_path="/srv/tormed/${short_user}"
     ensure_user -d "${home_path}" -G tormed-files "${full_user}"
     ensure_dir -m 0700 -u "${full_user}" -g "${full_user}" "${home_path}"
   done
@@ -2604,13 +2633,14 @@ usermod -p "${hash}" tormed-files
 <body>
 <h3><a href="files/">Files</a></h3>
 <h3><a href="transmission/web/">Tranmission web interface</a></h3>
+<h3><a href="transmission2/web/">Tranmission web interface 2</a></h3>
 </body>
 </html>
 '
 
   for short_user in service service2; do
     full_user="tormed-${short_user}"
-    home_path="/var/lib/tormed/${short_user}"
+    home_path="/srv/tormed/${short_user}"
     service_name="tormed-${short_user}"
     p_file "service:${service_name}.service" '
 [Service]
@@ -2622,8 +2652,8 @@ Restart=on-failure
 ExecStart=/var/lib/tliset/tormed-start-transmission
 
 WorkingDirectory='"${home_path}"'
-ReadWritePaths='"${home_path}"' /var/lib/tormed/files-root/files
-BindPaths=/var/lib/tormed/files-root/files:/files
+ReadWritePaths='"${home_path}"' /srv/tormed/files-root/files
+BindPaths=/srv/tormed/files-root/files:/files
 
 NoNewPrivileges=yes
 PrivateDevices=yes
@@ -2714,7 +2744,7 @@ setup_game_access_service() {
   has_value with_game_access || return 0
 
   local home_path
-  home_path="/home/game/top"
+  home_path="/srv/game/top"
   ensure_group game
   ensure_dir -m 0750 -g game "${home_path%/*}"
   ensure_user -m -d "${home_path}" -g game -s /bin/bash game
