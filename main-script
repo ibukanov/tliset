@@ -102,7 +102,7 @@ get_host_options() {
     with_custom_sshd=1
     #with_remote_ssh_unlock=1
     enable_tormed media.mir2.org
-    #with_game_access=1
+    with_game_access=1
     ;;
 
   oberon )
