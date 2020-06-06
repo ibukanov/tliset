@@ -69,7 +69,7 @@ sync {
     data_vol_reserved_percent=1
     ssh_host_port=15022
     ssh_proxy_port=15080
-    ssh_custom_agent=/run/tliset-ssh-agent/set-bergenrabbit.sock
+    ssh_custom_agent=/run/tliset-ssh-agent/bergenrabbit/socket
     ssh_forward_agent=1
     boot_script_custom='
 cmd_log mkdir -p -m 0755 /br
@@ -657,6 +657,7 @@ UserKnownHostsFile ${rundir}/ssh.known_hosts
 IdentityAgent ${SSH_AUTH_SOCK}
 IdentitiesOnly no
 IdentityFile none
+ControlPath ${rundir}/ssh-control-%C.socket
 "
   if test -n "${ssh_forward_agent}"; then
     ssh_config="${ssh_config}ForwardAgent yes${NL}"
@@ -770,8 +771,9 @@ start_vm() {
     if test -n "${ssh_proxy_port}"; then
       earg -o DynamicForward="${ssh_proxy_port}"
     fi
+    #earg -v
     earg -f -N "${VM}"
-    eval "${ecmd}" && break
+    eval "cmd_log ${ecmd}" && break
     kill -n 0 "${qemu_pid}" || err "unexpected qemu exit"
     : "$((i+=1))"
     if test 150 -le "$((i+=1))"; then
@@ -818,7 +820,7 @@ setup_and_run_vm() {
     start_user_unit=
   fi
 
-  if test -n "${start_user_unit}"; then
+  if test "${start_user_unit}"; then
     setup_vm_images
     setup_vm_config
     mkdir -p "${user_unit_dir}"
@@ -833,9 +835,9 @@ PIDFile='"${rundir}/pid"'
     systemctl --user daemon-reload
 
     log "Starting ${VM} VM"
-    #if :; then
-    #  start_vm
-    #fi
+    if ! :; then
+      start_vm
+    fi
     systemctl --user start "${user_unit}"
   fi
 }
@@ -855,6 +857,7 @@ if test internal = "${command}"; then
   internal_command="$1"
   get_config "$2"
   shift 2
+  log "running internal command ${internal_command}"
   case "${internal_command}" in
   start_vm ) start_vm "$@" ;;
   stop_vm ) stop_vm "$@" ;;
