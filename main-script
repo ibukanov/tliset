@@ -28,6 +28,7 @@ get_host_options() {
   custom_user_watches_count=
   with_disabled_selinux=
   with_disabled_firewalld=
+  with_persistent_journald=
 
   with_latex=
   with_common_packages=
@@ -97,6 +98,7 @@ get_host_options() {
     zram_algorithm=lz4
     #with_stub_resolv_conf=1
     #with_forced_networkd=1
+    with_persistent_journald=1
     with_custom_sshd=1
     #with_remote_ssh_unlock=1
     enable_tormed media.mir2.org
@@ -1017,6 +1019,10 @@ setup_apt_packages() {
     earg at-spi2-core
   fi
 
+  if has_value with_persistent_journald; then
+    earg rsyslog
+  fi
+
   local escaped_remove_list
   escaped_remove_list="${eargs}"
 
@@ -1426,6 +1432,21 @@ omit_dracutmodules+="ifcfg network-legacy network-manager"
     else
       err "Unsupported OS kind for with_remote_ssh_unlock"
     fi
+  fi
+}
+
+setup_log() {
+  has_value with_persistent_journald || return 0
+
+  ensure_dir /etc/systemd/journald.conf.d
+  write_file /etc/systemd/journald.conf.d/tliset.conf "\
+[Journal]
+Storage=persistent
+ForwardToSyslog=no
+"
+  if has_value file_update; then
+    cmd_log systemctl restart systemd-journald.service
+    cmd_log journalctl --flush
   fi
 }
 
@@ -2892,6 +2913,7 @@ run_setup() {
 
   start_generator_write
 
+  setup_log
   setup_network
 
   # Setup sshd before we try to setup sshd packages to have sshd_config ready
