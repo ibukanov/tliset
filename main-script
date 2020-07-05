@@ -12,7 +12,9 @@ set -u -e
 LANG=C.UTF-8
 export LANG
 
-valid_primary_host_names="bergenrabbit.net oberon r2.mir2.org r3.mir2.org rhea test-br"
+valid_primary_host_names="eridan rhea"
+valid_primary_host_names="${valid_primary_host_names} bergenrabbit.net test-br"
+valid_primary_host_names="${valid_primary_host_names} r3.mir2.org"
 valid_chroot_host_names="vivaldi-dev"
 valid_host_names="${valid_primary_host_names} ${valid_chroot_host_names}"
 
@@ -34,6 +36,7 @@ get_host_options() {
   with_common_packages=
   with_common_development_tools=
   with_include_rpmfusion=
+  with_vm_tools=
 
   # Main user - must be when needed
   unset main_user
@@ -124,7 +127,21 @@ get_host_options() {
     with_encrypted_dns=1
 
     container_names=vivaldi-dev
-      ;;
+    ;;
+  eridan )
+    main_user=igor
+    with_common_packages=1
+    with_latex=1
+    with_vm_tools=1
+    zram_size=28G
+    zram_algorithm=lz4hc
+
+    #with_stub_resolv_conf=1
+    #with_encrypted_dns=1
+
+    custom_user_watches_count="$((768*1025))"
+    with_ssh_agent_service=1
+    ;;
   rhea )
     main_user=igor
     with_common_packages=1
@@ -828,10 +845,10 @@ setup_rpm_packages() {
     earg xfce4-terminal
 
     # filesystems
-    earg udftools inotify-tools fdupes fslint mtools
+    earg udftools inotify-tools fdupes rdfind mtools
 
     # encryption and backup
-    earg apg duplicity perl-Digest-Bcrypt
+    earg apg duplicity perl-Digest-Bcrypt borgbackup ccrypt
 
     # Recovery tools
     earg ddrescue foremost scalpel testdisk
@@ -890,7 +907,7 @@ setup_rpm_packages() {
 
   earg gcc kernel-devel
 
-  if test rhea = "${NAME}"; then
+  if has_value with_vm_tools; then
     earg libguestfs-tools
   fi
 
@@ -2120,7 +2137,7 @@ setup_ssh_agent_key_set() {
 
   # TODO: avoif this hard-codding
   local access_group
-  if test vivaldi-dev = "${name}"; then
+  if test "${NAME}" = rhea && test vivaldi-dev = "${name}"; then
     access_group="tliset-${name}"
   else
     access_group="${main_user}"
