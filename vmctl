@@ -639,8 +639,10 @@ d-i preseed/late_command string in-target /bin/sh -c 'printf %s ${end_install_sc
       ecmd=qemu-system-x86_64
       earg -net user -net nic,model=virtio -m 2G
       earg -drive if=virtio,index=0,format=qcow2,file="${initial_vol}.tmp"
+      earg -vga none
+      earg -nographic
       earg -kernel linux -initrd initrd
-      earg -nographic -append 'DEBIAN_FRONTEND=text vga=off console=ttyS0,115200n8 --- quiet'
+      earg -append 'DEBIAN_FRONTEND=text console=ttyS0,115200n8 --- quiet'
       eval "${ecmd}"
 
       if test -e root_fs; then
@@ -787,11 +789,12 @@ start_vm() {
   #  exit 1
   #fi
 
+  earg -vga none
   earg -nographic
   #earg -monitor none
   earg -qmp "unix:${rundir}/qmp-sock,server,nowait"
   earg -parallel none
-  #earg -vga none
+  #earg -serial file:"${rundir}/log"
   { eval "cmd_log ${ecmd}"; } < /dev/null > "${rundir}/log" 2>&1 &
   local qemu_pid
   qemu_pid="$!"
