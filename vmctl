@@ -129,21 +129,24 @@ sync {
   readonly user_unit="${VM}.service"
   readonly user_unit_path="${user_unit_dir}/${user_unit}"
 
+  vm_dir_root=/srv/vm
+  readonly vm_dir_root
+
   if is_coreos; then
-    readonly dir=/vol/vm/coreos
+    readonly dir="${vm_dir_root}/coreos"
     readonly ssh_user=core
   elif is_debian; then
-    readonly dir=/vol/vm/debian
+    readonly dir="${vm_dir_root}/debian"
     readonly ssh_user=root
   elif is_centos; then
-    readonly dir=/vol/vm/centos
+    readonly dir="${vm_dir_root}/centos"
     readonly ssh_user=root
   fi
 
   readonly rundir="${XDG_RUNTIME_DIR}/vm/${VM}"
 
   main_vol="${VM}-main.img"
-  data_vol_path="/vol/data/${VM}-data.img"
+  data_vol_path="${vm_dir_root}/data/${VM}-data.img"
   if is_debian; then
     main_vol="${VM}-main.qcow2"
   fi
@@ -222,7 +225,38 @@ check_gpg_signature() {
   fi
 }
 
+# COW or Copy-On-Write support
+is_cow_disabled() {
+  local directory
+  directory="$1"
+  R=
+
+  local s
+  s="$(lsattr -d "${directory}")"
+  s="${s%% *}"
+  case "${s}" in
+  *C* ) R=1; return 0 ;;
+  esac
+  
+  # Check if filesystem supports COW at all
+  s="$(df --output=fstype "${directory}")"
+  s="${s##*"${NL}"}"
+  case "${s}" in
+  ext2 | ext3 | ext4 ) R=1 ;;
+  btrfs | xfs ) ;;
+  * ) err "Status of COW support for the filesystem ${s} is not known" ;;
+  esac
+}
+
 setup_vm_images() {
+  if ! test -d "${vm_dir_root}"; then
+    err "${vm_dir_root} does not exist"
+  fi
+  is_cow_disabled "${vm_dir_root}"
+  if test -z "${R}"; then
+    err "Use the command ${NL}  sudo chattr -R +C '${vm_dir_root}'${NL}to" \
+        "disable COW"
+  fi
   if ! test -d "${dir}"; then
     mkdir -p "${dir}"
   fi
@@ -609,6 +643,10 @@ d-i preseed/late_command string in-target /bin/sh -c 'printf %s ${end_install_sc
       earg -nographic -append 'DEBIAN_FRONTEND=text vga=off console=ttyS0,115200n8 --- quiet'
       eval "${ecmd}"
 
+      if test -e root_fs; then
+        # leftover from a previous run. It must be an empty directory.
+        rmdir root_fs
+      fi
       mkdir root_fs
       guestmount -a "${initial_vol}.tmp" -m /dev/sda1 root_fs
       if ! test -f root_fs/.initialized ; then
