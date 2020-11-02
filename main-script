@@ -855,6 +855,9 @@ setup_rpm_packages() {
     # Languages
     earg hunspell-ru hunspell-nb
 
+    # SELinux helpers
+    earg libselinux-devel
+
     if test -n "${with_include_rpmfusion}"; then
       # Archives
       earg unrar libunrar
