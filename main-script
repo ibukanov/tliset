@@ -81,7 +81,7 @@ get_host_options() {
     lms_archive_root=/srv/backup/br
     #explicit_ipv6_address="2001:41d0:e:696::1/64"
     #explicit_ipv6_gateway="2001:41d0:e:6ff:ff:ff:ff:ff"
-    zram_size=3072M
+    zram_size=8G
     zram_algorithm=lz4
     with_stub_resolv_conf=1
     with_forced_networkd=1
