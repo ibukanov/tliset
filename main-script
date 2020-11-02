@@ -14,7 +14,7 @@ export LANG
 
 valid_primary_host_names="eridan rhea"
 valid_primary_host_names="${valid_primary_host_names} bergenrabbit.net test-br"
-valid_primary_host_names="${valid_primary_host_names} r3.mir2.org"
+valid_primary_host_names="${valid_primary_host_names} r2.mir2.org"
 valid_chroot_host_names="vivaldi-dev"
 valid_host_names="${valid_primary_host_names} ${valid_chroot_host_names}"
 
@@ -88,22 +88,6 @@ get_host_options() {
     with_custom_sshd=1
     #with_remote_ssh_unlock=1
     with_nginx=1
-    enable_tormed media.mir2.org
-    with_game_access=1
-    ;;
-
-  r3.mir2.org )
-    lms_archive_time=01:50:00
-    lms_archive_root=/srv/backup/lms
-    #explicit_ipv6_address="2001:41d0:e:696::1/64"
-    #explicit_ipv6_gateway="2001:41d0:e:6ff:ff:ff:ff:ff"
-    zram_size=3072M
-    zram_algorithm=lz4
-    #with_stub_resolv_conf=1
-    #with_forced_networkd=1
-    with_persistent_journald=1
-    with_custom_sshd=1
-    #with_remote_ssh_unlock=1
     enable_tormed media.mir2.org
     with_game_access=1
     ;;
