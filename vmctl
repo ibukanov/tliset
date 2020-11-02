@@ -79,7 +79,7 @@ cmd_log mount -t ext4 /dev/vdb /br
 sync {
    default.rsync,
    source = '${HOME}/p/bergenrabbit',
-   target = 'root@${VM}:/br/opt/2',
+   target = 'root@${VM}:/br/srv/opt/2',
    exclude = { '/compiled', '/gosrc' },
    delay = 1,
    rsync = {
@@ -93,7 +93,7 @@ sync {
 sync {
    default.rsync,
    source = '${HOME}/p/bergenrabbit/gosrc',
-   target = 'br-build@${VM}:/br/opt/2/gosrc',
+   target = 'br-build@${VM}:/br/srv/opt/2/gosrc',
    delay = 1,
    rsync = {
       perms = true,

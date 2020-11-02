@@ -78,7 +78,7 @@ get_host_options() {
     ;;
   r2.mir2.org )
     lms_archive_time=01:40:00
-    lms_archive_root=/srv/backup/br
+    lms_archive_root=/srv/backup/lms
     #explicit_ipv6_address="2001:41d0:e:696::1/64"
     #explicit_ipv6_gateway="2001:41d0:e:6ff:ff:ff:ff:ff"
     zram_size=8G
@@ -1865,8 +1865,6 @@ backup_from_host() {
   local ok=1
   rsync "$@" --backup --backup-dir="${changed_files}.srv" \
     "rsync://$host_name/srv/" "$files/srv/" || ok=
-  rsync "$@" --backup --backup-dir="${changed_files}.opt" \
-    "rsync://$host_name/opt/" "$files/opt/" || ok=
   if test "${ok}"; then
     local i cur_time
     cur_time="$(date +%s)"
